@@ -1196,7 +1196,7 @@ namespace {
         return h($array[$key] ?? $default);
     }
 
-    function sGet(?array $array, string|int $key, mixed $default = null): mixed {
+    function getS(?array $array, string|int $key, mixed $default = null): mixed {
         if ($array === null) {
             return $default;
         }
@@ -1204,15 +1204,15 @@ namespace {
         return $array[$key] ?? $default;
     }
 
-    function mlen(?string $s): int {
+    function mb_strlenS(?string $s): int {
         return mb_strlen($s ?? '');
     }
 
-    function msub(?string $s, int $start, ?int $length = null): string {
+    function mb_substrS(?string $s, int $start, ?int $length = null): string {
         return mb_substr($s ?? '', $start, $length);
     }
 
-    function sTrim(mixed $value, string $characters = " \n\r\t\v\x00"): string {
+    function trimS(mixed $value, string $characters = " \n\r\t\v\x00"): string {
         if ($value === null) {
             return '';
         }
@@ -1220,7 +1220,7 @@ namespace {
         return trim((string) $value, $characters);
     }
 
-    function stt(mixed $date): int|false {
+    function strtotimeS(mixed $date): int|false {
         if ($date === null || $date === '') {
             return false;
         }
@@ -1228,11 +1228,11 @@ namespace {
         return strtotime((string) $date);
     }
 
-    function sStrip(mixed $s): string {
+    function strip_tagsS(mixed $s): string {
         return trim(strip_tags((string) ($s ?? '')));
     }
 
-    function sCount(mixed $value): int {
+    function countS(mixed $value): int {
         if ($value === null) {
             return 0;
         }
@@ -1242,7 +1242,7 @@ namespace {
         return 0;
     }
 
-    function sExplode(string $separator, mixed $string, int $limit = PHP_INT_MAX): array {
+    function explodeS(string $separator, mixed $string, int $limit = PHP_INT_MAX): array {
         if ($string === null || $string === '' || $string === []) {
             return [];
         }

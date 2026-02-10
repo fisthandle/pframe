@@ -25,7 +25,9 @@ HttpException, Request, Response, App, Db, View, Session, Csrf, Flash, Controlle
 
 ## Globalne helpery
 
-`h()`, `ha()`, `sGet()`, `mlen()`, `msub()`, `sTrim()`, `stt()`, `sStrip()`, `sCount()`, `sExplode()`
+`h()`, `ha()`, `getS()`, `mb_strlenS()`, `mb_substrS()`, `trimS()`, `strtotimeS()`, `strip_tagsS()`, `countS()`, `explodeS()`
+
+Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 
 ## Testy
 
