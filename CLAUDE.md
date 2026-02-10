@@ -17,7 +17,11 @@ Single-file PHP 8.4+ micro-framework. Zero dependencies, copy-paste deployment.
 
 ## Klasy (P1 namespace)
 
-HttpException, Request, Response, App, Db, View, Session, Csrf, Flash, Controller, Log, Validator, Cache, P1 (fasada)
+HttpException, Request, Response, App, Db, View, Session, Csrf, Flash, Controller, Log, Validator, Cache, Base (fasada)
+
+## Fasada Base
+
+`P1\Base` — statyczne shortcuty do app/db/config. Projekty definiują własną klasę `P1 extends \P1\Base` z project-specific stałymi i helperami.
 
 ## Globalne helpery
 
