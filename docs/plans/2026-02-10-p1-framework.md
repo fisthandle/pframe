@@ -135,12 +135,14 @@ return [
     'view_path' => dirname(__DIR__) . '/templates',
     'log_path' => dirname(__DIR__) . '/logs',
     'cache_path' => dirname(__DIR__) . '/tmp/cache',
+    'trusted_proxies' => ['10.0.0.1'],
     'db' => [
         'host' => 'localhost',
         'port' => 3306,
         'name' => 'myapp',
         'user' => 'root',
         'pass' => 'secret',
+        'log_queries' => false,
     ],
     'smtp' => [
         'host' => 'smtp.gmail.com',
@@ -152,6 +154,28 @@ return [
     ],
 ];
 ```
+
+## Security / Ops Additions
+
+```php
+// Security headers (CSP, HSTS for HTTPS, XFO, XCTO, Referrer, Permissions)
+$app->addSecurityHeaders();
+
+// Recommended session hardening
+$session = new P1\Session(P1::db());
+$session->register([
+    'secure' => true,     // set true on HTTPS
+    'samesite' => 'Lax',  // or 'Strict' for stricter apps
+]);
+session_start();
+
+// After login
+$session->regenerate();
+```
+
+Notes:
+- `trusted_proxies` enables safe IP resolution from `X-Forwarded-For`.
+- `db.log_queries` controls SQL logging; default is `false`.
 
 ---
 

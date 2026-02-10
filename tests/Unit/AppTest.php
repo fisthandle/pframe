@@ -153,6 +153,31 @@ class AppTest extends TestCase {
         $this->assertSame('max-age=63072000; includeSubDomains; preload', $response->headers['Strict-Transport-Security'] ?? null);
     }
 
+    public function testSecurityHeadersDoesNotTrustForwardedProtoFromUntrustedProxy(): void {
+        $app = new App();
+        $app->setConfig('trusted_proxies', ['10.0.0.1']);
+        $app->addSecurityHeaders();
+        $app->get('/', HelloStub::class, 'index');
+
+        $response = $app->handle(new Request(
+            method: 'GET',
+            path: '/',
+            server: ['REMOTE_ADDR' => '203.0.113.5'],
+            headers: ['X-Forwarded-Proto' => 'https'],
+        ));
+        $this->assertArrayHasKey('Content-Security-Policy', $response->headers);
+        $this->assertArrayNotHasKey('Strict-Transport-Security', $response->headers);
+    }
+
+    public function testSecurityHeadersAllowDisablingHsts(): void {
+        $app = new App();
+        $app->addSecurityHeaders(['Strict-Transport-Security' => null]);
+        $app->get('/', HelloStub::class, 'index');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/', server: ['HTTPS' => 'on']));
+        $this->assertArrayNotHasKey('Strict-Transport-Security', $response->headers);
+    }
+
     public function testHttpExceptionMessageDependsOnDebug(): void {
         $app = new App();
         $app->setConfig('debug', 0);

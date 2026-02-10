@@ -92,6 +92,15 @@ class FullCycleTest extends TestCase {
         $this->assertArrayHasKey('Content-Security-Policy', $response->headers);
         $this->assertSame('max-age=63072000; includeSubDomains; preload', $response->headers['Strict-Transport-Security'] ?? null);
     }
+
+    public function testSecurityHeadersAllowDisablingHsts(): void {
+        $app = new App();
+        $app->addSecurityHeaders(['Strict-Transport-Security' => null]);
+        $app->get('/', TestHomeCtrl::class, 'index');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/', server: ['HTTPS' => 'on']));
+        $this->assertArrayNotHasKey('Strict-Transport-Security', $response->headers);
+    }
 }
 
 class TestHomeCtrl extends Controller {

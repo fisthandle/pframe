@@ -51,6 +51,18 @@ class DbTest extends TestCase {
         $this->assertCount(2, $rows);
     }
 
+    public function testExecSelectWithLeadingComment(): void {
+        $rows = $this->db->exec("-- comment\nSELECT * FROM users ORDER BY id");
+        $this->assertIsArray($rows);
+        $this->assertCount(2, $rows);
+    }
+
+    public function testExecSelectWithCte(): void {
+        $rows = $this->db->exec('WITH cte AS (SELECT * FROM users) SELECT * FROM cte');
+        $this->assertIsArray($rows);
+        $this->assertCount(2, $rows);
+    }
+
     public function testInsertGetId(): void {
         $this->assertSame(3, $this->db->insertGetId('INSERT INTO users (name, email) VALUES (?, ?)', ['New', 'new@x.com']));
     }

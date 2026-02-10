@@ -143,12 +143,14 @@ namespace P1 {
                     if ($ip === '' || in_array($ip, $trustedProxies, true)) {
                         continue;
                     }
-                    return $ip;
+                    if (filter_var($ip, FILTER_VALIDATE_IP)) {
+                        return $ip;
+                    }
                 }
             }
 
             $realIp = (string) ($server['HTTP_X_REAL_IP'] ?? '');
-            if ($realIp !== '') {
+            if ($realIp !== '' && filter_var($realIp, FILTER_VALIDATE_IP)) {
                 return $realIp;
             }
 
@@ -571,17 +573,13 @@ namespace P1 {
                 'Content-Security-Policy' => "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
             ];
             foreach ($overrides as $name => $value) {
-                if ($value === null) {
-                    unset($headers[$name]);
-                    continue;
-                }
                 $headers[$name] = $value;
             }
 
             $this->addMiddleware(function (Request $req, callable $next) use ($headers): Response {
                 $response = $next($req);
                 $finalHeaders = $headers;
-                if (!isset($finalHeaders['Strict-Transport-Security']) && $this->isHttps($req)) {
+                if (!array_key_exists('Strict-Transport-Security', $finalHeaders) && $this->isHttps($req)) {
                     $finalHeaders['Strict-Transport-Security'] = 'max-age=63072000; includeSubDomains; preload';
                 }
 
@@ -610,11 +608,26 @@ namespace P1 {
             if ($https !== '' && $https !== 'off') {
                 return true;
             }
+            if (!$this->isFromTrustedProxy($request)) {
+                return false;
+            }
             return strtolower((string) ($request->header('X-Forwarded-Proto') ?? '')) === 'https';
+        }
+
+        private function isFromTrustedProxy(Request $request): bool {
+            $trusted = $this->config('trusted_proxies', []);
+            if (!is_array($trusted) || $trusted === []) {
+                return false;
+            }
+            $remote = (string) ($request->server['REMOTE_ADDR'] ?? '');
+            return $remote !== '' && in_array($remote, $trusted, true);
         }
 
         private function withErrorHandler(callable $callback): Response {
             set_error_handler(function (int $severity, string $message, string $file, int $line): bool {
+                if (error_reporting() === 0) {
+                    return false;
+                }
                 $alwaysThrow = [E_WARNING, E_USER_WARNING, E_RECOVERABLE_ERROR, E_USER_ERROR];
                 if (!in_array($severity, $alwaysThrow, true) && !(error_reporting() & $severity)) {
                     return false;
@@ -757,7 +770,7 @@ namespace P1 {
 
         public function exec(string $sql, array|string|null $params = null): int|array {
             $stmt = $this->run($sql, $params);
-            if (stripos(ltrim($sql), 'SELECT') === 0) {
+            if ($this->isSelectQuery($sql)) {
                 return $stmt->fetchAll();
             }
             return $stmt->rowCount();
@@ -800,6 +813,125 @@ namespace P1 {
 
         public function placeholders(array $items): string {
             return implode(', ', array_fill(0, count($items), '?'));
+        }
+
+        private function isSelectQuery(string $sql): bool {
+            $sql = $this->stripLeadingComments($sql);
+            if ($sql === '') {
+                return false;
+            }
+            if (preg_match('/^(SELECT|PRAGMA|SHOW|DESCRIBE|EXPLAIN)\b/i', $sql)) {
+                return true;
+            }
+            if (!preg_match('/^WITH\b/i', $sql)) {
+                return false;
+            }
+            $statement = $this->statementAfterWith($sql);
+            return $statement !== null && in_array($statement, ['SELECT', 'PRAGMA', 'SHOW', 'DESCRIBE', 'EXPLAIN'], true);
+        }
+
+        private function stripLeadingComments(string $sql): string {
+            $s = ltrim($sql);
+            while (true) {
+                if (str_starts_with($s, '--')) {
+                    $pos = strpos($s, "\n");
+                    if ($pos === false) {
+                        return '';
+                    }
+                    $s = ltrim(substr($s, $pos + 1));
+                    continue;
+                }
+                if (str_starts_with($s, '#')) {
+                    $pos = strpos($s, "\n");
+                    if ($pos === false) {
+                        return '';
+                    }
+                    $s = ltrim(substr($s, $pos + 1));
+                    continue;
+                }
+                if (str_starts_with($s, '/*')) {
+                    $pos = strpos($s, '*/');
+                    if ($pos === false) {
+                        return '';
+                    }
+                    $s = ltrim(substr($s, $pos + 2));
+                    continue;
+                }
+                break;
+            }
+            return $s;
+        }
+
+        private function statementAfterWith(string $sql): ?string {
+            $len = strlen($sql);
+            $offset = 0;
+            if (preg_match('/^\s*WITH\b/i', $sql, $match)) {
+                $offset = strlen($match[0]);
+            }
+
+            $depth = 0;
+            $seenCte = false;
+            $inSingle = false;
+            $inDouble = false;
+            $inBacktick = false;
+
+            for ($i = $offset; $i < $len; $i++) {
+                $ch = $sql[$i];
+                if ($inSingle) {
+                    if ($ch === "'" && ($i === 0 || $sql[$i - 1] !== '\\')) {
+                        $inSingle = false;
+                    }
+                    continue;
+                }
+                if ($inDouble) {
+                    if ($ch === '"' && ($i === 0 || $sql[$i - 1] !== '\\')) {
+                        $inDouble = false;
+                    }
+                    continue;
+                }
+                if ($inBacktick) {
+                    if ($ch === '`') {
+                        $inBacktick = false;
+                    }
+                    continue;
+                }
+
+                if ($ch === "'") {
+                    $inSingle = true;
+                    continue;
+                }
+                if ($ch === '"') {
+                    $inDouble = true;
+                    continue;
+                }
+                if ($ch === '`') {
+                    $inBacktick = true;
+                    continue;
+                }
+                if ($ch === '(') {
+                    $depth++;
+                    continue;
+                }
+                if ($ch === ')') {
+                    if ($depth > 0) {
+                        $depth--;
+                    }
+                    if ($depth === 0) {
+                        $seenCte = true;
+                    }
+                    continue;
+                }
+
+                if ($seenCte && $depth === 0 && ctype_alpha($ch)) {
+                    $start = $i;
+                    while ($i < $len && ctype_alpha($sql[$i])) {
+                        $i++;
+                    }
+                    return strtoupper(substr($sql, $start, $i - $start));
+                }
+            }
+
+            return null;
         }
     }
 
