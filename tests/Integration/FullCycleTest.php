@@ -71,6 +71,27 @@ class FullCycleTest extends TestCase {
         $response = $app->handle(new Request(method: 'HEAD', path: '/ping'));
         $this->assertSame(200, $response->status);
     }
+
+    public function testMethodNotAllowedReturns405(): void {
+        $app = new App();
+        $app->get('/only-get', TestHomeCtrl::class, 'index');
+
+        $response = $app->handle(new Request(method: 'POST', path: '/only-get'));
+        $this->assertSame(405, $response->status);
+        $this->assertSame('GET, HEAD', $response->headers['Allow'] ?? null);
+    }
+
+    public function testSecurityHeadersMiddlewareAddsDefaults(): void {
+        $app = new App();
+        $app->addSecurityHeaders();
+        $app->get('/', TestHomeCtrl::class, 'index');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/', server: ['HTTPS' => 'on']));
+        $this->assertSame('DENY', $response->headers['X-Frame-Options'] ?? null);
+        $this->assertSame('nosniff', $response->headers['X-Content-Type-Options'] ?? null);
+        $this->assertArrayHasKey('Content-Security-Policy', $response->headers);
+        $this->assertSame('max-age=63072000; includeSubDomains; preload', $response->headers['Strict-Transport-Security'] ?? null);
+    }
 }
 
 class TestHomeCtrl extends Controller {

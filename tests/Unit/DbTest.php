@@ -83,7 +83,7 @@ class DbTest extends TestCase {
     }
 
     public function testQueryLog(): void {
-        $db = new Db(['dsn' => 'sqlite::memory:']);
+        $db = new Db(['dsn' => 'sqlite::memory:', 'log_queries' => true]);
         $this->assertSame(0, $db->queryCount());
 
         $db->exec('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)');

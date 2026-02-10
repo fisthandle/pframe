@@ -14,6 +14,7 @@ namespace P1 {
             public readonly int $statusCode,
             string $message = '',
             ?\Throwable $previous = null,
+            public readonly array $headers = [],
         ) {
             parent::__construct($message, $statusCode, $previous);
         }
@@ -28,6 +29,18 @@ namespace P1 {
 
         public static function unauthorized(string $msg = 'Unauthorized'): static {
             return new static(401, $msg);
+        }
+
+        public static function methodNotAllowed(array $allowed, string $msg = 'Method Not Allowed'): static {
+            $methods = [];
+            foreach ($allowed as $method) {
+                $m = strtoupper((string) $method);
+                if (!isset($methods[$m])) {
+                    $methods[$m] = true;
+                }
+            }
+            $allow = implode(', ', array_keys($methods));
+            return new static(405, $msg, null, ['Allow' => $allow]);
         }
     }
 
@@ -79,6 +92,67 @@ namespace P1 {
                 ip: (string) ($_SERVER['REMOTE_ADDR'] ?? ''),
                 body: (string) (file_get_contents('php://input') ?: ''),
             );
+        }
+
+        public static function fromGlobalsWithProxies(array $trustedProxies = []): static {
+            $uri = $_SERVER['REQUEST_URI'] ?? '/';
+            $path = parse_url($uri, PHP_URL_PATH) ?: '/';
+
+            $headers = [];
+            foreach ($_SERVER as $key => $value) {
+                if (!str_starts_with($key, 'HTTP_')) {
+                    continue;
+                }
+                $name = str_replace('_', '-', substr($key, 5));
+                $headers[ucwords(strtolower($name), '-')] = (string) $value;
+            }
+            if (isset($_SERVER['CONTENT_TYPE'])) {
+                $headers['Content-Type'] = (string) $_SERVER['CONTENT_TYPE'];
+            }
+            if (isset($_SERVER['CONTENT_LENGTH'])) {
+                $headers['Content-Length'] = (string) $_SERVER['CONTENT_LENGTH'];
+            }
+
+            return new static(
+                method: strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')),
+                path: (string) $path,
+                query: $_GET,
+                post: $_POST,
+                server: $_SERVER,
+                headers: $headers,
+                cookies: $_COOKIE,
+                files: $_FILES,
+                ip: self::resolveIp($_SERVER, $headers, $trustedProxies),
+                body: (string) (file_get_contents('php://input') ?: ''),
+            );
+        }
+
+        private static function resolveIp(array $server, array $headers, array $trustedProxies): string {
+            $remoteAddr = (string) ($server['REMOTE_ADDR'] ?? '');
+            if ($remoteAddr === '') {
+                return '';
+            }
+
+            if ($trustedProxies === [] || !in_array($remoteAddr, $trustedProxies, true)) {
+                return $remoteAddr;
+            }
+
+            $xff = (string) ($server['HTTP_X_FORWARDED_FOR'] ?? '');
+            if ($xff !== '') {
+                foreach (array_map('trim', explode(',', $xff)) as $ip) {
+                    if ($ip === '' || in_array($ip, $trustedProxies, true)) {
+                        continue;
+                    }
+                    return $ip;
+                }
+            }
+
+            $realIp = (string) ($server['HTTP_X_REAL_IP'] ?? '');
+            if ($realIp !== '') {
+                return $realIp;
+            }
+
+            return $remoteAddr;
         }
 
         public function query(string $key, mixed $default = null): mixed {
@@ -180,6 +254,7 @@ namespace P1 {
 
     class App {
         private static ?self $instance = null;
+        private static bool $shutdownRegistered = false;
 
         private array $configData = [];
 
@@ -199,6 +274,7 @@ namespace P1 {
         public function __construct() {
             $this->startTime = microtime(true);
             self::$instance = $this;
+            $this->registerErrorHandlers();
         }
 
         public function elapsed(): float {
@@ -357,13 +433,15 @@ namespace P1 {
                 $handler = fn (Request $req): Response => $mw($req, $next);
             }
 
-            try {
-                return $handler($request);
-            } catch (HttpException $e) {
-                return $this->handleHttpException($e);
-            } catch (\Throwable $e) {
-                return $this->handleException($e);
-            }
+            return $this->withErrorHandler(function () use ($handler, $request): Response {
+                try {
+                    return $handler($request);
+                } catch (HttpException $e) {
+                    return $this->handleHttpException($e);
+                } catch (\Throwable $e) {
+                    return $this->handleException($e);
+                }
+            });
         }
 
         private function dispatch(Request $request): Response {
@@ -390,14 +468,18 @@ namespace P1 {
 
         private function matchRoute(string $method, string $path, bool $isAjax): ?array {
             $method = strtoupper($method);
+            $allowed = [];
             foreach ($this->routes as $route) {
-                if (!in_array($method, $route['methods'], true)) {
+                if (!preg_match($route['regex'], $path, $matches)) {
                     continue;
                 }
                 if ($route['ajax'] && !$isAjax) {
                     continue;
                 }
-                if (!preg_match($route['regex'], $path, $matches)) {
+                if (!in_array($method, $route['methods'], true)) {
+                    foreach ($route['methods'] as $allowedMethod) {
+                        $allowed[$allowedMethod] = true;
+                    }
                     continue;
                 }
 
@@ -412,6 +494,10 @@ namespace P1 {
                     'params' => $params,
                     'middleware' => $route['middleware'],
                 ];
+            }
+
+            if ($allowed !== []) {
+                throw HttpException::methodNotAllowed(array_keys($allowed));
             }
 
             return null;
@@ -457,12 +543,18 @@ namespace P1 {
                 401 => 'Wymagane logowanie',
                 403 => 'Brak dostępu',
                 404 => 'Nie znaleziono',
+                405 => 'Niedozwolona metoda',
                 default => 'Błąd serwera',
             };
-            return new Response($body, $e->statusCode);
+            return new Response($body, $e->statusCode, $e->headers);
         }
 
         private function handleException(\Throwable $e): Response {
+            Log::error('Unhandled exception', [
+                'message' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            ]);
             $debug = (int) $this->config('debug', 0);
             $body = $debug >= 3
                 ? $e->getMessage() . "\n" . $e->getTraceAsString()
@@ -470,8 +562,114 @@ namespace P1 {
             return new Response($body, 500);
         }
 
+        public function addSecurityHeaders(array $overrides = []): void {
+            $headers = [
+                'X-Frame-Options' => 'DENY',
+                'X-Content-Type-Options' => 'nosniff',
+                'Referrer-Policy' => 'strict-origin-when-cross-origin',
+                'Permissions-Policy' => 'geolocation=(), microphone=(), camera=()',
+                'Content-Security-Policy' => "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+            ];
+            foreach ($overrides as $name => $value) {
+                if ($value === null) {
+                    unset($headers[$name]);
+                    continue;
+                }
+                $headers[$name] = $value;
+            }
+
+            $this->addMiddleware(function (Request $req, callable $next) use ($headers): Response {
+                $response = $next($req);
+                $finalHeaders = $headers;
+                if (!isset($finalHeaders['Strict-Transport-Security']) && $this->isHttps($req)) {
+                    $finalHeaders['Strict-Transport-Security'] = 'max-age=63072000; includeSubDomains; preload';
+                }
+
+                foreach ($finalHeaders as $name => $value) {
+                    if ($value === null) {
+                        continue;
+                    }
+                    $exists = false;
+                    foreach ($response->headers as $key => $_) {
+                        if (strcasecmp((string) $key, (string) $name) === 0) {
+                            $exists = true;
+                            break;
+                        }
+                    }
+                    if (!$exists) {
+                        $response->headers[$name] = $value;
+                    }
+                }
+
+                return $response;
+            });
+        }
+
+        private function isHttps(Request $request): bool {
+            $https = strtolower((string) ($request->server['HTTPS'] ?? ''));
+            if ($https !== '' && $https !== 'off') {
+                return true;
+            }
+            return strtolower((string) ($request->header('X-Forwarded-Proto') ?? '')) === 'https';
+        }
+
+        private function withErrorHandler(callable $callback): Response {
+            set_error_handler(function (int $severity, string $message, string $file, int $line): bool {
+                $alwaysThrow = [E_WARNING, E_USER_WARNING, E_RECOVERABLE_ERROR, E_USER_ERROR];
+                if (!in_array($severity, $alwaysThrow, true) && !(error_reporting() & $severity)) {
+                    return false;
+                }
+                throw new \ErrorException($message, 0, $severity, $file, $line);
+            });
+
+            try {
+                return $callback();
+            } finally {
+                restore_error_handler();
+            }
+        }
+
+        private function registerErrorHandlers(): void {
+            if (self::$shutdownRegistered) {
+                return;
+            }
+
+            register_shutdown_function(function (): void {
+                $error = error_get_last();
+                if ($error === null) {
+                    return;
+                }
+                if (!in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+                    return;
+                }
+
+                Log::error('Fatal error', [
+                    'message' => (string) ($error['message'] ?? ''),
+                    'file' => (string) ($error['file'] ?? ''),
+                    'line' => (int) ($error['line'] ?? 0),
+                ]);
+
+                $debug = (int) (self::$instance?->config('debug', 0) ?? 0);
+                $body = $debug >= 3
+                    ? (string) $error['message'] . ' in ' . (string) $error['file'] . ':' . (int) $error['line']
+                    : 'Wystąpił błąd serwera.';
+
+                if (!headers_sent()) {
+                    http_response_code(500);
+                    header('Content-Type: text/plain; charset=UTF-8');
+                }
+                echo $body;
+            });
+
+            self::$shutdownRegistered = true;
+        }
+
         public function run(): void {
-            $request = Request::fromGlobals();
+            $trusted = $this->config('trusted_proxies', []);
+            if (!is_array($trusted)) {
+                $trusted = [];
+            }
+            $request = Request::fromGlobalsWithProxies($trusted);
             $response = $this->handle($request);
             $response->send();
         }
@@ -482,6 +680,7 @@ namespace P1 {
 
         /** @var array<int, array{sql: string, time: float}> */
         private array $log = [];
+        private bool $logQueries;
 
         public function __construct(array $config) {
             $dsn = $config['dsn'] ?? sprintf(
@@ -501,6 +700,7 @@ namespace P1 {
                     \PDO::ATTR_EMULATE_PREPARES => false,
                 ],
             );
+            $this->logQueries = (bool) ($config['log_queries'] ?? false);
         }
 
         public function pdo(): \PDO {
@@ -519,7 +719,9 @@ namespace P1 {
             $norm = $this->norm($params);
             $stmt = $this->pdo->prepare($sql);
             $stmt->execute($norm);
-            $this->log[] = ['sql' => $this->interpolate($sql, $norm), 'time' => microtime(true) - $t];
+            if ($this->logQueries) {
+                $this->log[] = ['sql' => $this->interpolate($sql, $norm), 'time' => microtime(true) - $t];
+            }
             return $stmt;
         }
 
@@ -663,10 +865,33 @@ namespace P1 {
             $defaults = [
                 'lifetime' => 7200,
                 'path' => '/',
+                'domain' => '',
+                'secure' => false,
                 'httponly' => true,
                 'samesite' => 'Lax',
             ];
-            session_set_cookie_params(array_merge($defaults, $cookieParams));
+            $params = array_merge($defaults, $cookieParams);
+
+            $ini = [
+                'session.use_strict_mode' => '1',
+                'session.use_only_cookies' => '1',
+                'session.use_trans_sid' => '0',
+                'session.sid_length' => '64',
+                'session.sid_bits_per_character' => '6',
+                'session.cookie_httponly' => $params['httponly'] ? '1' : '0',
+                'session.cookie_secure' => $params['secure'] ? '1' : '0',
+                'session.cookie_samesite' => (string) $params['samesite'],
+                'session.gc_maxlifetime' => (string) $params['lifetime'],
+            ];
+            foreach ($ini as $key => $value) {
+                @ini_set($key, $value);
+            }
+
+            session_set_cookie_params($params);
+        }
+
+        public function regenerate(bool $deleteOld = true): bool {
+            return session_regenerate_id($deleteOld);
         }
 
         public function open(string $path, string $name): bool {

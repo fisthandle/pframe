@@ -132,6 +132,27 @@ class AppTest extends TestCase {
         $this->assertSame('getting-started/intro', $response->body);
     }
 
+    public function testMethodNotAllowedReturns405(): void {
+        $app = new App();
+        $app->get('/ping', HelloStub::class, 'index');
+
+        $response = $app->handle(new Request(method: 'POST', path: '/ping'));
+        $this->assertSame(405, $response->status);
+        $this->assertSame('GET, HEAD', $response->headers['Allow'] ?? null);
+    }
+
+    public function testSecurityHeadersMiddlewareAddsDefaults(): void {
+        $app = new App();
+        $app->addSecurityHeaders();
+        $app->get('/', HelloStub::class, 'index');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/', server: ['HTTPS' => 'on']));
+        $this->assertSame('DENY', $response->headers['X-Frame-Options'] ?? null);
+        $this->assertSame('nosniff', $response->headers['X-Content-Type-Options'] ?? null);
+        $this->assertArrayHasKey('Content-Security-Policy', $response->headers);
+        $this->assertSame('max-age=63072000; includeSubDomains; preload', $response->headers['Strict-Transport-Security'] ?? null);
+    }
+
     public function testHttpExceptionMessageDependsOnDebug(): void {
         $app = new App();
         $app->setConfig('debug', 0);
@@ -192,6 +213,15 @@ class AppTest extends TestCase {
         $response = $app->handle(new Request(method: 'GET', path: '/x'));
         $this->assertSame(500, $response->status);
     }
+
+    public function testWarningsConvertedTo500(): void {
+        $app = new App();
+        $app->setConfig('debug', 0);
+        $app->get('/warn', WarningCtrl::class, 'run');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/warn'));
+        $this->assertSame(500, $response->status);
+    }
 }
 
 class HelloStub {
@@ -250,5 +280,12 @@ class BeforeStopsCtrl {
 
     public function run(): Response {
         return new Response('action');
+    }
+}
+
+class WarningCtrl {
+    public function run(): Response {
+        trigger_error('test warning', E_USER_WARNING);
+        return new Response('ok');
     }
 }

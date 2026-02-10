@@ -34,6 +34,26 @@ class RequestTest extends TestCase {
         $this->assertTrue($req->isAjax());
     }
 
+    public function testFromGlobalsTrustedProxiesUsesForwardedFor(): void {
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/';
+        $_SERVER['REMOTE_ADDR'] = '10.0.0.1';
+        $_SERVER['HTTP_X_FORWARDED_FOR'] = '203.0.113.5, 10.0.0.1';
+
+        $req = Request::fromGlobalsWithProxies(['10.0.0.1']);
+        $this->assertSame('203.0.113.5', $req->ip);
+    }
+
+    public function testFromGlobalsUntrustedProxyIgnoresForwardedFor(): void {
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/';
+        $_SERVER['REMOTE_ADDR'] = '198.51.100.10';
+        $_SERVER['HTTP_X_FORWARDED_FOR'] = '203.0.113.9';
+
+        $req = Request::fromGlobalsWithProxies(['10.0.0.1']);
+        $this->assertSame('198.51.100.10', $req->ip);
+    }
+
     public function testManualConstruction(): void {
         $req = new Request(
             method: 'POST',

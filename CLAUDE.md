@@ -40,6 +40,15 @@ vendor/bin/phpunit tests/Unit   # tylko unit
 
 - `db/sessions.sql` — schemat sesji (MySQL)
 - Session handler wspiera SQLite (INSERT OR REPLACE) i MySQL (ON DUPLICATE KEY)
+- Logowanie zapytań SQL jest opcjonalne: ustaw `db.log_queries` w configu na `true`
+
+## Bezpieczeństwo i obsługa błędów
+
+- Globalny handler błędów zamienia ostrzeżenia na 500, a błędy fatalne są łapane przez shutdown handler
+- Router zwraca `405 Method Not Allowed` z nagłówkiem `Allow`
+- `App::addSecurityHeaders()` dodaje bezpieczne nagłówki (CSP, HSTS dla HTTPS, XFO, XCTO, Referrer-Policy, Permissions-Policy)
+- `Request::fromGlobalsWithProxies()` i `app` config `trusted_proxies` umożliwiają bezpieczne IP za proxy
+- `Session::register()` utwardza konfigurację sesji; `Session::regenerate()` służy do regeneracji ID po logowaniu
 
 <claude-mem-context>
 # Recent Activity
