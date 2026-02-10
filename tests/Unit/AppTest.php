@@ -121,6 +121,15 @@ class AppTest extends TestCase {
 
         $response = $app->handle(new Request(method: 'GET', path: '/assets/css/main.css'));
         $this->assertSame(200, $response->status);
+        $this->assertSame('css/main.css', $response->body);
+    }
+
+    public function testRouteWildcardWithParam(): void {
+        $app = new App();
+        $app->route('GET', '/docs/{lang}/*', WildcardCtrl::class, 'show');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/docs/pl/getting-started/intro'));
+        $this->assertSame('getting-started/intro', $response->body);
     }
 
     public function testHttpExceptionMessageDependsOnDebug(): void {
@@ -170,6 +179,13 @@ class AppTest extends TestCase {
         $this->assertSame('before', $response->body);
     }
 
+    public function testElapsedTime(): void {
+        $app = new App();
+        usleep(5000); // 5ms
+        $this->assertGreaterThan(0.004, $app->elapsed());
+        $this->assertLessThan(1.0, $app->elapsed());
+    }
+
     public function testMissingActionHandledAs500(): void {
         $app = new App();
         $app->get('/x', HelloStub::class, 'missingAction');
@@ -195,8 +211,10 @@ class HelloStub {
 }
 
 class WildcardCtrl {
+    public Request $request;
+
     public function show(): Response {
-        return new Response('ok');
+        return new Response($this->request->param('*', ''));
     }
 }
 

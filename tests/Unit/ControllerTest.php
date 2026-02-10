@@ -206,4 +206,20 @@ class ControllerTest extends TestCase {
         $this->assertStringContainsString('<div>M</div>', $response->body);
         $this->assertStringContainsString('csrf_token', $response->body);
     }
+
+    public function testRenderInjectsUrlHelper(): void {
+        $app = new App();
+        $app->setConfig('view_path', __DIR__ . '/../fixtures/templates');
+        $app->get('/item/{id}', self::class, 'test', name: 'item.show');
+
+        $ctrl = new class extends Controller {
+            public function test(): Response {
+                return $this->render('url_test.php');
+            }
+        };
+
+        $ctrl->request = new Request(method: 'GET', path: '/');
+        $response = $ctrl->test();
+        $this->assertStringContainsString('/item/42', $response->body);
+    }
 }

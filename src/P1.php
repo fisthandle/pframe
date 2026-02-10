@@ -194,8 +194,15 @@ namespace P1 {
 
         private ?Db $db = null;
 
+        private float $startTime;
+
         public function __construct() {
+            $this->startTime = microtime(true);
             self::$instance = $this;
+        }
+
+        public function elapsed(): float {
+            return microtime(true) - $this->startTime;
         }
 
         public static function instance(): static {
@@ -303,6 +310,7 @@ namespace P1 {
                     continue;
                 }
                 if ($part === '*') {
+                    $paramNames[] = '*';
                     $regex .= '(.*)';
                     continue;
                 }
@@ -472,6 +480,9 @@ namespace P1 {
     class Db {
         private \PDO $pdo;
 
+        /** @var array<int, array{sql: string, time: float}> */
+        private array $log = [];
+
         public function __construct(array $config) {
             $dsn = $config['dsn'] ?? sprintf(
                 'mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4',
@@ -504,9 +515,42 @@ namespace P1 {
         }
 
         private function run(string $sql, array|string|null $params): \PDOStatement {
+            $t = microtime(true);
+            $norm = $this->norm($params);
             $stmt = $this->pdo->prepare($sql);
-            $stmt->execute($this->norm($params));
+            $stmt->execute($norm);
+            $this->log[] = ['sql' => $this->interpolate($sql, $norm), 'time' => microtime(true) - $t];
             return $stmt;
+        }
+
+        private function interpolate(string $sql, ?array $params): string {
+            if ($params === null || $params === []) {
+                return $sql;
+            }
+            $i = 0;
+            return preg_replace_callback('/\?/', function () use ($params, &$i): string {
+                $v = $params[$i++] ?? 'NULL';
+                if ($v === null) {
+                    return 'NULL';
+                }
+                if (is_int($v) || is_float($v)) {
+                    return (string) $v;
+                }
+                return "'" . addslashes((string) $v) . "'";
+            }, $sql);
+        }
+
+        /** @return array<int, array{sql: string, time: float}> */
+        public function queryLog(): array {
+            return $this->log;
+        }
+
+        public function queryCount(): int {
+            return count($this->log);
+        }
+
+        public function queryTime(): float {
+            return array_sum(array_column($this->log, 'time'));
         }
 
         public function exec(string $sql, array|string|null $params = null): int|array {
@@ -807,6 +851,7 @@ namespace P1 {
             $data['flash'] = (new Flash())->get();
             $data['csrf_token'] = Csrf::token();
             $data['csrf_input'] = Csrf::hiddenInput();
+            $data['url'] = static fn(string $name, array $params = []): string => $app->url($name, $params);
 
             return Response::html($view->render($template, $data));
         }

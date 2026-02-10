@@ -81,4 +81,23 @@ class DbTest extends TestCase {
     public function testPdoAccessor(): void {
         $this->assertInstanceOf(\PDO::class, $this->db->pdo());
     }
+
+    public function testQueryLog(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:']);
+        $this->assertSame(0, $db->queryCount());
+
+        $db->exec('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)');
+        $db->exec('INSERT INTO t (id, name) VALUES (?, ?)', [1, 'Joe']);
+        $db->var('SELECT COUNT(*) FROM t');
+
+        $this->assertSame(3, $db->queryCount());
+        $this->assertGreaterThan(0.0, $db->queryTime());
+
+        $log = $db->queryLog();
+        $this->assertCount(3, $log);
+        $this->assertStringContainsString('CREATE TABLE', $log[0]['sql']);
+        $this->assertIsFloat($log[0]['time']);
+        $this->assertSame("INSERT INTO t (id, name) VALUES (1, 'Joe')", $log[1]['sql']);
+        $this->assertStringContainsString('SELECT COUNT', $log[2]['sql']);
+    }
 }
