@@ -63,6 +63,22 @@ class ControllerTest extends TestCase {
         $this->assertSame('Done!', (new Flash())->get()[0]['text']);
     }
 
+    public function testRedirectRoute(): void {
+        $app = new App();
+        $app->get('/items/{id}', self::class, 'test', name: 'items.show');
+
+        $ctrl = new class extends Controller {
+            public function test(): Response {
+                return $this->redirectRoute('items.show', ['id' => 7]);
+            }
+        };
+        $ctrl->request = new Request(method: 'GET', path: '/');
+
+        $response = $ctrl->test();
+        $this->assertSame(302, $response->status);
+        $this->assertSame('/items/7', $response->headers['Location'] ?? null);
+    }
+
     public function testParam(): void {
         $ctrl = new class extends Controller {
             public function test(): string {

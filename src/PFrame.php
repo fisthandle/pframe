@@ -256,6 +256,9 @@ namespace PFrame {
         /** @var array<callable> */
         private array $middleware = [];
 
+        /** @var array<int, array{prefix: string, middleware: array<callable>, name_prefix: string}> */
+        private array $routeGroups = [['prefix' => '', 'middleware' => [], 'name_prefix' => '']];
+
         private ?Db $db = null;
 
         private float $startTime;
@@ -355,6 +358,21 @@ namespace PFrame {
             $this->addRoute($methods, $path, $controller, $action, $mw, $name, $ajax);
         }
 
+        public function group(string $prefix, callable $callback, array $mw = [], ?string $namePrefix = null): void {
+            $group = $this->currentRouteGroup();
+            $this->routeGroups[] = [
+                'prefix' => $this->joinRoutePath($group['prefix'], $prefix),
+                'middleware' => array_merge($group['middleware'], $mw),
+                'name_prefix' => $group['name_prefix'] . ($namePrefix ?? ''),
+            ];
+
+            try {
+                $callback($this);
+            } finally {
+                array_pop($this->routeGroups);
+            }
+        }
+
         private function addRoute(
             string $methods,
             string $pattern,
@@ -364,6 +382,13 @@ namespace PFrame {
             ?string $name,
             bool $ajax,
         ): void {
+            $group = $this->currentRouteGroup();
+            $pattern = $this->joinRoutePath($group['prefix'], $pattern);
+            $middleware = array_merge($group['middleware'], $middleware);
+            if ($name !== null && $group['name_prefix'] !== '') {
+                $name = $group['name_prefix'] . $name;
+            }
+
             $methodList = array_values(array_filter(array_map('trim', explode('|', strtoupper($methods)))));
             $paramNames = [];
             $parts = preg_split('/(\{\w+\}|\*)/', $pattern, -1, PREG_SPLIT_DELIM_CAPTURE);
@@ -403,11 +428,35 @@ namespace PFrame {
             if (!isset($this->namedRoutes[$name])) {
                 throw new \RuntimeException('Route not found: ' . $name);
             }
+
             $route = $this->routes[$this->namedRoutes[$name]];
             $url = $route['pattern'];
-            foreach ($params as $key => $value) {
-                $url = str_replace('{' . $key . '}', rawurlencode((string) $value), $url);
+
+            $usedParams = [];
+            if (preg_match_all('/\{(\w+)\}/', $url, $matches) > 0) {
+                foreach ($matches[1] as $placeholder) {
+                    if (!array_key_exists($placeholder, $params)) {
+                        throw new \RuntimeException('Missing route parameter "' . $placeholder . '" for route: ' . $name);
+                    }
+                    $url = str_replace('{' . $placeholder . '}', rawurlencode((string) $params[$placeholder]), $url);
+                    $usedParams[$placeholder] = true;
+                }
             }
+
+            $query = [];
+            foreach ($params as $key => $value) {
+                if (!isset($usedParams[(string) $key])) {
+                    $query[$key] = $value;
+                }
+            }
+
+            if ($query !== []) {
+                $queryString = http_build_query($query, '', '&', PHP_QUERY_RFC3986);
+                if ($queryString !== '') {
+                    $url .= (str_contains($url, '?') ? '&' : '?') . $queryString;
+                }
+            }
+
             return $url;
         }
 
@@ -599,6 +648,31 @@ namespace PFrame {
                 return false;
             }
             return strtolower((string) ($request->header('X-Forwarded-Proto') ?? '')) === 'https';
+        }
+
+        /** @return array{prefix: string, middleware: array<callable>, name_prefix: string} */
+        private function currentRouteGroup(): array {
+            return $this->routeGroups[array_key_last($this->routeGroups)];
+        }
+
+        private function joinRoutePath(string $prefix, string $path): string {
+            if ($path === '') {
+                $path = '/';
+            }
+            if (!str_starts_with($path, '/')) {
+                $path = '/' . $path;
+            }
+
+            if ($prefix === '' || $prefix === '/') {
+                return $path;
+            }
+
+            $normalizedPrefix = '/' . trim($prefix, '/');
+            if ($path === '/') {
+                return $normalizedPrefix;
+            }
+
+            return rtrim($normalizedPrefix, '/') . $path;
         }
 
         private function isFromTrustedProxy(Request $request): bool {
@@ -1194,6 +1268,40 @@ namespace PFrame {
         }
     }
 
+    class Middleware {
+        /** @return callable(Request, callable): Response */
+        public static function auth(string $loginRoute = 'login', string $message = 'Musisz się zalogować.'): callable {
+            return function (Request $req, callable $next) use ($loginRoute, $message): Response {
+                if (!isset($_SESSION['user'])) {
+                    (new Flash())->warning($message);
+                    try {
+                        return Response::redirect(App::instance()->url($loginRoute));
+                    } catch (\Throwable) {
+                        return Response::redirect('/login');
+                    }
+                }
+
+                return $next($req);
+            };
+        }
+
+        /** @return callable(Request, callable): Response */
+        public static function csrf(array $methods = ['POST', 'PUT', 'PATCH', 'DELETE'], string $message = 'Sesja wygasła. Odśwież stronę.'): callable {
+            $allowedMethods = array_values(array_unique(array_map(static fn($method) => strtoupper((string) $method), $methods)));
+
+            return function (Request $req, callable $next) use ($allowedMethods, $message): Response {
+                if (in_array($req->method, $allowedMethods, true)) {
+                    $token = $req->post(Csrf::FIELD_NAME) ?? $req->header('X-Csrf-Token');
+                    if (!Csrf::validate(is_scalar($token) ? (string) $token : null)) {
+                        throw HttpException::forbidden($message);
+                    }
+                }
+
+                return $next($req);
+            };
+        }
+    }
+
     abstract class Controller {
         public Request $request;
 
@@ -1228,6 +1336,10 @@ namespace PFrame {
 
         protected function redirect(string $url, int $status = 302): Response {
             return Response::redirect($url, $status);
+        }
+
+        protected function redirectRoute(string $name, array $params = [], int $status = 302): Response {
+            return $this->redirect(App::instance()->url($name, $params), $status);
         }
 
         protected function flashAndRedirect(string $type, string $message, string $url): Response {

@@ -73,6 +73,58 @@ class AppTest extends TestCase {
         $this->assertSame('/o/a%20b', $app->url('ad.show', ['slug' => 'a b']));
     }
 
+    public function testNamedRouteUrlAddsQueryStringForExtraParams(): void {
+        $app = new App();
+        $app->get('/o/{slug}', HelloStub::class, 'index', name: 'ad.show');
+
+        $this->assertSame('/o/test?page=2&sort=asc', $app->url('ad.show', [
+            'slug' => 'test',
+            'page' => 2,
+            'sort' => 'asc',
+        ]));
+    }
+
+    public function testUrlMissingRouteParamThrows(): void {
+        $app = new App();
+        $app->get('/o/{slug}', HelloStub::class, 'index', name: 'ad.show');
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Missing route parameter "slug"');
+        $app->url('ad.show');
+    }
+
+    public function testRouteGroupAppliesPrefixNamePrefixAndMiddleware(): void {
+        $app = new App();
+        $groupMw = function (Request $req, callable $next): Response {
+            $resp = $next($req);
+            $resp->headers['X-Group'] = 'yes';
+            return $resp;
+        };
+
+        $app->group('/admin', function (App $app): void {
+            $app->get('/users/{id}', HelloStub::class, 'index', name: 'users.show');
+        }, mw: [$groupMw], namePrefix: 'admin.');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/admin/users/42'));
+        $this->assertSame(200, $response->status);
+        $this->assertSame('yes', $response->headers['X-Group'] ?? null);
+        $this->assertSame('/admin/users/42', $app->url('admin.users.show', ['id' => 42]));
+    }
+
+    public function testNestedRouteGroupsComposePrefixAndNamePrefix(): void {
+        $app = new App();
+
+        $app->group('/api', function (App $app): void {
+            $app->group('/v1', function (App $app): void {
+                $app->get('/ping', HelloStub::class, 'index', name: 'ping');
+            }, namePrefix: 'v1.');
+        }, namePrefix: 'api.');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/api/v1/ping'));
+        $this->assertSame(200, $response->status);
+        $this->assertSame('/api/v1/ping', $app->url('api.v1.ping'));
+    }
+
     public function testAjaxRoute(): void {
         $app = new App();
         $app->post('/api/vote', HelloStub::class, 'submit', ajax: true);

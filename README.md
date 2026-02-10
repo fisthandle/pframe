@@ -32,6 +32,14 @@ $app->get('/', HomeController::class, 'index');
 $app->get('/users/{id}', UserController::class, 'show', name: 'user.show');
 $app->post('/login', AuthController::class, 'login');
 
+$auth = \PFrame\Middleware::auth();
+$csrf = \PFrame\Middleware::csrf();
+
+$app->group('/admin', function (\PFrame\App $app) use ($csrf): void {
+    $app->get('/users', AdminController::class, 'index', name: 'users');
+    $app->post('/users', AdminController::class, 'store', mw: [$csrf], name: 'users.store');
+}, mw: [$auth], namePrefix: 'admin.');
+
 $app->run();
 ```
 
@@ -82,7 +90,7 @@ class HomeController extends \PFrame\Controller {
         }
 
         P1::exec('INSERT INTO users (name, email) VALUES (?, ?)', [$data['name'], $data['email']]);
-        return $this->flashAndRedirect('success', 'Saved.', '/');
+        return $this->redirectRoute('user.show', ['id' => 1]);
     }
 }
 ```
@@ -175,6 +183,10 @@ Built-in:
 ```php
 $app->addSecurityHeaders(); // CSP, XFO, XCTO, Referrer-Policy, Permissions-Policy, HSTS
 ```
+
+Built-in middleware:
+- `\PFrame\Middleware::auth()` -- guest -> flash warning + redirect to `login` route
+- `\PFrame\Middleware::csrf()` -- validates token from `csrf_token` field or `X-Csrf-Token` header
 
 ## Requirements
 
