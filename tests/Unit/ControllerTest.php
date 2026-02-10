@@ -97,7 +97,21 @@ class ControllerTest extends TestCase {
         $ctrl->request = new Request(method: 'GET', path: '/', query: ['page' => '9']);
         $p = $ctrl->test();
         $this->assertSame(2, $p['page']);
-        $this->assertSame('LIMIT 10 OFFSET 10', $p['limit']);
+        $this->assertSame(10, $p['offset']);
+        $this->assertSame(10, $p['per_page']);
+        $this->assertArrayNotHasKey('limit', $p);
+    }
+
+    public function testPaginateZeroPerPage(): void {
+        $ctrl = new class extends Controller {
+            public function test(): array {
+                return $this->paginate(100, 0);
+            }
+        };
+        $ctrl->request = new Request(method: 'GET', path: '/');
+        $p = $ctrl->test();
+        $this->assertSame(1, $p['per_page']);
+        $this->assertSame(0, $p['offset']);
     }
 
     public function testRequireAuthThrowsAndFlashes(): void {

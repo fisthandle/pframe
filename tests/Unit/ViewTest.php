@@ -40,4 +40,27 @@ class ViewTest extends TestCase {
         $this->expectException(\RuntimeException::class);
         $this->view->render('missing.php');
     }
+
+    public function testPathTraversalBlocked(): void {
+        $root = sys_get_temp_dir() . '/p1_view_traversal_' . uniqid('', true);
+        mkdir($root . '/base', 0777, true);
+        mkdir($root . '/base_evil', 0777, true);
+        file_put_contents($root . '/base/ok.php', '<?php echo "OK";');
+        file_put_contents($root . '/base_evil/pwn.php', '<?php echo "PWN";');
+
+        $view = new View($root . '/base');
+        $this->assertSame('OK', $view->render('ok.php'));
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Template not found');
+        try {
+            $view->render('../base_evil/pwn.php');
+        } finally {
+            @unlink($root . '/base/ok.php');
+            @unlink($root . '/base_evil/pwn.php');
+            @rmdir($root . '/base');
+            @rmdir($root . '/base_evil');
+            @rmdir($root);
+        }
+    }
 }

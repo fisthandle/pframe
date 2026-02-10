@@ -63,6 +63,12 @@ class DbTest extends TestCase {
         $this->assertCount(2, $rows);
     }
 
+    public function testExecSelectWithMultipleCtes(): void {
+        $rows = $this->db->exec('WITH a AS (SELECT * FROM users), b AS (SELECT * FROM a) SELECT * FROM b');
+        $this->assertIsArray($rows);
+        $this->assertCount(2, $rows);
+    }
+
     public function testInsertGetId(): void {
         $this->assertSame(3, $this->db->insertGetId('INSERT INTO users (name, email) VALUES (?, ?)', ['New', 'new@x.com']));
     }

@@ -30,4 +30,27 @@ class ResponseTest extends TestCase {
         $r = Response::html('<h1>Hi</h1>');
         $this->assertSame('text/html; charset=UTF-8', $r->headers['Content-Type']);
     }
+
+    public function testRedirectBlocksExternalUrl(): void {
+        $_SERVER['HTTP_HOST'] = 'myapp.com';
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('External redirect not allowed');
+        try {
+            Response::redirect('https://evil.com/phish');
+        } finally {
+            $_SERVER = [];
+        }
+    }
+
+    public function testRedirectAllowsSameHost(): void {
+        $_SERVER['HTTP_HOST'] = 'myapp.com';
+        $r = Response::redirect('https://myapp.com/dashboard');
+        $this->assertSame('https://myapp.com/dashboard', $r->headers['Location']);
+        $_SERVER = [];
+    }
+
+    public function testRedirectAllowsRelativePath(): void {
+        $r = Response::redirect('/login');
+        $this->assertSame('/login', $r->headers['Location']);
+    }
 }

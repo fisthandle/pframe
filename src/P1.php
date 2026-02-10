@@ -62,23 +62,18 @@ namespace P1 {
         }
 
         public static function fromGlobals(): static {
+            return self::buildFromGlobals((string) ($_SERVER['REMOTE_ADDR'] ?? ''));
+        }
+
+        public static function fromGlobalsWithProxies(array $trustedProxies = []): static {
+            $headers = self::parseServerHeaders($_SERVER);
+            return self::buildFromGlobals(self::resolveIp($_SERVER, $headers, $trustedProxies));
+        }
+
+        private static function buildFromGlobals(string $ip): static {
             $uri = $_SERVER['REQUEST_URI'] ?? '/';
             $path = parse_url($uri, PHP_URL_PATH) ?: '/';
-
-            $headers = [];
-            foreach ($_SERVER as $key => $value) {
-                if (!str_starts_with($key, 'HTTP_')) {
-                    continue;
-                }
-                $name = str_replace('_', '-', substr($key, 5));
-                $headers[ucwords(strtolower($name), '-')] = (string) $value;
-            }
-            if (isset($_SERVER['CONTENT_TYPE'])) {
-                $headers['Content-Type'] = (string) $_SERVER['CONTENT_TYPE'];
-            }
-            if (isset($_SERVER['CONTENT_LENGTH'])) {
-                $headers['Content-Length'] = (string) $_SERVER['CONTENT_LENGTH'];
-            }
+            $headers = self::parseServerHeaders($_SERVER);
 
             return new static(
                 method: strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')),
@@ -89,42 +84,27 @@ namespace P1 {
                 headers: $headers,
                 cookies: $_COOKIE,
                 files: $_FILES,
-                ip: (string) ($_SERVER['REMOTE_ADDR'] ?? ''),
+                ip: $ip,
                 body: (string) (file_get_contents('php://input') ?: ''),
             );
         }
 
-        public static function fromGlobalsWithProxies(array $trustedProxies = []): static {
-            $uri = $_SERVER['REQUEST_URI'] ?? '/';
-            $path = parse_url($uri, PHP_URL_PATH) ?: '/';
-
+        private static function parseServerHeaders(array $server): array {
             $headers = [];
-            foreach ($_SERVER as $key => $value) {
+            foreach ($server as $key => $value) {
                 if (!str_starts_with($key, 'HTTP_')) {
                     continue;
                 }
                 $name = str_replace('_', '-', substr($key, 5));
                 $headers[ucwords(strtolower($name), '-')] = (string) $value;
             }
-            if (isset($_SERVER['CONTENT_TYPE'])) {
-                $headers['Content-Type'] = (string) $_SERVER['CONTENT_TYPE'];
+            if (isset($server['CONTENT_TYPE'])) {
+                $headers['Content-Type'] = (string) $server['CONTENT_TYPE'];
             }
-            if (isset($_SERVER['CONTENT_LENGTH'])) {
-                $headers['Content-Length'] = (string) $_SERVER['CONTENT_LENGTH'];
+            if (isset($server['CONTENT_LENGTH'])) {
+                $headers['Content-Length'] = (string) $server['CONTENT_LENGTH'];
             }
-
-            return new static(
-                method: strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')),
-                path: (string) $path,
-                query: $_GET,
-                post: $_POST,
-                server: $_SERVER,
-                headers: $headers,
-                cookies: $_COOKIE,
-                files: $_FILES,
-                ip: self::resolveIp($_SERVER, $headers, $trustedProxies),
-                body: (string) (file_get_contents('php://input') ?: ''),
-            );
+            return $headers;
         }
 
         private static function resolveIp(array $server, array $headers, array $trustedProxies): string {
@@ -242,6 +222,13 @@ namespace P1 {
         }
 
         public static function redirect(string $url, int $status = 302): static {
+            if (!str_starts_with($url, '/') && !str_starts_with($url, '//')) {
+                $host = parse_url($url, PHP_URL_HOST);
+                $currentHost = $_SERVER['HTTP_HOST'] ?? '';
+                if ($host !== null && $currentHost !== '' && $host !== $currentHost) {
+                    throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
+                }
+            }
             return new static('', $status, ['Location' => $url]);
         }
 
@@ -922,12 +909,22 @@ namespace P1 {
                     continue;
                 }
 
+                if ($seenCte && $depth === 0 && $ch === ',') {
+                    $seenCte = false;
+                    continue;
+                }
+
                 if ($seenCte && $depth === 0 && ctype_alpha($ch)) {
                     $start = $i;
                     while ($i < $len && ctype_alpha($sql[$i])) {
                         $i++;
                     }
-                    return strtoupper(substr($sql, $start, $i - $start));
+                    $word = strtoupper(substr($sql, $start, $i - $start));
+                    if ($word === 'RECURSIVE' || $word === 'AS') {
+                        $seenCte = false;
+                        continue;
+                    }
+                    return $word;
                 }
             }
 
@@ -970,7 +967,7 @@ namespace P1 {
             $filePath = rtrim($this->basePath, '/') . '/' . ltrim($template, '/');
             $realBase = realpath($this->basePath);
             $realFile = realpath($filePath);
-            if ($realFile === false || $realBase === false || !str_starts_with($realFile, $realBase)) {
+            if ($realFile === false || $realBase === false || !str_starts_with($realFile, $realBase . '/')) {
                 throw new \RuntimeException('Template not found: ' . $template);
             }
 
@@ -1280,11 +1277,10 @@ namespace P1 {
         }
 
         protected function paginate(int $total, int $perPage = 20): array {
+            $perPage = max(1, $perPage);
             $page = max(1, (int) ($this->request->query('page') ?? 1));
             $totalPages = max(1, (int) ceil($total / $perPage));
-            if ($page > $totalPages) {
-                $page = $totalPages;
-            }
+            $page = min($page, $totalPages);
             $offset = ($page - 1) * $perPage;
 
             return [
@@ -1293,7 +1289,6 @@ namespace P1 {
                 'total_pages' => $totalPages,
                 'per_page' => $perPage,
                 'total' => $total,
-                'limit' => 'LIMIT ' . $perPage . ' OFFSET ' . $offset,
             ];
         }
     }
