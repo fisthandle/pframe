@@ -54,6 +54,12 @@ class ResponseTest extends TestCase {
         $this->assertSame('/login', $r->headers['Location']);
     }
 
+    public function testRedirectBlocksSchemeRelativeUrl(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('External redirect not allowed');
+        Response::redirect('//evil.com/phish');
+    }
+
     public function testSendAndExitMethodContract(): void {
         $method = new \ReflectionMethod(Response::class, 'sendAndExit');
         $this->assertTrue($method->hasReturnType());

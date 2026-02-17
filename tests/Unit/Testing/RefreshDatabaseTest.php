@@ -58,4 +58,35 @@ class RefreshDatabaseTest extends TestCase {
         $tables = Base::col("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'");
         $this->assertContains('users', $tables);
     }
+
+    public function testBootThrowsWhenNoSqlFiles(): void {
+        $app = new App();
+        $app->setDb(new Db(['dsn' => 'sqlite::memory:']));
+
+        $dir = sys_get_temp_dir() . '/pframe-empty-migrations-' . uniqid('', true);
+        mkdir($dir, 0777, true);
+
+        $bootstrap = new class($dir) {
+            use RefreshDatabase;
+
+            public function __construct(private readonly string $dir) {
+            }
+
+            protected function migrationPath(): string {
+                return $this->dir;
+            }
+
+            public function run(): void {
+                $this->bootRefreshDatabase();
+            }
+        };
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage("No SQL files found in '$dir'");
+        try {
+            $bootstrap->run();
+        } finally {
+            @rmdir($dir);
+        }
+    }
 }

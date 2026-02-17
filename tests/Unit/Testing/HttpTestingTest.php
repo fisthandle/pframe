@@ -23,8 +23,10 @@ class HttpTestingTest extends TestCase {
         $this->app->get('/user/{id}', HttpTestingUserCtrl::class, 'show');
         $this->app->post('/submit', HttpTestingFormCtrl::class, 'store');
         $this->app->route('PUT', '/item/{id}', HttpTestingFormCtrl::class, 'update');
+        $this->app->route('PATCH', '/item/{id}', HttpTestingFormCtrl::class, 'patch');
         $this->app->route('DELETE', '/item/{id}', HttpTestingFormCtrl::class, 'destroy');
         $this->app->get('/json', HttpTestingJsonCtrl::class, 'index');
+        $this->app->post('/json', HttpTestingJsonCtrl::class, 'store');
     }
 
     protected function tearDown(): void {
@@ -72,10 +74,26 @@ class HttpTestingTest extends TestCase {
         $this->assertSee('deleted 5');
     }
 
+    public function testPatchInjectsCsrf(): void {
+        $this->patch('/item/5', ['name' => 'Patched']);
+        $this->assertOk();
+        $this->assertSee('patched 5');
+    }
+
     public function testGetJsonResponse(): void {
         $this->get('/json');
         $this->assertOk();
         $this->assertJsonContains(['items' => [1, 2, 3]]);
+    }
+
+    public function testPostJsonSendsJsonBodyAndAjaxHeaders(): void {
+        $this->postJson('/json', ['name' => 'Joe']);
+        $this->assertOk();
+        $this->assertJsonContains([
+            'name' => 'Joe',
+            'is_ajax' => true,
+            'content_type' => 'application/json',
+        ]);
     }
 
     public function testWithHeadersSendsCustomHeaders(): void {
@@ -122,6 +140,10 @@ class HttpTestingFormCtrl extends Controller {
         return new Response('updated ' . $this->param('id'));
     }
 
+    public function patch(): Response {
+        return new Response('patched ' . $this->param('id'));
+    }
+
     public function destroy(): Response {
         return new Response('deleted ' . $this->param('id'));
     }
@@ -130,5 +152,14 @@ class HttpTestingFormCtrl extends Controller {
 class HttpTestingJsonCtrl extends Controller {
     public function index(): Response {
         return Response::json(['items' => [1, 2, 3]]);
+    }
+
+    public function store(): Response {
+        $json = $this->request->jsonBody() ?? [];
+        return Response::json([
+            'name' => $json['name'] ?? null,
+            'is_ajax' => $this->request->isAjax(),
+            'content_type' => $this->request->header('Content-Type'),
+        ]);
     }
 }

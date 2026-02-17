@@ -222,11 +222,18 @@ namespace PFrame {
         }
 
         public static function redirect(string $url, int $status = 302): static {
-            if (!str_starts_with($url, '/') && !str_starts_with($url, '//')) {
+            if (str_starts_with($url, '//')) {
+                throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
+            }
+
+            if (!str_starts_with($url, '/')) {
                 $host = parse_url($url, PHP_URL_HOST);
-                $currentHost = $_SERVER['HTTP_HOST'] ?? '';
-                if ($host !== null && $currentHost !== '' && $host !== $currentHost) {
-                    throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
+                $currentHost = (string) ($_SERVER['HTTP_HOST'] ?? '');
+                if ($host !== null && $currentHost !== '') {
+                    $normalizedCurrentHost = (string) (parse_url('http://' . $currentHost, PHP_URL_HOST) ?? $currentHost);
+                    if (strcasecmp($host, $normalizedCurrentHost) !== 0) {
+                        throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
+                    }
                 }
             }
             return new static('', $status, ['Location' => $url]);
@@ -1152,7 +1159,7 @@ namespace PFrame {
                 'lifetime' => 7200,
                 'path' => '/',
                 'domain' => '',
-                'secure' => false,
+                'secure' => true,
                 'httponly' => true,
                 'samesite' => 'Lax',
             ];

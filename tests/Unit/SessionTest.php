@@ -64,6 +64,13 @@ class SessionTest extends TestCase {
     public function testRegisterAndGcReturnType(): void {
         $session = new Session($this->db, advisory: false);
         $session->register();
+        $this->assertTrue(session_get_cookie_params()['secure']);
         $this->assertIsInt($session->gc(0));
+    }
+
+    public function testRegisterAllowsOverridingSecureCookieFlag(): void {
+        $session = new Session($this->db, advisory: false);
+        $session->register(['secure' => false]);
+        $this->assertFalse(session_get_cookie_params()['secure']);
     }
 }

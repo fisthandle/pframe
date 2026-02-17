@@ -48,8 +48,8 @@ class CacheTest extends TestCase {
     }
 
     public function testExpiresData(): void {
-        $this->cache->set('ttl', 'v', 1);
-        sleep(2);
+        $file = $this->dir . '/' . md5('ttl') . '.cache';
+        file_put_contents($file, serialize(['value' => 'v', 'ttl' => 1, 'time' => time() - 5]));
         $this->assertSame('fallback', $this->cache->get('ttl', 'fallback'));
     }
 
