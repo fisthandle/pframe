@@ -49,6 +49,19 @@ class DatabaseAssertionsTest extends TestCase {
         $this->assertDatabaseCount('users', 99);
     }
 
+    public function testAssertDatabaseCountWithConditions(): void {
+        $this->assertDatabaseCount('users', 1, ['name' => 'Joe']);
+    }
+
+    public function testAssertDatabaseCountWithNullConditions(): void {
+        $this->assertDatabaseCount('users', 1, ['email' => null]);
+    }
+
+    public function testAssertDatabaseCountWithConditionsFails(): void {
+        $this->expectException(AssertionFailedError::class);
+        $this->assertDatabaseCount('users', 2, ['email' => null]);
+    }
+
     public function testAssertDatabaseHasWithNull(): void {
         $this->assertDatabaseHas('users', ['name' => 'Ann', 'email' => null]);
     }

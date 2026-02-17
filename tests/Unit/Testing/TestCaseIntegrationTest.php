@@ -22,6 +22,7 @@ class TestCaseIntegrationTest extends TestCase {
         Base::exec('INSERT INTO items (val) VALUES (?)', ['new']);
         $this->assertDatabaseHas('items', ['val' => 'new']);
         $this->assertDatabaseCount('items', 2);
+        $this->assertDatabaseCount('items', 1, ['val' => 'new']);
         $this->assertDatabaseMissing('items', ['val' => 'nope']);
     }
 

@@ -35,9 +35,11 @@ trait DatabaseAssertions {
         $this->assertNull($row, "Unexpected row in '$table' matching " . json_encode($conditions));
     }
 
-    protected function assertDatabaseCount(string $table, int $expected): void {
-        $count = (int) Base::var("SELECT COUNT(*) FROM $table");
-        $this->assertSame($expected, $count, "Expected $expected rows in '$table', got $count");
+    protected function assertDatabaseCount(string $table, int $expected, array $conditions = []): void {
+        [$where, $params] = $this->buildWhereClause($conditions);
+        $count = (int) Base::var("SELECT COUNT(*) FROM $table WHERE $where", $params);
+        $scope = $conditions === [] ? "'$table'" : "'$table' matching " . json_encode($conditions);
+        $this->assertSame($expected, $count, "Expected $expected rows in $scope, got $count");
     }
 
     /** @return array{0: string, 1: list<mixed>} */
@@ -60,12 +62,16 @@ trait DatabaseAssertions {
 }
 
 trait ActingAs {
+    protected function sessionUserKey(): string {
+        return 'user';
+    }
+
     protected function actingAs(array $user): void {
-        $_SESSION['user'] = $user;
+        $_SESSION[$this->sessionUserKey()] = $user;
     }
 
     protected function actingAsGuest(): void {
-        unset($_SESSION['user']);
+        unset($_SESSION[$this->sessionUserKey()]);
     }
 }
 
@@ -268,12 +274,18 @@ trait FlashAssertions {
 }
 
 trait SessionAssertions {
+    protected function sessionUserKey(): string {
+        return 'user';
+    }
+
     protected function assertAuthenticated(): void {
-        $this->assertNotEmpty($_SESSION['user'] ?? null, 'Expected authenticated user, but session has no user');
+        $key = $this->sessionUserKey();
+        $this->assertNotEmpty($_SESSION[$key] ?? null, 'Expected authenticated user, but session has no user');
     }
 
     protected function assertGuest(): void {
-        $this->assertEmpty($_SESSION['user'] ?? null, 'Expected guest, but session has user');
+        $key = $this->sessionUserKey();
+        $this->assertEmpty($_SESSION[$key] ?? null, 'Expected guest, but session has user');
     }
 
     protected function assertSessionHas(string $key, mixed ...$value): void {
@@ -323,8 +335,10 @@ trait RefreshDatabase {
 }
 
 class TestCase extends PHPUnitTestCase {
-    use DatabaseTransactions, DatabaseAssertions, ActingAs;
-    use ResponseAssertions, FlashAssertions, SessionAssertions;
+    use DatabaseTransactions, DatabaseAssertions, ResponseAssertions, FlashAssertions;
+    use ActingAs, SessionAssertions {
+        SessionAssertions::sessionUserKey insteadof ActingAs;
+    }
 
     protected function setUp(): void {
         parent::setUp();

@@ -58,3 +58,48 @@ vendor/bin/phpunit tests/Unit   # tylko unit
 - `Session::register()` utwardza konfigurację sesji; `Session::regenerate()` służy do regeneracji ID po logowaniu
 - `Response::redirect()` blokuje external URL gdy HTTP_HOST jest ustawiony
 - `View::renderFile()` chroni przed path traversal (separator `/` w prefix check)
+
+## Worker Mode (FrankenPHP)
+
+PFrame wspiera FrankenPHP worker mode przez metody `resetRequestState()`:
+
+- `App::resetRequestState()` resetuje `$startTime` (timer elapsed). Routes, config, db i middleware są zachowane.
+- `Db::resetRequestState()` czyści query log i `lastRowCount`. Połączenie PDO jest zachowane.
+
+Worker entrypoint pattern:
+
+```php
+$handler = static function () use ($app): void {
+    try {
+        $app->resetRequestState();
+        session_start();
+        $app->run();
+    } finally {
+        // Guard: cleanup DB tylko gdy DB jest skonfigurowane
+        $dbConfig = $app->config('db');
+        if (is_array($dbConfig)) {
+            $db = $app->db();
+            if ($db->trans()) {
+                $db->rollback();
+            }
+            $db->resetRequestState();
+        }
+
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+    }
+};
+
+if (function_exists('frankenphp_handle_request')) {
+    frankenphp_handle_request($handler);
+} else {
+    $handler(); // fallback: classic mode
+}
+```
+
+Key rules:
+
+- `session_start()` musi być w per-request handlerze, nie podczas bootstrap
+- rollback transakcji w `finally` zapobiega tx leak między requestami
+- `Db::resetRequestState()` wywołuj zawsze (nie warunkuj `log_queries`)

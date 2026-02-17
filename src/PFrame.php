@@ -307,6 +307,10 @@ namespace PFrame {
             return self::$instance;
         }
 
+        public function resetRequestState(): void {
+            $this->startTime = microtime(true);
+        }
+
         public function loadConfig(string $path): void {
             if (!is_file($path)) {
                 throw new \RuntimeException('Config file not found: ' . $path);
@@ -948,6 +952,11 @@ namespace PFrame {
                 $lines[] = sprintf('(%.2fms) %s', $entry['time'] * 1000, $entry['sql']);
             }
             return implode("\n", $lines);
+        }
+
+        public function resetRequestState(): void {
+            $this->log = [];
+            $this->lastRowCount = 0;
         }
 
         private function isSelectQuery(string $sql): bool {

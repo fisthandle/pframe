@@ -284,6 +284,41 @@ class AppTest extends TestCase {
         $this->assertLessThan(1.0, $app->elapsed());
     }
 
+    public function testResetRequestStateResetsElapsed(): void {
+        $app = new App();
+        usleep(10000); // 10ms
+        $before = $app->elapsed();
+
+        $app->resetRequestState();
+        $after = $app->elapsed();
+
+        $this->assertGreaterThan(0.009, $before);
+        $this->assertLessThan($before, $after);
+    }
+
+    public function testResetRequestStatePreservesRoutesAndConfig(): void {
+        $app = new App();
+        $app->get('/hello', HelloStub::class, 'index');
+        $app->setConfig('test_key', 'test_val');
+
+        $app->resetRequestState();
+
+        $response = $app->handle(new Request(method: 'GET', path: '/hello'));
+        $this->assertSame(200, $response->status);
+        $this->assertSame('hello world', $response->body);
+        $this->assertSame('test_val', $app->config('test_key'));
+    }
+
+    public function testResetRequestStatePreservesDb(): void {
+        $app = new App();
+        $app->setConfig('db', ['dsn' => 'sqlite::memory:']);
+        $db = $app->db();
+
+        $app->resetRequestState();
+
+        $this->assertSame($db, $app->db());
+    }
+
     public function testMissingActionHandledAs500(): void {
         $app = new App();
         $app->get('/x', HelloStub::class, 'missingAction');

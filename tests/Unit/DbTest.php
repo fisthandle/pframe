@@ -163,6 +163,23 @@ class DbTest extends TestCase {
         $this->assertMatchesRegularExpression('/\(\d+\.\d+ms\)/', $log);
     }
 
+    public function testResetRequestState(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:', 'log_queries' => true]);
+        $db->exec('CREATE TABLE t (id INTEGER PRIMARY KEY)');
+        $db->exec('INSERT INTO t (id) VALUES (?)', [1]);
+
+        $this->assertSame(2, $db->queryCount());
+        $this->assertSame(1, $db->count());
+
+        $db->resetRequestState();
+
+        $this->assertSame(0, $db->queryCount());
+        $this->assertSame([], $db->queryLog());
+        $this->assertSame(0.0, $db->queryTime());
+        $this->assertSame(0, $db->count());
+        $this->assertSame('', $db->log());
+    }
+
     public function testBatchInsertBasic(): void {
         $this->db->batchInsert('users', ['name', 'email'], [
             ['Zed', 'zed@x.com'],
