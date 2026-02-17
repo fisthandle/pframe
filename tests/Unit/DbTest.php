@@ -73,6 +73,15 @@ class DbTest extends TestCase {
         $this->assertSame(3, $this->db->insertGetId('INSERT INTO users (name, email) VALUES (?, ?)', ['New', 'new@x.com']));
     }
 
+    public function testLastInsertIdReturnsPdoLastInsertId(): void {
+        $this->db->exec('CREATE TABLE IF NOT EXISTS lid_test (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)');
+        $this->db->exec('INSERT INTO lid_test (name) VALUES (?)', ['foo']);
+        $result = $this->db->lastInsertId();
+
+        $this->assertIsString($result);
+        $this->assertSame('1', $result);
+    }
+
     public function testTransactionRollback(): void {
         $this->db->begin();
         $this->db->exec('INSERT INTO users (name, email) VALUES (?, ?)', ['Tx', 'tx@x.com']);

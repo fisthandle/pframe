@@ -246,6 +246,24 @@ class AppTest extends TestCase {
         $this->assertSame('blocked by test', $response->body);
     }
 
+    public function testHandleHttpException422PassesMessage(): void {
+        $app = new App();
+        $app->get('/test-422', Http422Stub::class, 'throwWithMessage');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/test-422'));
+        $this->assertSame(422, $response->status);
+        $this->assertSame('Email jest zajęty', $response->body);
+    }
+
+    public function testHandleHttpException422FallbackMessage(): void {
+        $app = new App();
+        $app->get('/test-422-empty', Http422Stub::class, 'throwEmpty');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/test-422-empty'));
+        $this->assertSame(422, $response->status);
+        $this->assertSame('Błąd walidacji', $response->body);
+    }
+
     public function testRuntimeExceptionHandled(): void {
         $app = new App();
         $app->setConfig('debug', 0);
@@ -363,6 +381,18 @@ class WildcardCtrl {
 class ThrowHttpCtrl {
     public function run(): Response {
         throw HttpException::forbidden('blocked by test');
+    }
+}
+
+class Http422Stub {
+    public Request $request;
+
+    public function throwWithMessage(): never {
+        throw new HttpException(422, 'Email jest zajęty');
+    }
+
+    public function throwEmpty(): never {
+        throw new HttpException(422);
     }
 }
 

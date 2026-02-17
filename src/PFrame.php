@@ -620,6 +620,7 @@ namespace PFrame {
                 403 => 'Brak dostępu',
                 404 => 'Nie znaleziono',
                 405 => 'Niedozwolona metoda',
+                422 => $e->getMessage() !== '' ? $e->getMessage() : 'Błąd walidacji',
                 default => 'Błąd serwera',
             };
             return new Response($body, $e->statusCode, $e->headers);
@@ -900,6 +901,10 @@ namespace PFrame {
         public function insertGetId(string $sql, array|string|null $params = null): int {
             $this->run($sql, $params);
             return (int) $this->pdo->lastInsertId();
+        }
+
+        public function lastInsertId(?string $name = null): string|false {
+            return $this->pdo->lastInsertId($name);
         }
 
         /** @param array<int, string> $columns */
@@ -1783,6 +1788,10 @@ namespace PFrame {
 
         public static function insertGetId(string $sql, array|string|null $params = null): int {
             return self::db()->insertGetId($sql, $params);
+        }
+
+        public static function lastInsertId(?string $name = null): string|false {
+            return self::db()->lastInsertId($name);
         }
 
         /** @param array<int, string> $columns */
