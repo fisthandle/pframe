@@ -69,4 +69,15 @@ class CacheTest extends TestCase {
 
         $this->assertSame('d', $this->cache->get('x', 'd'));
     }
+
+    public function testClearRemovesRateLimitLockFiles(): void {
+        $this->cache->rateCheck('login', '1.2.3.4', 1, 60);
+        $locksBefore = glob($this->dir . '/*.lock') ?: [];
+        $this->assertNotEmpty($locksBefore);
+
+        $this->cache->clear();
+
+        $locksAfter = glob($this->dir . '/*.lock') ?: [];
+        $this->assertSame([], $locksAfter);
+    }
 }

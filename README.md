@@ -194,6 +194,48 @@ Built-in middleware:
 - `\PFrame\Middleware::auth()` -- guest -> flash warning + redirect to `login` route
 - `\PFrame\Middleware::csrf()` -- validates token from `csrf_token` field or `X-Csrf-Token` header
 
+### Trusted Proxies
+
+`Request::fromGlobalsWithProxies()` trusts forwarded headers only for exact IPs from `trusted_proxies`.
+
+```php
+return [
+    'trusted_proxies' => ['127.0.0.1', '172.20.0.5'],
+];
+```
+
+CIDR ranges are not supported. Use exact addresses.
+
+### Worker Mode (FrankenPHP)
+
+Use request-scoped reset when running long-lived workers:
+
+```php
+$handler = static function () use ($app): void {
+    try {
+        $app->resetRequestState();
+        session_start();
+        $app->run();
+    } finally {
+        $dbConfig = $app->config('db');
+        if (is_array($dbConfig)) {
+            $db = $app->db();
+            if ($db->trans()) {
+                $db->rollback();
+            }
+            $db->resetRequestState();
+        }
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+    }
+};
+```
+
+### Rate Limiting Helper
+
+`Cache::rateCheck($scope, $id, $max, $window)` is protected by a lock file to keep updates atomic between concurrent requests.
+
 ## Migration Compatibility
 
 For F3-to-PFrame migration scenarios, the framework now includes:

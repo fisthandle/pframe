@@ -1343,8 +1343,8 @@ namespace PFrame {
 
         public function write(string $id, string $data): bool {
             if (!$this->lockAcquired) {
-                $this->releaseLock();
-                return true;
+                error_log('[SESSION] Refused write without advisory lock for ' . $id);
+                return false;
             }
 
             try {
@@ -1878,33 +1878,60 @@ namespace PFrame {
             foreach (glob($this->dir . '/*.cache') ?: [] as $file) {
                 unlink($file);
             }
+            foreach (glob($this->dir . '/*.lock') ?: [] as $file) {
+                unlink($file);
+            }
         }
 
         public function rateCheck(string $scope, string $id, int $max, int $window): ?int {
             $key = 'rl:' . $scope . ':' . $id;
-            $data = $this->get($key);
-            if (!is_array($data)) {
-                $this->set($key, ['count' => 1, 'start' => time()], $window);
+            return $this->withRateLock($key, function () use ($key, $max, $window): ?int {
+                $data = $this->get($key);
+                if (!is_array($data)) {
+                    $this->set($key, ['count' => 1, 'start' => time()], $window);
+                    return null;
+                }
+
+                $elapsed = time() - (int) ($data['start'] ?? 0);
+                if ($elapsed >= $window) {
+                    $this->set($key, ['count' => 1, 'start' => time()], $window);
+                    return null;
+                }
+
+                if ((int) ($data['count'] ?? 0) >= $max) {
+                    return $window - $elapsed;
+                }
+
+                $data['count'] = (int) ($data['count'] ?? 0) + 1;
+                $this->set($key, $data, $window);
                 return null;
-            }
-
-            $elapsed = time() - (int) ($data['start'] ?? 0);
-            if ($elapsed >= $window) {
-                $this->set($key, ['count' => 1, 'start' => time()], $window);
-                return null;
-            }
-
-            if ((int) ($data['count'] ?? 0) >= $max) {
-                return $window - $elapsed;
-            }
-
-            $data['count'] = (int) ($data['count'] ?? 0) + 1;
-            $this->set($key, $data, $window);
-            return null;
+            });
         }
 
         private function path(string $key): string {
             return $this->dir . '/' . md5($key) . '.cache';
+        }
+
+        private function withRateLock(string $key, callable $callback): ?int {
+            $lockPath = $this->dir . '/' . md5($key) . '.lock';
+            $handle = fopen($lockPath, 'c');
+            if ($handle === false) {
+                return $callback();
+            }
+
+            try {
+                if (!flock($handle, LOCK_EX)) {
+                    return $callback();
+                }
+
+                try {
+                    return $callback();
+                } finally {
+                    flock($handle, LOCK_UN);
+                }
+            } finally {
+                fclose($handle);
+            }
         }
     }
 

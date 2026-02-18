@@ -83,4 +83,19 @@ class SessionTest extends TestCase {
 
         $this->assertStringContainsString('test', $data);
     }
+
+    public function testWriteFailsWhenLockWasNotAcquired(): void {
+        $session = new Session($this->db, advisory: false);
+        $id = bin2hex(random_bytes(16));
+
+        $ref = new \ReflectionClass($session);
+        $lockProp = $ref->getProperty('lockAcquired');
+        $lockProp->setAccessible(true);
+        $lockProp->setValue($session, false);
+
+        $written = $session->write($id, 'locked-out-data');
+
+        $this->assertFalse($written);
+        $this->assertSame('', $session->read($id));
+    }
 }
