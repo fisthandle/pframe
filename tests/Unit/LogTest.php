@@ -60,4 +60,9 @@ class LogTest extends TestCase {
         $this->expectException(\InvalidArgumentException::class);
         Log::toFile('..\\evil.log', 'pwned');
     }
+
+    public function testToFileRejectsNullByte(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        Log::toFile("evil\0.log", 'pwned');
+    }
 }

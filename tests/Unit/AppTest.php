@@ -203,6 +203,16 @@ class AppTest extends TestCase {
         $this->assertSame('GET, HEAD', $response->headers['Allow'] ?? null);
     }
 
+    public function testMethodNotAllowedSkipsAjaxOnlyRoutesForNonAjaxRequest(): void {
+        $app = new App();
+        $app->get('/vote', HelloStub::class, 'index');
+        $app->post('/vote', HelloStub::class, 'submit', ajax: true);
+
+        $response = $app->handle(new Request(method: 'PUT', path: '/vote'));
+        $this->assertSame(405, $response->status);
+        $this->assertSame('GET, HEAD', $response->headers['Allow'] ?? null);
+    }
+
     public function testSecurityHeadersMiddlewareAddsDefaults(): void {
         $app = new App();
         $app->addSecurityHeaders();
@@ -238,6 +248,31 @@ class AppTest extends TestCase {
 
         $response = $app->handle(new Request(method: 'GET', path: '/', server: ['HTTPS' => 'on']));
         $this->assertArrayNotHasKey('Strict-Transport-Security', $response->headers);
+    }
+
+    public function testSecurityHeadersTrustForwardedProtoFromTrustedProxy(): void {
+        $app = new App();
+        $app->setConfig('trusted_proxies', ['10.0.0.1']);
+        $app->addSecurityHeaders();
+        $app->get('/', HelloStub::class, 'index');
+
+        $response = $app->handle(new Request(
+            method: 'GET',
+            path: '/',
+            server: ['REMOTE_ADDR' => '10.0.0.1'],
+            headers: ['X-Forwarded-Proto' => 'https'],
+        ));
+        $this->assertSame('max-age=63072000; includeSubDomains; preload', $response->headers['Strict-Transport-Security'] ?? null);
+    }
+
+    public function testSecurityHeadersDoNotOverrideExistingHeaderCaseInsensitive(): void {
+        $app = new App();
+        $app->addSecurityHeaders();
+        $app->get('/csp', HeaderCtrl::class, 'customCsp');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/csp'));
+        $this->assertSame("default-src 'none'", $response->headers['content-security-policy'] ?? null);
+        $this->assertArrayNotHasKey('Content-Security-Policy', $response->headers);
     }
 
     public function testHttpExceptionMessageDependsOnDebug(): void {
@@ -403,6 +438,18 @@ class AppTest extends TestCase {
 
         $this->assertSame(403, $response->status);
     }
+
+    public function testAppInstanceThrowsWhenRequestedAsDifferentSubclass(): void {
+        new App();
+
+        $this->expectException(\LogicException::class);
+        AppTestCustomApp::instance();
+    }
+
+    public function testAppInstanceReturnsSameSubclassInstance(): void {
+        $app = new AppTestCustomApp();
+        $this->assertSame($app, AppTestCustomApp::instance());
+    }
 }
 
 class HelloStub {
@@ -507,9 +554,18 @@ class WarningCtrl {
     }
 }
 
+class HeaderCtrl {
+    public function customCsp(): Response {
+        return new Response('ok', headers: ['content-security-policy' => "default-src 'none'"]);
+    }
+}
+
 class CsrfTestCtrl extends \PFrame\Controller {
     public function run(): Response {
         $this->validateCsrf();
         return new Response('ok');
     }
+}
+
+class AppTestCustomApp extends App {
 }

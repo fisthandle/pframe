@@ -98,4 +98,24 @@ class SessionTest extends TestCase {
         $this->assertFalse($written);
         $this->assertSame('', $session->read($id));
     }
+
+    public function testWriteUsesMysqlUpsertQueryWhenDriverIsMysql(): void {
+        $db = $this->getMockBuilder(Db::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['driver', 'exec'])
+            ->getMock();
+        $db->method('driver')->willReturn('mysql');
+        $db->expects($this->once())
+            ->method('exec')
+            ->with(
+                $this->stringContains('ON DUPLICATE KEY UPDATE'),
+                $this->callback(static function (array $params): bool {
+                    return $params[0] === 'sid_mysql' && $params[1] === 'payload';
+                }),
+            )
+            ->willReturn(1);
+
+        $session = new Session($db, advisory: false);
+        $this->assertTrue($session->write('sid_mysql', 'payload'));
+    }
 }

@@ -379,6 +379,9 @@ namespace PFrame {
             if (self::$instance === null) {
                 self::$instance = new static();
             }
+            if (!self::$instance instanceof static) {
+                throw new \LogicException('App instance already initialized as ' . self::$instance::class . ', requested ' . static::class . '.');
+            }
             /** @var static $instance */
             $instance = self::$instance;
             return $instance;

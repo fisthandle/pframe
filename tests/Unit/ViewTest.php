@@ -84,4 +84,9 @@ class ViewTest extends TestCase {
 
         $this->assertSame($levelBefore, ob_get_level(), 'OB level must be restored after exception');
     }
+
+    public function testConstructorThrowsWhenBasePathDoesNotExist(): void {
+        $this->expectException(\RuntimeException::class);
+        new View('/path/that/does/not/exist-' . uniqid('', true));
+    }
 }

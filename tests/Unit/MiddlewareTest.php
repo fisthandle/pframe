@@ -78,6 +78,17 @@ class MiddlewareTest extends TestCase {
         );
         $this->assertSame(200, $fromHeader->status);
     }
+
+    public function testCsrfRejectsArrayToken(): void {
+        $token = Csrf::token();
+        $mw = Middleware::csrf();
+
+        $this->expectException(HttpException::class);
+        $mw(
+            new Request(method: 'POST', path: '/x', post: [Csrf::FIELD_NAME => [$token]]),
+            fn (Request $req): Response => new Response('ok'),
+        );
+    }
 }
 
 class MiddlewareLoginCtrl extends Controller {

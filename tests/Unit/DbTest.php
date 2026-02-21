@@ -330,4 +330,13 @@ class DbTest extends TestCase {
 
         $this->assertSame('val', $this->db->var('SELECT col1 FROM "odd table"'));
     }
+
+    public function testBatchInsertQuotesColumnIdentifiers(): void {
+        $this->db->exec('CREATE TABLE "odd cols" ("select" TEXT, "col name" TEXT)');
+        $this->db->batchInsert('odd cols', ['select', 'col name'], [['v1', 'v2']]);
+
+        $row = $this->db->row('SELECT "select", "col name" FROM "odd cols"');
+        $this->assertSame('v1', $row['select']);
+        $this->assertSame('v2', $row['col name']);
+    }
 }
