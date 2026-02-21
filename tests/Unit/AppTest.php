@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace PFrame\Tests\Unit;
 
 use PFrame\App;
+use PFrame\Csrf;
 use PFrame\HttpException;
 use PFrame\Request;
 use PFrame\Response;
@@ -385,6 +386,23 @@ class AppTest extends TestCase {
         $response = $app->handle(new Request(method: 'GET', path: '/warn'));
         $this->assertSame(500, $response->status);
     }
+
+    public function testCsrfArrayTokenReturns403Not500(): void {
+        $_SESSION = [];
+        Csrf::token();
+
+        $app = new App();
+        $app->post('/csrf-test', CsrfTestCtrl::class, 'run');
+
+        $request = new Request(
+            method: 'POST',
+            path: '/csrf-test',
+            post: [Csrf::FIELD_NAME => ['array', 'value']],
+        );
+        $response = $app->handle($request);
+
+        $this->assertSame(403, $response->status);
+    }
 }
 
 class HelloStub {
@@ -485,6 +503,13 @@ class BeforeStopsCtrl {
 class WarningCtrl {
     public function run(): Response {
         trigger_error('test warning', E_USER_WARNING);
+        return new Response('ok');
+    }
+}
+
+class CsrfTestCtrl extends \PFrame\Controller {
+    public function run(): Response {
+        $this->validateCsrf();
         return new Response('ok');
     }
 }

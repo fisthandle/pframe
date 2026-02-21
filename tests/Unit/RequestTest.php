@@ -120,4 +120,10 @@ class RequestTest extends TestCase {
         $empty = new Request(method: 'POST', path: '/');
         $this->assertNull($empty->jsonBody());
     }
+
+    public function testHeaderLookupCaseInsensitiveWithManualHeaders(): void {
+        $request = new Request('GET', '/', headers: ['x-custom-header' => 'value']);
+        $this->assertSame('value', $request->header('X-Custom-Header'));
+        $this->assertSame('value', $request->header('x-custom-header'));
+    }
 }

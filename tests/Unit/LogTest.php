@@ -50,4 +50,14 @@ class LogTest extends TestCase {
 
         $this->assertNotEmpty(glob($this->tmpDir . '/*custom.log'));
     }
+
+    public function testToFileRejectsPathTraversal(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        Log::toFile('../../etc/evil.log', 'pwned');
+    }
+
+    public function testToFileRejectsBackslash(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        Log::toFile('..\\evil.log', 'pwned');
+    }
 }

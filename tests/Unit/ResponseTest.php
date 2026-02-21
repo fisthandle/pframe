@@ -54,6 +54,12 @@ class ResponseTest extends TestCase {
         $this->assertSame('/login', $r->headers['Location']);
     }
 
+    public function testRedirectBlocksExternalUrlWithoutHost(): void {
+        unset($_SERVER['HTTP_HOST']);
+        $this->expectException(\InvalidArgumentException::class);
+        Response::redirect('https://evil.com/phish');
+    }
+
     public function testRedirectBlocksSchemeRelativeUrl(): void {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('External redirect not allowed');

@@ -261,7 +261,7 @@ class DbTest extends TestCase {
 
         $insertCount = 0;
         foreach ($db->queryLog() as $entry) {
-            if (str_starts_with($entry['sql'], 'INSERT INTO bulk')) {
+            if (str_starts_with($entry['sql'], 'INSERT INTO `bulk`')) {
                 $insertCount++;
             }
         }
@@ -317,5 +317,17 @@ class DbTest extends TestCase {
         $this->db->batchInsert('users', ['name', 'email'], [
             ['Joe', 'j@x.com', 'extra'],
         ]);
+    }
+
+    public function testBatchInsertRejectsInvalidMode(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->db->batchInsert('users', ['name'], [['Joe']], 'DROP TABLE users; --');
+    }
+
+    public function testBatchInsertQuotesIdentifiers(): void {
+        $this->db->exec('CREATE TABLE "odd table" (col1 TEXT)');
+        $this->db->batchInsert('odd table', ['col1'], [['val']]);
+
+        $this->assertSame('val', $this->db->var('SELECT col1 FROM "odd table"'));
     }
 }

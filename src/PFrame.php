@@ -51,6 +51,8 @@ namespace PFrame {
     class Request {
         /** @var array<string, mixed> */
         private array $params = [];
+        /** @var array<string, string> */
+        public readonly array $headers;
 
         /**
          * @param array<string, mixed> $query
@@ -66,12 +68,17 @@ namespace PFrame {
             public readonly array $query = [],
             public readonly array $post = [],
             public readonly array $server = [],
-            public readonly array $headers = [],
+            array $headers = [],
             public readonly array $cookies = [],
             public readonly array $files = [],
             public readonly string $ip = '',
             public readonly string $body = '',
         ) {
+            $normalized = [];
+            foreach ($headers as $k => $v) {
+                $normalized[ucwords(strtolower((string) $k), '-')] = (string) $v;
+            }
+            $this->headers = $normalized;
         }
 
         public static function fromGlobals(): static {
@@ -81,13 +88,14 @@ namespace PFrame {
         /** @param list<string> $trustedProxies */
         public static function fromGlobalsWithProxies(array $trustedProxies = []): static {
             $headers = self::parseServerHeaders($_SERVER);
-            return self::buildFromGlobals(self::resolveIp($_SERVER, $headers, $trustedProxies));
+            return self::buildFromGlobals(self::resolveIp($_SERVER, $headers, $trustedProxies), $headers);
         }
 
-        private static function buildFromGlobals(string $ip): static {
+        /** @param array<string, string>|null $headers */
+        private static function buildFromGlobals(string $ip, ?array $headers = null): static {
             $uri = $_SERVER['REQUEST_URI'] ?? '/';
             $path = parse_url($uri, PHP_URL_PATH) ?: '/';
-            $headers = self::parseServerHeaders($_SERVER);
+            $headers ??= self::parseServerHeaders($_SERVER);
 
             return new static(
                 method: strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')),
@@ -177,13 +185,7 @@ namespace PFrame {
         }
 
         public function header(string $name, ?string $default = null): ?string {
-            $needle = strtolower($name);
-            foreach ($this->headers as $key => $value) {
-                if (strtolower((string) $key) === $needle) {
-                    return (string) $value;
-                }
-            }
-            return $default;
+            return $this->headers[ucwords(strtolower($name), '-')] ?? $default;
         }
 
         public function param(string $key, mixed $default = null): mixed {
@@ -260,8 +262,11 @@ namespace PFrame {
 
             if (!str_starts_with($url, '/')) {
                 $host = parse_url($url, PHP_URL_HOST);
-                $currentHost = (string) ($_SERVER['HTTP_HOST'] ?? '');
-                if (is_string($host) && $currentHost !== '') {
+                if (is_string($host)) {
+                    $currentHost = (string) ($_SERVER['HTTP_HOST'] ?? '');
+                    if ($currentHost === '') {
+                        throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
+                    }
                     $normalizedCurrentHost = (string) (parse_url('http://' . $currentHost, PHP_URL_HOST) ?? $currentHost);
                     if (strcasecmp($host, $normalizedCurrentHost) !== 0) {
                         throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
@@ -374,10 +379,9 @@ namespace PFrame {
             if (self::$instance === null) {
                 self::$instance = new static();
             }
-            if (!self::$instance instanceof static) {
-                self::$instance = new static();
-            }
-            return self::$instance;
+            /** @var static $instance */
+            $instance = self::$instance;
+            return $instance;
         }
 
         public function resetRequestState(): void {
@@ -681,16 +685,21 @@ namespace PFrame {
             }
 
             $allowed = [];
-            foreach ($this->routes as $route) {
-                if (!preg_match($route['regex'], $path)) {
+            foreach ($this->routesByMethod as $httpMethod => $indexes) {
+                if ($httpMethod === $method) {
                     continue;
                 }
-                if ($route['ajax'] && !$isAjax) {
-                    continue;
-                }
+                foreach ($indexes as $i) {
+                    $route = $this->routes[$i];
+                    if (!preg_match($route['regex'], $path)) {
+                        continue;
+                    }
+                    if ($route['ajax'] && !$isAjax) {
+                        continue;
+                    }
 
-                foreach ($route['methods'] as $allowedMethod) {
-                    $allowed[$allowedMethod] = true;
+                    $allowed[$httpMethod] = true;
+                    break;
                 }
             }
 
@@ -970,6 +979,7 @@ namespace PFrame {
 
     class Db {
         private \PDO $pdo;
+        private readonly string $driver;
 
         /** @var array<int, array{sql: string, time: float}> */
         private array $log = [];
@@ -996,11 +1006,16 @@ namespace PFrame {
                     \PDO::ATTR_EMULATE_PREPARES => false,
                 ],
             );
+            $this->driver = (string) $this->pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
             $this->logQueries = (bool) ($config['log_queries'] ?? false);
         }
 
         public function pdo(): \PDO {
             return $this->pdo;
+        }
+
+        public function driver(): string {
+            return $this->driver;
         }
 
         /**
@@ -1123,10 +1138,18 @@ namespace PFrame {
                 return;
             }
 
+            $allowedModes = ['INSERT', 'REPLACE', 'INSERT OR REPLACE', 'INSERT OR IGNORE', 'INSERT IGNORE'];
+            $mode = strtoupper($mode);
+            if (!in_array($mode, $allowedModes, true)) {
+                throw new \InvalidArgumentException('Invalid insert mode: ' . $mode);
+            }
+
+            $quoteIdentifier = static fn(string $identifier): string => '`' . str_replace('`', '``', $identifier) . '`';
             $colCount = count($columns);
-            $colList = implode(', ', $columns);
+            $colList = implode(', ', array_map($quoteIdentifier, $columns));
+            $quotedTable = $quoteIdentifier($table);
             $rowPlaceholder = '(' . implode(',', array_fill(0, $colCount, '?')) . ')';
-            $maxParams = $this->pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'sqlite' ? 999 : 65535;
+            $maxParams = $this->driver === 'sqlite' ? 999 : 65535;
             $chunkSize = max(1, (int) floor($maxParams / $colCount));
 
             foreach (array_chunk($rows, $chunkSize) as $chunk) {
@@ -1137,7 +1160,7 @@ namespace PFrame {
                         $params[] = $value;
                     }
                 }
-                $this->exec("$mode INTO $table ($colList) VALUES $placeholders", $params);
+                $this->exec("$mode INTO $quotedTable ($colList) VALUES $placeholders", $params);
             }
         }
 
@@ -1334,6 +1357,7 @@ namespace PFrame {
 
     class View {
         private ?string $layoutFile = null;
+        private readonly string $realBasePath;
 
         /** @var array<string, mixed> */
         private array $layoutData = [];
@@ -1342,6 +1366,11 @@ namespace PFrame {
         private array $renderLog = [];
 
         public function __construct(private readonly string $basePath) {
+            $resolved = realpath($basePath);
+            if ($resolved === false) {
+                throw new \RuntimeException('View base path not found: ' . $basePath);
+            }
+            $this->realBasePath = $resolved;
         }
 
         /** @return list<array{template: string, ms: float}> */
@@ -1383,9 +1412,9 @@ namespace PFrame {
         /** @param array<string, mixed> $data */
         private function renderFile(string $template, array $data): string {
             $filePath = rtrim($this->basePath, '/') . '/' . ltrim($template, '/');
-            $realBase = realpath($this->basePath);
+            $realBase = $this->realBasePath;
             $realFile = realpath($filePath);
-            if ($realFile === false || $realBase === false || !str_starts_with($realFile, $realBase . '/')) {
+            if ($realFile === false || !str_starts_with($realFile, $realBase . '/')) {
                 throw new \RuntimeException('Template not found: ' . $template);
             }
 
@@ -1394,7 +1423,12 @@ namespace PFrame {
 
             $t = microtime(true);
             ob_start();
-            include $filePath;
+            try {
+                include $filePath;
+            } catch (\Throwable $e) {
+                ob_end_clean();
+                throw $e;
+            }
             $result = (string) ob_get_clean();
             $this->renderLog[] = ['template' => $template, 'ms' => round((microtime(true) - $t) * 1000, 2)];
             return $result;
@@ -1410,8 +1444,7 @@ namespace PFrame {
             private readonly Db $db,
             private readonly bool $advisory = true,
         ) {
-            $driver = (string) $this->db->pdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
-            $this->useAdvisoryLock = $this->advisory && $driver === 'mysql';
+            $this->useAdvisoryLock = $this->advisory && $this->db->driver() === 'mysql';
             $this->lockAcquired = !$this->useAdvisoryLock;
         }
 
@@ -1479,7 +1512,7 @@ namespace PFrame {
                 $agent = substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 5000);
                 $stamp = time();
 
-                $driver = (string) $this->db->pdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
+                $driver = $this->db->driver();
                 if ($driver === 'sqlite') {
                     $this->db->exec(
                         'INSERT OR REPLACE INTO sessions (session_id, data, ip, agent, stamp) VALUES (?, ?, ?, ?, ?)',
@@ -1778,7 +1811,8 @@ namespace PFrame {
         }
 
         protected function validateCsrf(): void {
-            $token = $this->request->post(Csrf::FIELD_NAME) ?? $this->request->header('X-Csrf-Token');
+            $raw = $this->request->post(Csrf::FIELD_NAME) ?? $this->request->header('X-Csrf-Token');
+            $token = is_scalar($raw) ? (string) $raw : null;
             if (!Csrf::validate($token)) {
                 throw HttpException::forbidden('Sesja wygasła. Odśwież stronę.');
             }
@@ -1860,6 +1894,9 @@ namespace PFrame {
         public static function toFile(string $filename, string $message): void {
             if (self::$basePath === null) {
                 return;
+            }
+            if (str_contains($filename, '/') || str_contains($filename, '\\') || str_contains($filename, "\0")) {
+                throw new \InvalidArgumentException('Invalid log filename: ' . $filename);
             }
 
             if (!is_dir(self::$basePath)) {

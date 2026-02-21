@@ -63,4 +63,25 @@ class ViewTest extends TestCase {
             @rmdir($root);
         }
     }
+
+    public function testRenderFileExceptionCleansOutputBuffer(): void {
+        $dir = sys_get_temp_dir() . '/pframe_view_test_' . uniqid('', true);
+        mkdir($dir);
+        file_put_contents($dir . '/throw.php', '<?php throw new \RuntimeException("boom");');
+
+        $view = new View($dir);
+        $levelBefore = ob_get_level();
+
+        try {
+            $view->render('throw.php');
+            $this->fail('Expected RuntimeException');
+        } catch (\RuntimeException) {
+            // expected
+        } finally {
+            @unlink($dir . '/throw.php');
+            @rmdir($dir);
+        }
+
+        $this->assertSame($levelBefore, ob_get_level(), 'OB level must be restored after exception');
+    }
 }
