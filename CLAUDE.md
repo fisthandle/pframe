@@ -9,12 +9,9 @@ Single-file PHP 8.4+ micro-framework. Zero dependencies, copy-paste deployment.
 - **Brak mail:** do maili używamy PHPMailer (zewnętrznie)
 - **Fasada:** `PFrame\Base` — projekty definiują `class P1 extends \PFrame\Base` z project-specific stałymi
 
-## Styl kodu
+## PHP Standard
 
-- **1TBS** (One True Brace Style) — klamra otwierająca w tej samej linii
-- `declare(strict_types=1)` wszędzie
-- PSR-12 z wyjątkiem 1TBS dla klas/metod
-- Typy wszędzie, `===` zamiast `==`
+Konwencje kodu, Docker, backup, testy, deploy: `/php-standards` (skill) lub `~/dev/infra/docs/php-application-standard.md`.
 
 ## Klasy (PFrame namespace)
 
@@ -25,13 +22,6 @@ HttpException, Request, Response, SseResponse, App, Db, View, Session, Csrf, Fla
 `h()`, `ha()`, `getS()`, `strlenS()`, `substrS()`, `trimS()`, `strtotimeS()`, `strip_tagsS()`, `countS()`, `explodeS()`
 
 Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
-
-## Testy
-
-```bash
-vendor/bin/phpunit              # wszystkie
-vendor/bin/phpunit tests/Unit   # tylko unit
-```
 
 ## DB
 

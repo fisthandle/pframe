@@ -312,6 +312,7 @@ namespace PFrame {
         private array $routeGroups = [['prefix' => '', 'middleware' => [], 'name_prefix' => '']];
 
         private ?Db $db = null;
+        private ?View $lastView = null;
 
         private float $startTime;
 
@@ -334,6 +335,7 @@ namespace PFrame {
 
         public function resetRequestState(): void {
             $this->startTime = microtime(true);
+            $this->lastView = null;
         }
 
         public function loadConfig(string $path): void {
@@ -400,6 +402,14 @@ namespace PFrame {
 
         public function setDb(Db $db): void {
             $this->db = $db;
+        }
+
+        public function lastView(): ?View {
+            return $this->lastView;
+        }
+
+        public function setLastView(View $view): void {
+            $this->lastView = $view;
         }
 
         public function get(string $path, string $controller, string $action, array $mw = [], ?string $name = null, bool $ajax = false): void {
@@ -1232,7 +1242,19 @@ namespace PFrame {
 
         private array $layoutData = [];
 
+        /** @var list<array{template: string, ms: float}> */
+        private array $renderLog = [];
+
         public function __construct(private readonly string $basePath) {
+        }
+
+        /** @return list<array{template: string, ms: float}> */
+        public function renderLog(): array {
+            return $this->renderLog;
+        }
+
+        public function renderTime(): float {
+            return array_sum(array_column($this->renderLog, 'ms'));
         }
 
         public function render(string $template, array $data = []): string {
@@ -1269,9 +1291,12 @@ namespace PFrame {
             $view = $this;
             extract($data, EXTR_SKIP);
 
+            $t = microtime(true);
             ob_start();
             include $filePath;
-            return (string) ob_get_clean();
+            $result = (string) ob_get_clean();
+            $this->renderLog[] = ['template' => $template, 'ms' => round((microtime(true) - $t) * 1000, 2)];
+            return $result;
         }
     }
 
@@ -1573,6 +1598,7 @@ namespace PFrame {
             $app = App::instance();
             $viewPath = (string) $app->config('view_path', 'templates');
             $view = new View($viewPath);
+            $app->setLastView($view);
 
             $merged = array_merge($this->data, $data);
             $merged['flash'] = (new Flash())->get();
@@ -1932,6 +1958,176 @@ namespace PFrame {
             } finally {
                 fclose($handle);
             }
+        }
+    }
+
+    class DebugBar {
+        public function __construct(
+            private App $app,
+        ) {}
+
+        /** @return array{gen_ms: float, db_ms: float, db_count: int, view_ms: float, views: list<array{template: string, ms: float}>, mem_mb: float, peak_mb: float, included_files: list<string>, queries: list<array{sql: string, ms: float}>, duplicates: list<array{pattern: string|null, count: int, total_ms: float}>, slowest: list<array{sql: string, ms: float}>} */
+        public function toArray(): array {
+            $queries = [];
+            $dbConfig = $this->app->config('db');
+            if (is_array($dbConfig)) {
+                $db = $this->app->db();
+                foreach ($db->queryLog() as $entry) {
+                    $queries[] = [
+                        'sql' => $entry['sql'],
+                        'ms' => round($entry['time'] * 1000, 2),
+                    ];
+                }
+            }
+
+            // Detect duplicate query patterns (N+1)
+            $patterns = [];
+            foreach ($queries as $q) {
+                $pattern = preg_replace(['/\'[^\']*\'/', '/\b\d+\b/', '/\s+/'], ['?', '?', ' '], $q['sql']);
+                $patterns[$pattern] ??= ['pattern' => $pattern, 'count' => 0, 'total_ms' => 0.0];
+                $patterns[$pattern]['count']++;
+                $patterns[$pattern]['total_ms'] += $q['ms'];
+            }
+            $duplicates = array_values(array_filter($patterns, static fn(array $p): bool => $p['count'] > 1));
+            usort($duplicates, static fn(array $a, array $b): int => $b['count'] <=> $a['count']);
+            foreach ($duplicates as &$dup) {
+                $dup['total_ms'] = round($dup['total_ms'], 2);
+            }
+            unset($dup);
+
+            // Top 3 slowest queries
+            $slowest = $queries;
+            usort($slowest, static fn(array $a, array $b): int => $b['ms'] <=> $a['ms']);
+            $slowest = array_slice($slowest, 0, 3);
+
+            // View render log
+            $views = [];
+            $view = $this->app->lastView();
+            if ($view !== null) {
+                $views = $view->renderLog();
+            }
+
+            return [
+                'gen_ms' => round($this->app->elapsed() * 1000, 1),
+                'db_ms' => round(array_sum(array_column($queries, 'ms')), 1),
+                'db_count' => count($queries),
+                'view_ms' => round(array_sum(array_column($views, 'ms')), 1),
+                'views' => $views,
+                'mem_mb' => round(memory_get_usage(true) / 1048576, 1),
+                'peak_mb' => round(memory_get_peak_usage(true) / 1048576, 1),
+                'included_files' => get_included_files(),
+                'queries' => $queries,
+                'duplicates' => $duplicates,
+                'slowest' => $slowest,
+            ];
+        }
+
+        public function toJson(): string {
+            return json_encode($this->toArray(), JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        }
+
+        public function render(): string {
+            $d = $this->toArray();
+            $id = 'pf-dbg-' . mt_rand(1000, 9999);
+            $qs = $d['queries'];
+
+            $shortRows = '';
+            $fullRows = '';
+            if ($qs === []) {
+                $shortRows = '<div>Brak zapytań.</div>';
+                $fullRows = $shortRows;
+            } else {
+                foreach ($qs as $i => $q) {
+                    $n = $i + 1;
+                    $sql = preg_replace('/\s+/', ' ', trim($q['sql']));
+                    $shortSql = mb_strlen($sql) > 120 ? mb_substr($sql, 0, 120) . '…' : $sql;
+                    $ms = $q['ms'];
+                    $shortRows .= '<div>' . $n . '. (' . $ms . 'ms) ' . h($shortSql) . '</div>';
+                    $fullRows .= '<div>' . $n . '. (' . $ms . 'ms) ' . h($sql) . '</div>';
+                }
+            }
+
+            // Files list: views with times first (sorted by time desc), then the rest
+            $files = $d['included_files'];
+            $fileCount = count($files);
+            $viewTimes = [];
+            foreach ($d['views'] as $v) {
+                $viewTimes[$v['template']] = $v['ms'];
+            }
+            $viewFiles = [];
+            $otherFiles = [];
+            foreach ($files as $f) {
+                $matched = false;
+                foreach ($viewTimes as $tpl => $ms) {
+                    if (str_ends_with($f, '/' . ltrim($tpl, '/'))) {
+                        $viewFiles[] = ['path' => $f, 'ms' => $ms];
+                        $matched = true;
+                        break;
+                    }
+                }
+                if (!$matched) {
+                    $otherFiles[] = $f;
+                }
+            }
+            usort($viewFiles, static fn(array $a, array $b): int => $b['ms'] <=> $a['ms']);
+            $filesList = '';
+            foreach ($viewFiles as $vf) {
+                $filesList .= '<div><b style="color:#986801">(' . $vf['ms'] . 'ms)</b> ' . h($vf['path']) . '</div>';
+            }
+            foreach ($otherFiles as $f) {
+                $filesList .= '<div>' . h($f) . '</div>';
+            }
+
+            $summary = 'Gen: <b>' . $d['gen_ms'] . 'ms</b>'
+                . ' | DB: <b>' . $d['db_ms'] . 'ms</b> (' . $d['db_count'] . ')'
+                . ' | View: <b>' . $d['view_ms'] . 'ms</b> (' . count($d['views']) . ')'
+                . ' | Mem: <b>' . $d['mem_mb'] . 'MB</b> (peak: ' . $d['peak_mb'] . 'MB)'
+                . ' | <span style="cursor:pointer;text-decoration:underline" id="' . $id . '-files-toggle">Files: <b>' . $fileCount . '</b></span>'
+                . ' | <span style="cursor:pointer;text-decoration:underline" id="' . $id . '-toggle">toggle</span>';
+
+            // Top slow — short/full versions like queries
+            $slowShort = '';
+            $slowFull = '';
+            if ($d['slowest'] !== []) {
+                foreach ($d['slowest'] as $s) {
+                    $sql = preg_replace('/\s+/', ' ', trim($s['sql']));
+                    $short = mb_strlen($sql) > 100 ? mb_substr($sql, 0, 100) . '…' : $sql;
+                    $slowShort .= '<div>  <b>' . $s['ms'] . 'ms</b> ' . h($short) . '</div>';
+                    $slowFull .= '<div>  <b>' . $s['ms'] . 'ms</b> ' . h($sql) . '</div>';
+                }
+            }
+
+            // N+1 candidates
+            $dupsHtml = '';
+            if ($d['duplicates'] !== []) {
+                $dupsHtml .= '<div style="margin-top:4px"><b>N+1 candidates:</b></div>';
+                foreach ($d['duplicates'] as $dup) {
+                    $pat = $dup['pattern'] ?? '';
+                    $pattern = mb_strlen($pat) > 90 ? mb_substr($pat, 0, 90) . '…' : $pat;
+                    $dupsHtml .= '<div>  <b>' . $dup['count'] . '×</b> (' . $dup['total_ms'] . 'ms) ' . h($pattern) . '</div>';
+                }
+            }
+
+            $insightsBox = '';
+            if ($slowShort !== '' || $dupsHtml !== '') {
+                $slowLabel = $slowShort !== '' ? '<div><b>Top slow:</b></div>' : '';
+                $slowSection = $slowLabel
+                    . '<pre style="margin:0;font:inherit;white-space:pre;overflow-x:auto" id="' . $id . '-slow-short">' . $slowShort . '</pre>'
+                    . '<pre style="margin:0;font:inherit;white-space:pre;overflow-x:auto;display:none" id="' . $id . '-slow-full">' . $slowFull . '</pre>';
+                $insightsBox = '<div style="background:#f5f5f0;border:1px solid #ddd;padding:6px 10px;margin-top:8px;border-radius:3px" id="' . $id . '-insights">'
+                    . $slowSection
+                    . $dupsHtml
+                    . '</div>';
+            }
+
+            return <<<HTML
+            <div id="{$id}" style="background:#e8e8e8;color:#333;font-family:monospace;font-size:14px;padding:10px 14px;border-top:1px solid #ccc;margin-top:2rem;line-height:1.6">
+            <pre style="margin:0;font:inherit;white-space:pre-wrap"><div id="{$id}-short">{$shortRows}</div></pre><pre style="margin:0;font:inherit;white-space:pre;overflow-x:auto;display:none" id="{$id}-full">{$fullRows}</pre>{$insightsBox}
+            <div style="margin-top:6px">{$summary}</div>
+            <pre style="margin:0;font:inherit;white-space:pre;overflow-x:auto;display:none;margin-top:6px;font-size:12px;color:#555" id="{$id}-files">{$filesList}</pre>
+            </div>
+            <script>document.getElementById('{$id}-toggle').addEventListener('click',function(){var s=document.getElementById('{$id}-short'),f=document.getElementById('{$id}-full'),ss=document.getElementById('{$id}-slow-short'),sf=document.getElementById('{$id}-slow-full');if(f.style.display==='none'){f.style.display='block';s.style.display='none';if(ss){ss.style.display='none';sf.style.display='block'}}else{f.style.display='none';s.style.display='block';if(ss){ss.style.display='block';sf.style.display='none'}}});document.getElementById('{$id}-files-toggle').addEventListener('click',function(){var fl=document.getElementById('{$id}-files');fl.style.display=fl.style.display==='none'?'block':'none'})</script>
+            HTML;
         }
     }
 
