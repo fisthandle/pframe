@@ -9,7 +9,9 @@ declare(strict_types=1);
 
 namespace PFrame {
 
+    /** @phpstan-consistent-constructor */
     class HttpException extends \RuntimeException {
+        /** @param array<string, string> $headers */
         public function __construct(
             public readonly int $statusCode,
             string $message = '',
@@ -31,6 +33,7 @@ namespace PFrame {
             return new static(401, $msg);
         }
 
+        /** @param list<string> $allowed */
         public static function methodNotAllowed(array $allowed, string $msg = 'Method Not Allowed'): static {
             $methods = [];
             foreach ($allowed as $method) {
@@ -44,9 +47,19 @@ namespace PFrame {
         }
     }
 
+    /** @phpstan-consistent-constructor */
     class Request {
+        /** @var array<string, mixed> */
         private array $params = [];
 
+        /**
+         * @param array<string, mixed> $query
+         * @param array<string, mixed> $post
+         * @param array<string, mixed> $server
+         * @param array<string, string> $headers
+         * @param array<string, mixed> $cookies
+         * @param array<string, mixed> $files
+         */
         public function __construct(
             public readonly string $method,
             public readonly string $path,
@@ -65,6 +78,7 @@ namespace PFrame {
             return self::buildFromGlobals((string) ($_SERVER['REMOTE_ADDR'] ?? ''));
         }
 
+        /** @param list<string> $trustedProxies */
         public static function fromGlobalsWithProxies(array $trustedProxies = []): static {
             $headers = self::parseServerHeaders($_SERVER);
             return self::buildFromGlobals(self::resolveIp($_SERVER, $headers, $trustedProxies));
@@ -89,6 +103,10 @@ namespace PFrame {
             );
         }
 
+        /**
+         * @param array<string, mixed> $server
+         * @return array<string, string>
+         */
         private static function parseServerHeaders(array $server): array {
             $headers = [];
             foreach ($server as $key => $value) {
@@ -107,6 +125,11 @@ namespace PFrame {
             return $headers;
         }
 
+        /**
+         * @param array<string, mixed> $server
+         * @param array<string, string> $headers
+         * @param list<string> $trustedProxies
+         */
         private static function resolveIp(array $server, array $headers, array $trustedProxies): string {
             $remoteAddr = (string) ($server['REMOTE_ADDR'] ?? '');
             if ($remoteAddr === '') {
@@ -167,10 +190,15 @@ namespace PFrame {
             return $this->params[$key] ?? $default;
         }
 
+        /** @param array<string, mixed> $params */
         public function setParams(array $params): void {
             $this->params = $params;
         }
 
+        /**
+         * @param list<string> $keys
+         * @return array<string, mixed>
+         */
         public function only(array $keys): array {
             $merged = array_merge($this->query, $this->post);
             $out = [];
@@ -192,6 +220,7 @@ namespace PFrame {
             return strtolower($this->header('X-Requested-With') ?? '') === 'xmlhttprequest';
         }
 
+        /** @return array<string, mixed>|null */
         public function jsonBody(): ?array {
             if ($this->body === '') {
                 return null;
@@ -201,7 +230,9 @@ namespace PFrame {
         }
     }
 
+    /** @phpstan-consistent-constructor */
     class Response {
+        /** @param array<string, string> $headers */
         public function __construct(
             public string $body = '',
             public int $status = 200,
@@ -230,7 +261,7 @@ namespace PFrame {
             if (!str_starts_with($url, '/')) {
                 $host = parse_url($url, PHP_URL_HOST);
                 $currentHost = (string) ($_SERVER['HTTP_HOST'] ?? '');
-                if ($host !== null && $currentHost !== '') {
+                if (is_string($host) && $currentHost !== '') {
                     $normalizedCurrentHost = (string) (parse_url('http://' . $currentHost, PHP_URL_HOST) ?? $currentHost);
                     if (strcasecmp($host, $normalizedCurrentHost) !== 0) {
                         throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
@@ -240,6 +271,7 @@ namespace PFrame {
             return new static('', $status, ['Location' => $url]);
         }
 
+        /** @param array<string, string> $headers */
         public static function file(string $path, array $headers = [], int $status = 200): static {
             return new static('', $status, $headers, $path);
         }
@@ -265,14 +297,24 @@ namespace PFrame {
     class SseResponse extends Response {
         private \Closure $callback;
 
-        public function __construct(\Closure $callback) {
-            parent::__construct('', 200, [
+        /**
+         * Keep Response constructor compatibility while requiring a callback.
+         *
+         * @param mixed $body
+         * @param array<string, string> $headers
+         */
+        public function __construct(mixed $body = '', int $status = 200, array $headers = [], ?string $filePath = null) {
+            if (!$body instanceof \Closure) {
+                throw new \InvalidArgumentException('SseResponse requires callback closure as first argument.');
+            }
+
+            parent::__construct('', $status, array_merge([
                 'Content-Type' => 'text/event-stream',
                 'Cache-Control' => 'no-cache',
                 'Connection' => 'keep-alive',
                 'X-Accel-Buffering' => 'no',
-            ]);
-            $this->callback = $callback;
+            ], $headers), $filePath);
+            $this->callback = $body;
         }
 
         public function send(): void {
@@ -284,13 +326,15 @@ namespace PFrame {
         }
     }
 
+    /** @phpstan-consistent-constructor */
     class App {
         private static ?self $instance = null;
         private static bool $shutdownRegistered = false;
 
+        /** @var array<string, mixed> */
         private array $configData = [];
 
-        /** @var array<int, array{methods: string[], pattern: string, regex: string, paramNames: string[], controller: string, action: string, middleware: array, name: ?string, ajax: bool}> */
+        /** @var array<int, array{methods: list<string>, pattern: string, regex: string, paramNames: list<string>, controller: string, action: string, middleware: array<callable>, name: ?string, ajax: bool}> */
         private array $routes = [];
 
         /** @var array<string, array<int, int>> */
@@ -328,6 +372,9 @@ namespace PFrame {
 
         public static function instance(): static {
             if (self::$instance === null) {
+                self::$instance = new static();
+            }
+            if (!self::$instance instanceof static) {
                 self::$instance = new static();
             }
             return self::$instance;
@@ -412,18 +459,22 @@ namespace PFrame {
             $this->lastView = $view;
         }
 
+        /** @param array<callable> $mw */
         public function get(string $path, string $controller, string $action, array $mw = [], ?string $name = null, bool $ajax = false): void {
             $this->addRoute('GET|HEAD', $path, $controller, $action, $mw, $name, $ajax);
         }
 
+        /** @param array<callable> $mw */
         public function post(string $path, string $controller, string $action, array $mw = [], ?string $name = null, bool $ajax = false): void {
             $this->addRoute('POST', $path, $controller, $action, $mw, $name, $ajax);
         }
 
+        /** @param array<callable> $mw */
         public function route(string $methods, string $path, string $controller, string $action, array $mw = [], ?string $name = null, bool $ajax = false): void {
             $this->addRoute($methods, $path, $controller, $action, $mw, $name, $ajax);
         }
 
+        /** @param array<callable> $mw */
         public function group(string $prefix, callable $callback, array $mw = [], ?string $namePrefix = null): void {
             $group = $this->currentRouteGroup();
             $this->routeGroups[] = [
@@ -439,6 +490,7 @@ namespace PFrame {
             }
         }
 
+        /** @param array<callable> $middleware */
         private function addRoute(
             string $methods,
             string $pattern,
@@ -458,6 +510,9 @@ namespace PFrame {
             $methodList = array_values(array_filter(array_map('trim', explode('|', strtoupper($methods)))));
             $paramNames = [];
             $parts = preg_split('/(\{\w+\}|\*)/', $pattern, -1, PREG_SPLIT_DELIM_CAPTURE);
+            if ($parts === false) {
+                throw new \RuntimeException('Failed to parse route pattern: ' . $pattern);
+            }
             $regex = '';
             foreach ($parts as $part) {
                 if (preg_match('/^\{(\w+)\}$/', $part, $matches)) {
@@ -501,6 +556,7 @@ namespace PFrame {
             }
         }
 
+        /** @param array<string|int, mixed> $params */
         public function url(string $name, array $params = []): string {
             if (!isset($this->namedRoutes[$name])) {
                 throw new \RuntimeException('Route not found: ' . $name);
@@ -581,6 +637,9 @@ namespace PFrame {
             return $handler($request);
         }
 
+        /**
+         * @return array{controller: string, action: string, params: array<string, string>, middleware: array<callable>}|null
+         */
         private function matchRoute(string $method, string $path, bool $isAjax): ?array {
             $method = strtoupper($method);
             $normalizedPath = $this->normalizeStaticPath($path);
@@ -749,6 +808,7 @@ namespace PFrame {
             return new Response($body, 500);
         }
 
+        /** @param array<string, string|null> $overrides */
         public function addSecurityHeaders(array $overrides = []): void {
             $headers = [
                 'X-Frame-Options' => 'DENY',
@@ -801,7 +861,11 @@ namespace PFrame {
 
         /** @return array{prefix: string, middleware: array<callable>, name_prefix: string} */
         private function currentRouteGroup(): array {
-            return $this->routeGroups[array_key_last($this->routeGroups)];
+            $key = array_key_last($this->routeGroups);
+            if ($key === null) {
+                return ['prefix' => '', 'middleware' => [], 'name_prefix' => ''];
+            }
+            return $this->routeGroups[$key];
         }
 
         private function normalizeStaticPath(string $path): string {
@@ -872,9 +936,9 @@ namespace PFrame {
                 }
 
                 Log::error('Fatal error', [
-                    'message' => (string) ($error['message'] ?? ''),
-                    'file' => (string) ($error['file'] ?? ''),
-                    'line' => (int) ($error['line'] ?? 0),
+                    'message' => (string) $error['message'],
+                    'file' => (string) $error['file'],
+                    'line' => (int) $error['line'],
                 ]);
 
                 $debug = (int) (self::$instance?->config('debug', 0) ?? 0);
@@ -897,6 +961,7 @@ namespace PFrame {
             if (!is_array($trusted)) {
                 $trusted = [];
             }
+            $trusted = array_values(array_filter($trusted, static fn(mixed $ip): bool => is_string($ip) && $ip !== ''));
             $request = Request::fromGlobalsWithProxies($trusted);
             $response = $this->handle($request);
             $response->send();
@@ -912,6 +977,7 @@ namespace PFrame {
         private bool $logQueries;
         private int $lastRowCount = 0;
 
+        /** @param array<string, mixed> $config */
         public function __construct(array $config) {
             $dsn = $config['dsn'] ?? sprintf(
                 'mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4',
@@ -937,6 +1003,10 @@ namespace PFrame {
             return $this->pdo;
         }
 
+        /**
+         * @param array<int|string, mixed>|string|null $params
+         * @return array<int|string, mixed>|null
+         */
         private function norm(array|string|null $params): ?array {
             if (is_string($params)) {
                 return [$params];
@@ -944,6 +1014,7 @@ namespace PFrame {
             return $params;
         }
 
+        /** @param array<int|string, mixed>|string|null $params */
         private function run(string $sql, array|string|null $params): \PDOStatement {
             $t = microtime(true);
             $norm = $this->norm($params);
@@ -956,13 +1027,14 @@ namespace PFrame {
             return $stmt;
         }
 
+        /** @param array<int|string, mixed>|null $params */
         private function interpolate(string $sql, ?array $params): string {
             if ($params === null || $params === []) {
                 return $sql;
             }
             $i = 0;
-            return preg_replace_callback('/\?/', function () use ($params, &$i): string {
-                $v = $params[$i++] ?? 'NULL';
+            $replaced = preg_replace_callback('/\?/', function () use ($params, &$i): string {
+                $v = $params[$i++] ?? null;
                 if ($v === null) {
                     return 'NULL';
                 }
@@ -971,6 +1043,7 @@ namespace PFrame {
                 }
                 return "'" . addslashes((string) $v) . "'";
             }, $sql);
+            return $replaced ?? $sql;
         }
 
         /** @return array<int, array{sql: string, time: float}> */
@@ -986,34 +1059,52 @@ namespace PFrame {
             return array_sum(array_column($this->log, 'time'));
         }
 
+        /**
+         * @param array<int|string, mixed>|string|null $params
+         * @return int|list<array<string, mixed>>
+         */
         public function exec(string $sql, array|string|null $params = null): int|array {
             $stmt = $this->run($sql, $params);
             if ($this->isSelectQuery($sql)) {
                 $rows = $stmt->fetchAll();
                 $this->lastRowCount = count($rows);
-                return $rows;
+                return array_values($rows);
             }
             return $stmt->rowCount();
         }
 
+        /** @param array<int|string, mixed>|string|null $params */
         public function var(string $sql, array|string|null $params = null): mixed {
             $row = $this->run($sql, $params)->fetch(\PDO::FETCH_NUM);
             return $row ? $row[0] : null;
         }
 
+        /**
+         * @param array<int|string, mixed>|string|null $params
+         * @return array<string, mixed>|null
+         */
         public function row(string $sql, array|string|null $params = null): ?array {
             $row = $this->run($sql, $params)->fetch();
             return $row ?: null;
         }
 
+        /**
+         * @param array<int|string, mixed>|string|null $params
+         * @return list<array<string, mixed>>
+         */
         public function results(string $sql, array|string|null $params = null): array {
-            return $this->run($sql, $params)->fetchAll();
+            return array_values($this->run($sql, $params)->fetchAll());
         }
 
+        /**
+         * @param array<int|string, mixed>|string|null $params
+         * @return list<mixed>
+         */
         public function col(string $sql, array|string|null $params = null): array {
-            return $this->run($sql, $params)->fetchAll(\PDO::FETCH_COLUMN);
+            return array_values($this->run($sql, $params)->fetchAll(\PDO::FETCH_COLUMN));
         }
 
+        /** @param array<int|string, mixed>|string|null $params */
         public function insertGetId(string $sql, array|string|null $params = null): int {
             $this->run($sql, $params);
             return (int) $this->pdo->lastInsertId();
@@ -1023,7 +1114,10 @@ namespace PFrame {
             return $this->pdo->lastInsertId($name);
         }
 
-        /** @param array<int, string> $columns */
+        /**
+         * @param array<int, string> $columns
+         * @param array<int, array<int, mixed>> $rows
+         */
         public function batchInsert(string $table, array $columns, array $rows, string $mode = 'INSERT'): void {
             if ($rows === [] || $columns === []) {
                 return;
@@ -1086,6 +1180,7 @@ namespace PFrame {
             return $this->lastRowCount;
         }
 
+        /** @param array<int, mixed> $items */
         public function placeholders(array $items): string {
             return implode(', ', array_fill(0, count($items), '?'));
         }
@@ -1240,6 +1335,7 @@ namespace PFrame {
     class View {
         private ?string $layoutFile = null;
 
+        /** @var array<string, mixed> */
         private array $layoutData = [];
 
         /** @var list<array{template: string, ms: float}> */
@@ -1257,13 +1353,15 @@ namespace PFrame {
             return array_sum(array_column($this->renderLog, 'ms'));
         }
 
+        /** @param array<string, mixed> $data */
         public function render(string $template, array $data = []): string {
             $this->layoutFile = null;
             $this->layoutData = [];
 
             $content = $this->renderFile($template, $data);
-            if ($this->layoutFile !== null) {
-                $layoutFile = $this->layoutFile;
+            $layoutFile = $this->layoutFile;
+            /** @phpstan-ignore-next-line dynamic include can call View::layout() */
+            if ($layoutFile !== null) {
                 $layoutData = array_merge($data, $this->layoutData, ['content' => $content]);
                 $this->layoutFile = null;
                 $content = $this->renderFile($layoutFile, $layoutData);
@@ -1271,15 +1369,18 @@ namespace PFrame {
             return $content;
         }
 
+        /** @param array<string, mixed> $data */
         public function layout(string $file, array $data = []): void {
             $this->layoutFile = $file;
             $this->layoutData = $data;
         }
 
+        /** @param array<string, mixed> $data */
         public function partial(string $template, array $data = []): string {
             return $this->renderFile($template, $data);
         }
 
+        /** @param array<string, mixed> $data */
         private function renderFile(string $template, array $data): string {
             $filePath = rtrim($this->basePath, '/') . '/' . ltrim($template, '/');
             $realBase = realpath($this->basePath);
@@ -1314,6 +1415,7 @@ namespace PFrame {
             $this->lockAcquired = !$this->useAdvisoryLock;
         }
 
+        /** @param array<string, mixed> $cookieParams */
         public function register(array $cookieParams = []): void {
             session_set_save_handler($this, true);
             $defaults = [
@@ -1409,7 +1511,8 @@ namespace PFrame {
         }
 
         public function gc(int $max_lifetime): int|false {
-            return $this->db->exec('DELETE FROM sessions WHERE stamp < ?', [time() - $max_lifetime]);
+            $result = $this->db->exec('DELETE FROM sessions WHERE stamp < ?', [time() - $max_lifetime]);
+            return is_int($result) ? $result : false;
         }
 
         private function acquireLock(string $id): void {
@@ -1520,6 +1623,7 @@ namespace PFrame {
             $_SESSION[self::SESSION_KEY][] = ['type' => $type, 'text' => $text];
         }
 
+        /** @return list<array{type: string, text: string}> */
         public function get(): array {
             $messages = $_SESSION[self::SESSION_KEY] ?? [];
             unset($_SESSION[self::SESSION_KEY]);
@@ -1564,7 +1668,10 @@ namespace PFrame {
             };
         }
 
-        /** @return callable(Request, callable): Response */
+        /**
+         * @param list<string> $methods
+         * @return callable(Request, callable): Response
+         */
         public static function csrf(array $methods = ['POST', 'PUT', 'PATCH', 'DELETE'], string $message = 'Sesja wygasła. Odśwież stronę.'): callable {
             $allowedMethods = array_values(array_unique(array_map(static fn($method) => strtoupper((string) $method), $methods)));
 
@@ -1583,6 +1690,7 @@ namespace PFrame {
 
     abstract class Controller {
         public Request $request;
+        /** @var array<string, mixed> */
         protected array $data = [];
 
         protected function set(string $key, mixed $value): static {
@@ -1594,6 +1702,7 @@ namespace PFrame {
             return $this->data[$key] ?? $default;
         }
 
+        /** @param array<string, mixed> $data */
         protected function render(string $template, array $data = []): Response {
             $app = App::instance();
             $viewPath = (string) $app->config('view_path', 'templates');
@@ -1613,10 +1722,12 @@ namespace PFrame {
             return Response::json($data, $status);
         }
 
+        /** @param array<string, mixed> $data */
         protected function jsonSuccess(array $data = []): Response {
             return Response::json(array_merge(['success' => true], $data));
         }
 
+        /** @param array<string, mixed> $extra */
         protected function jsonError(string $message, int $status = 400, array $extra = []): Response {
             return Response::json(array_merge(['success' => false, 'message' => $message], $extra), $status);
         }
@@ -1629,6 +1740,7 @@ namespace PFrame {
             return Response::redirect($url, $status);
         }
 
+        /** @param array<string|int, mixed> $params */
         protected function redirectRoute(string $name, array $params = [], int $status = 302): Response {
             return $this->redirect(App::instance()->url($name, $params), $status);
         }
@@ -1652,6 +1764,7 @@ namespace PFrame {
             }
         }
 
+        /** @return array<string, mixed>|null */
         protected function currentUser(): ?array {
             return $_SESSION['user'] ?? null;
         }
@@ -1675,10 +1788,15 @@ namespace PFrame {
             return $this->request->param($key, $default);
         }
 
+        /**
+         * @param list<string> $keys
+         * @return array<string, mixed>
+         */
         protected function postData(array $keys): array {
             return $this->request->only($keys);
         }
 
+        /** @return array{page: int, offset: int, total_pages: int, per_page: int, total: int} */
         protected function paginate(int $total, int $perPage = 20): array {
             $perPage = max(1, $perPage);
             $page = max(1, (int) ($this->request->query('page') ?? 1));
@@ -1714,22 +1832,27 @@ namespace PFrame {
             self::$minLevel = $minLevel;
         }
 
+        /** @param array<string, mixed> $ctx */
         public static function trace(string $msg, array $ctx = []): void {
             self::log('trace', $msg, $ctx);
         }
 
+        /** @param array<string, mixed> $ctx */
         public static function debug(string $msg, array $ctx = []): void {
             self::log('debug', $msg, $ctx);
         }
 
+        /** @param array<string, mixed> $ctx */
         public static function info(string $msg, array $ctx = []): void {
             self::log('info', $msg, $ctx);
         }
 
+        /** @param array<string, mixed> $ctx */
         public static function warn(string $msg, array $ctx = []): void {
             self::log('warn', $msg, $ctx);
         }
 
+        /** @param array<string, mixed> $ctx */
         public static function error(string $msg, array $ctx = []): void {
             self::log('error', $msg, $ctx);
         }
@@ -1747,6 +1870,7 @@ namespace PFrame {
             @file_put_contents($path, date('[Y-m-d H:i:s] ') . $message . "\n", FILE_APPEND | LOCK_EX);
         }
 
+        /** @param array<string, mixed> $ctx */
         private static function log(string $level, string $msg, array $ctx): void {
             if ((self::LEVELS[$level] ?? 9) < self::$minLevel) {
                 return;
@@ -1811,6 +1935,11 @@ namespace PFrame {
             return null;
         }
 
+        /**
+         * @param array<string, string|list<string>> $rules
+         * @param array<string, mixed> $data
+         * @return array<string, string>
+         */
         public static function validate(array $rules, array $data): array {
             $errors = [];
             foreach ($rules as $field => $fieldRules) {
@@ -2039,7 +2168,7 @@ namespace PFrame {
             } else {
                 foreach ($qs as $i => $q) {
                     $n = $i + 1;
-                    $sql = preg_replace('/\s+/', ' ', trim($q['sql']));
+                    $sql = (string) preg_replace('/\s+/', ' ', trim($q['sql']));
                     $shortSql = mb_strlen($sql) > 120 ? mb_substr($sql, 0, 120) . '…' : $sql;
                     $ms = $q['ms'];
                     $shortRows .= '<div>' . $n . '. (' . $ms . 'ms) ' . h($shortSql) . '</div>';
@@ -2090,7 +2219,7 @@ namespace PFrame {
             $slowFull = '';
             if ($d['slowest'] !== []) {
                 foreach ($d['slowest'] as $s) {
-                    $sql = preg_replace('/\s+/', ' ', trim($s['sql']));
+                    $sql = (string) preg_replace('/\s+/', ' ', trim($s['sql']));
                     $short = mb_strlen($sql) > 100 ? mb_substr($sql, 0, 100) . '…' : $sql;
                     $slowShort .= '<div>  <b>' . $s['ms'] . 'ms</b> ' . h($short) . '</div>';
                     $slowFull .= '<div>  <b>' . $s['ms'] . 'ms</b> ' . h($sql) . '</div>';
@@ -2144,30 +2273,49 @@ namespace PFrame {
             return self::app()->db();
         }
 
+        /** @param array<string|int, mixed> $params */
         public static function url(string $name, array $params = []): string {
             return self::app()->url($name, $params);
         }
 
+        /** @param array<int|string, mixed>|string|null $params */
         public static function var(string $sql, array|string|null $params = null): mixed {
             return self::db()->var($sql, $params);
         }
 
+        /**
+         * @param array<int|string, mixed>|string|null $params
+         * @return array<string, mixed>|null
+         */
         public static function row(string $sql, array|string|null $params = null): ?array {
             return self::db()->row($sql, $params);
         }
 
+        /**
+         * @param array<int|string, mixed>|string|null $params
+         * @return list<array<string, mixed>>
+         */
         public static function results(string $sql, array|string|null $params = null): array {
             return self::db()->results($sql, $params);
         }
 
+        /**
+         * @param array<int|string, mixed>|string|null $params
+         * @return list<mixed>
+         */
         public static function col(string $sql, array|string|null $params = null): array {
             return self::db()->col($sql, $params);
         }
 
+        /**
+         * @param array<int|string, mixed>|string|null $params
+         * @return int|list<array<string, mixed>>
+         */
         public static function exec(string $sql, array|string|null $params = null): int|array {
             return self::db()->exec($sql, $params);
         }
 
+        /** @param array<int|string, mixed>|string|null $params */
         public static function insertGetId(string $sql, array|string|null $params = null): int {
             return self::db()->insertGetId($sql, $params);
         }
@@ -2176,7 +2324,10 @@ namespace PFrame {
             return self::db()->lastInsertId($name);
         }
 
-        /** @param array<int, string> $columns */
+        /**
+         * @param array<int, string> $columns
+         * @param array<int, array<int, mixed>> $rows
+         */
         public static function batchInsert(string $table, array $columns, array $rows, string $mode = 'INSERT'): void {
             self::db()->batchInsert($table, $columns, $rows, $mode);
         }
@@ -2196,10 +2347,12 @@ namespace {
         return htmlspecialchars((string) $value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
     }
 
+    /** @phpstan-ignore-next-line */
     function ha(array $array, string|int $key, mixed $default = ''): string {
         return h($array[$key] ?? $default);
     }
 
+    /** @phpstan-ignore-next-line */
     function getS(?array $array, string|int $key, mixed $default = null): mixed {
         if ($array === null) {
             return $default;
@@ -2246,8 +2399,12 @@ namespace {
         return 0;
     }
 
+    /** @phpstan-ignore-next-line */
     function explodeS(string $separator, mixed $string, int $limit = PHP_INT_MAX): array {
         if ($string === null || $string === '' || $string === []) {
+            return [];
+        }
+        if ($separator === '') {
             return [];
         }
         if (!is_scalar($string) && !$string instanceof \Stringable) {

@@ -23,18 +23,21 @@ trait DatabaseTransactions {
 }
 
 trait DatabaseAssertions {
+    /** @param array<string, mixed> $conditions */
     protected function assertDatabaseHas(string $table, array $conditions): void {
         [$where, $params] = $this->buildWhereClause($conditions);
         $row = Base::row("SELECT 1 FROM $table WHERE $where LIMIT 1", $params);
         $this->assertNotNull($row, "No row in '$table' matching " . json_encode($conditions));
     }
 
+    /** @param array<string, mixed> $conditions */
     protected function assertDatabaseMissing(string $table, array $conditions): void {
         [$where, $params] = $this->buildWhereClause($conditions);
         $row = Base::row("SELECT 1 FROM $table WHERE $where LIMIT 1", $params);
         $this->assertNull($row, "Unexpected row in '$table' matching " . json_encode($conditions));
     }
 
+    /** @param array<string, mixed> $conditions */
     protected function assertDatabaseCount(string $table, int $expected, array $conditions = []): void {
         [$where, $params] = $this->buildWhereClause($conditions);
         $count = (int) Base::var("SELECT COUNT(*) FROM $table WHERE $where", $params);
@@ -42,7 +45,10 @@ trait DatabaseAssertions {
         $this->assertSame($expected, $count, "Expected $expected rows in $scope, got $count");
     }
 
-    /** @return array{0: string, 1: list<mixed>} */
+    /**
+     * @param array<string, mixed> $conditions
+     * @return array{0: string, 1: list<mixed>}
+     */
     private function buildWhereClause(array $conditions): array {
         if ($conditions === []) {
             return ['1=1', []];
@@ -66,6 +72,7 @@ trait ActingAs {
         return 'user';
     }
 
+    /** @param array<string, mixed> $user */
     protected function actingAs(array $user): void {
         $_SESSION[$this->sessionUserKey()] = $user;
     }
@@ -122,6 +129,7 @@ trait ResponseAssertions {
         $this->assertStringNotContainsString($text, $this->response->body, "Response body should not contain '$text'");
     }
 
+    /** @param array<string, mixed> $expected */
     protected function assertJsonContains(array $expected): void {
         $actual = json_decode($this->response->body, true);
         $this->assertNotNull($actual, 'Response body is not valid JSON');
@@ -151,6 +159,7 @@ trait ResponseAssertions {
     }
 }
 
+/** @phpstan-ignore trait.unused */
 trait HttpTesting {
     protected App $app;
     private bool $withCsrf = true;
@@ -304,6 +313,7 @@ trait SessionAssertions {
     }
 }
 
+/** @phpstan-ignore trait.unused */
 trait RefreshDatabase {
     private static bool $migrated = false;
 
