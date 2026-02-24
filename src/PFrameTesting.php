@@ -25,22 +25,25 @@ trait DatabaseTransactions {
 trait DatabaseAssertions {
     /** @param array<string, mixed> $conditions */
     protected function assertDatabaseHas(string $table, array $conditions): void {
+        $quotedTable = $this->quoteIdentifier($table);
         [$where, $params] = $this->buildWhereClause($conditions);
-        $row = Base::row("SELECT 1 FROM $table WHERE $where LIMIT 1", $params);
+        $row = Base::row("SELECT 1 FROM $quotedTable WHERE $where LIMIT 1", $params);
         $this->assertNotNull($row, "No row in '$table' matching " . json_encode($conditions));
     }
 
     /** @param array<string, mixed> $conditions */
     protected function assertDatabaseMissing(string $table, array $conditions): void {
+        $quotedTable = $this->quoteIdentifier($table);
         [$where, $params] = $this->buildWhereClause($conditions);
-        $row = Base::row("SELECT 1 FROM $table WHERE $where LIMIT 1", $params);
+        $row = Base::row("SELECT 1 FROM $quotedTable WHERE $where LIMIT 1", $params);
         $this->assertNull($row, "Unexpected row in '$table' matching " . json_encode($conditions));
     }
 
     /** @param array<string, mixed> $conditions */
     protected function assertDatabaseCount(string $table, int $expected, array $conditions = []): void {
+        $quotedTable = $this->quoteIdentifier($table);
         [$where, $params] = $this->buildWhereClause($conditions);
-        $count = (int) Base::var("SELECT COUNT(*) FROM $table WHERE $where", $params);
+        $count = (int) Base::var("SELECT COUNT(*) FROM $quotedTable WHERE $where", $params);
         $scope = $conditions === [] ? "'$table'" : "'$table' matching " . json_encode($conditions);
         $this->assertSame($expected, $count, "Expected $expected rows in $scope, got $count");
     }
@@ -56,14 +59,32 @@ trait DatabaseAssertions {
         $where = [];
         $params = [];
         foreach ($conditions as $col => $val) {
+            $quotedColumn = $this->quoteIdentifier($col);
             if ($val === null) {
-                $where[] = "$col IS NULL";
+                $where[] = "$quotedColumn IS NULL";
             } else {
-                $where[] = "$col = ?";
+                $where[] = "$quotedColumn = ?";
                 $params[] = $val;
             }
         }
         return [implode(' AND ', $where), $params];
+    }
+
+    private function quoteIdentifier(string $identifier): string {
+        if ($identifier === '') {
+            throw new \InvalidArgumentException('Invalid SQL identifier: ' . $identifier);
+        }
+
+        $parts = explode('.', $identifier);
+        $quoted = [];
+        foreach ($parts as $part) {
+            if ($part === '' || !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $part)) {
+                throw new \InvalidArgumentException('Invalid SQL identifier: ' . $identifier);
+            }
+            $quoted[] = '`' . $part . '`';
+        }
+
+        return implode('.', $quoted);
     }
 }
 

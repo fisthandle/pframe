@@ -2349,28 +2349,15 @@ namespace PFrame {
                 return [];
             }
 
-            $dueTasks = [];
-            foreach ($this->tasks as $name => $task) {
-                if (!$this->isDue($task)) {
-                    continue;
-                }
-                if (!$this->tryLock($name, min($task->getInterval(), 300))) {
-                    continue;
-                }
-                $dueTasks[$name] = $task;
-            }
-
-            if (empty($dueTasks)) {
-                return [];
-            }
-
             $results = [];
-            foreach ($dueTasks as $name => $task) {
+            foreach ($this->tasks as $name => $task) {
+                if (!$this->isDue($task) || !$this->tryLock($name, min($task->getInterval(), 300))) {
+                    continue;
+                }
                 $results[$name] = $task->execute();
                 $this->setLastRun($name, time());
                 $this->unlock($name);
             }
-
             return $results;
         }
 
@@ -2462,17 +2449,16 @@ namespace PFrame {
         }
 
         private function unlock(string $name): void {
-            $key = self::KEY_PREFIX . $name . ':lock';
             if ($this->hasApcu) {
-                apcu_delete($key);
+                apcu_delete(self::KEY_PREFIX . $name . ':lock');
+                return;
             }
             if (isset($this->lockHandles[$name])) {
                 flock($this->lockHandles[$name], LOCK_UN);
                 fclose($this->lockHandles[$name]);
                 unset($this->lockHandles[$name]);
             }
-            $path = $this->tickDir . '/' . md5($name) . '.lock';
-            @unlink($path);
+            @unlink($this->tickDir . '/' . md5($name) . '.lock');
         }
     }
 

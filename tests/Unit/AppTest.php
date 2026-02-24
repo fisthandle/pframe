@@ -94,6 +94,15 @@ class AppTest extends TestCase {
         ]));
     }
 
+    public function testDuplicateRouteNameThrows(): void {
+        $app = new App();
+        $app->get('/first', HelloStub::class, 'index', name: 'dup');
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Duplicate route name: dup');
+        $app->get('/second', HelloStub::class, 'index', name: 'dup');
+    }
+
     public function testUrlMissingRouteParamThrows(): void {
         $app = new App();
         $app->get('/o/{slug}', HelloStub::class, 'index', name: 'ad.show');
@@ -282,13 +291,15 @@ class AppTest extends TestCase {
 
         $response = $app->handle(new Request(method: 'GET', path: '/deny'));
         $this->assertSame(403, $response->status);
-        $this->assertSame('Brak dostępu', $response->body);
+        $this->assertStringContainsString('<!DOCTYPE html>', $response->body);
+        $this->assertStringContainsString('Forbidden', $response->body);
+        $this->assertStringNotContainsString('blocked by test', $response->body);
 
         $app = new App();
         $app->setConfig('debug', 3);
         $app->get('/deny', ThrowHttpCtrl::class, 'run');
         $response = $app->handle(new Request(method: 'GET', path: '/deny'));
-        $this->assertSame('blocked by test', $response->body);
+        $this->assertStringContainsString('blocked by test', $response->body);
     }
 
     public function testHandleHttpException422PassesMessage(): void {
@@ -297,7 +308,8 @@ class AppTest extends TestCase {
 
         $response = $app->handle(new Request(method: 'GET', path: '/test-422'));
         $this->assertSame(422, $response->status);
-        $this->assertSame('Email jest zajęty', $response->body);
+        $this->assertStringContainsString('<!DOCTYPE html>', $response->body);
+        $this->assertStringContainsString('Email jest zajęty', $response->body);
     }
 
     public function testHandleHttpException422FallbackMessage(): void {
@@ -306,7 +318,8 @@ class AppTest extends TestCase {
 
         $response = $app->handle(new Request(method: 'GET', path: '/test-422-empty'));
         $this->assertSame(422, $response->status);
-        $this->assertSame('Błąd walidacji', $response->body);
+        $this->assertStringContainsString('<!DOCTYPE html>', $response->body);
+        $this->assertStringContainsString('Unprocessable Entity', $response->body);
     }
 
     public function testRuntimeExceptionHandled(): void {
@@ -316,7 +329,9 @@ class AppTest extends TestCase {
 
         $response = $app->handle(new Request(method: 'GET', path: '/boom'));
         $this->assertSame(500, $response->status);
-        $this->assertSame('Wystąpił błąd serwera.', $response->body);
+        $this->assertStringContainsString('<!DOCTYPE html>', $response->body);
+        $this->assertStringContainsString('Internal Server Error', $response->body);
+        $this->assertStringNotContainsString('boom', $response->body);
 
         $app = new App();
         $app->setConfig('debug', 3);

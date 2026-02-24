@@ -43,9 +43,12 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 found=0
-for lib_file in "$DEV_DIR"/*/lib/PFrame.php; do
+# Scan both lib/ and app/lib/ locations (posredniak uses app/lib/)
+for lib_file in "$DEV_DIR"/*/lib/PFrame.php "$DEV_DIR"/*/app/lib/PFrame.php; do
     [[ -f "$lib_file" ]] || continue
-    proj_dir="$(dirname "$(dirname "$lib_file")")"
+    lib_dir="$(dirname "$lib_file")"
+    proj_dir="${lib_file%/lib/PFrame.php}"
+    proj_dir="${proj_dir%/app}"
     proj_name="$(basename "$proj_dir")"
 
     # skip pframe itself
@@ -53,8 +56,8 @@ for lib_file in "$DEV_DIR"/*/lib/PFrame.php; do
 
     found=1
     echo -e "${BOLD}$proj_name${NC}"
-    check_file "$SRC_PFRAME" "$proj_dir/lib/PFrame.php" "$proj_name" "PFrame.php"
-    check_file "$SRC_TESTING" "$proj_dir/lib/PFrameTesting.php" "$proj_name" "PFrameTesting.php"
+    check_file "$SRC_PFRAME" "$lib_dir/PFrame.php" "$proj_name" "PFrame.php"
+    check_file "$SRC_TESTING" "$lib_dir/PFrameTesting.php" "$proj_name" "PFrameTesting.php"
     echo ""
 done
 

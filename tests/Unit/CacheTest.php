@@ -47,6 +47,28 @@ class CacheTest extends TestCase {
         $this->assertGreaterThan(0, $retry);
     }
 
+    public function testRateCheckFailsClosedWhenLockCannotBeCreated(): void {
+        $readOnlyDir = sys_get_temp_dir() . '/p1_cache_test_ro_' . uniqid('', true);
+        mkdir($readOnlyDir, 0755, true);
+        chmod($readOnlyDir, 0555);
+
+        try {
+            $cache = new Cache($readOnlyDir);
+            $retry = $cache->rateCheck('login', '1.2.3.4', 3, 60);
+
+            $this->assertSame(1, $retry);
+            $this->assertSame([], glob($readOnlyDir . '/*.cache') ?: []);
+        } finally {
+            chmod($readOnlyDir, 0755);
+            foreach (glob($readOnlyDir . '/*') ?: [] as $file) {
+                unlink($file);
+            }
+            if (is_dir($readOnlyDir)) {
+                rmdir($readOnlyDir);
+            }
+        }
+    }
+
     public function testExpiresData(): void {
         $file = $this->dir . '/' . md5('ttl') . '.cache';
         file_put_contents($file, serialize(['value' => 'v', 'ttl' => 1, 'time' => time() - 5]));

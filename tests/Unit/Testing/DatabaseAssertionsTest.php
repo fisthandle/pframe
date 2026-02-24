@@ -19,6 +19,8 @@ class DatabaseAssertionsTest extends TestCase {
         $db->exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)');
         $db->exec('INSERT INTO users (name, email) VALUES (?, ?)', ['Joe', 'joe@x.com']);
         $db->exec('INSERT INTO users (name, email) VALUES (?, ?)', ['Ann', null]);
+        $db->exec('CREATE TABLE `order` (`id` INTEGER PRIMARY KEY, `select` TEXT, `group` TEXT)');
+        $db->exec('INSERT INTO `order` (`select`, `group`) VALUES (?, ?)', ['created', 'staff']);
         $app->setDb($db);
     }
 
@@ -72,5 +74,23 @@ class DatabaseAssertionsTest extends TestCase {
 
     public function testAssertDatabaseHasWithEmptyConditions(): void {
         $this->assertDatabaseHas('users', []);
+    }
+
+    public function testAssertDatabaseHasSupportsReservedIdentifiers(): void {
+        $this->assertDatabaseHas('order', ['select' => 'created', 'group' => 'staff']);
+    }
+
+    public function testAssertDatabaseCountSupportsReservedIdentifiers(): void {
+        $this->assertDatabaseCount('order', 1, ['group' => 'staff']);
+    }
+
+    public function testInvalidTableIdentifierThrows(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->assertDatabaseHas('users; DROP TABLE users', ['name' => 'Joe']);
+    }
+
+    public function testInvalidColumnIdentifierThrows(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->assertDatabaseHas('users', ['name = ? OR 1=1' => 'Joe']);
     }
 }

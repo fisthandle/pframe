@@ -9,8 +9,10 @@ use PHPUnit\Framework\TestCase;
 
 class SessionTest extends TestCase {
     private Db $db;
+    private array $serverSnapshot;
 
     protected function setUp(): void {
+        $this->serverSnapshot = $_SERVER;
         $_SERVER = [];
         $this->db = new Db(['dsn' => 'sqlite::memory:']);
         $this->db->exec('CREATE TABLE sessions (
@@ -20,6 +22,10 @@ class SessionTest extends TestCase {
             agent TEXT NOT NULL DEFAULT "",
             stamp INTEGER NOT NULL DEFAULT 0
         )');
+    }
+
+    protected function tearDown(): void {
+        $_SERVER = $this->serverSnapshot;
     }
 
     public function testWriteAndRead(): void {

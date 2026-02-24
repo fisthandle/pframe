@@ -96,6 +96,11 @@ class HttpTestingTest extends TestCase {
         ]);
     }
 
+    public function testPostJsonWithoutCsrfFails(): void {
+        $this->withoutCsrf()->postJson('/json', ['name' => 'Joe']);
+        $this->assertForbidden();
+    }
+
     public function testWithHeadersSendsCustomHeaders(): void {
         $this->withHeaders(['X-Custom' => 'test'])->get('/');
         $this->assertOk();
@@ -155,6 +160,7 @@ class HttpTestingJsonCtrl extends Controller {
     }
 
     public function store(): Response {
+        $this->validateCsrf();
         $json = $this->request->jsonBody() ?? [];
         return Response::json([
             'name' => $json['name'] ?? null,

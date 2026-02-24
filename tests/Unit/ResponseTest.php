@@ -7,6 +7,17 @@ use PFrame\Response;
 use PHPUnit\Framework\TestCase;
 
 class ResponseTest extends TestCase {
+    private array $serverSnapshot;
+
+    protected function setUp(): void {
+        $this->serverSnapshot = $_SERVER;
+        $_SERVER = [];
+    }
+
+    protected function tearDown(): void {
+        $_SERVER = $this->serverSnapshot;
+    }
+
     public function testDefaults(): void {
         $r = new Response('Hello');
         $this->assertSame(200, $r->status);
@@ -35,18 +46,13 @@ class ResponseTest extends TestCase {
         $_SERVER['HTTP_HOST'] = 'myapp.com';
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('External redirect not allowed');
-        try {
-            Response::redirect('https://evil.com/phish');
-        } finally {
-            $_SERVER = [];
-        }
+        Response::redirect('https://evil.com/phish');
     }
 
     public function testRedirectAllowsSameHost(): void {
         $_SERVER['HTTP_HOST'] = 'myapp.com';
         $r = Response::redirect('https://myapp.com/dashboard');
         $this->assertSame('https://myapp.com/dashboard', $r->headers['Location']);
-        $_SERVER = [];
     }
 
     public function testRedirectAllowsRelativePath(): void {
@@ -55,7 +61,6 @@ class ResponseTest extends TestCase {
     }
 
     public function testRedirectBlocksExternalUrlWithoutHost(): void {
-        unset($_SERVER['HTTP_HOST']);
         $this->expectException(\InvalidArgumentException::class);
         Response::redirect('https://evil.com/phish');
     }

@@ -27,6 +27,7 @@ class LogTest extends TestCase {
     public function testWritesLogFile(): void {
         Log::info('test message', ['key' => 'val']);
         $files = glob($this->tmpDir . '/*app.log');
+        $this->assertIsArray($files);
         $this->assertNotEmpty($files);
         $content = file_get_contents($files[0]);
         $this->assertStringContainsString('INFO test message', (string) $content);
@@ -38,7 +39,9 @@ class LogTest extends TestCase {
         Log::debug('should not appear');
         Log::warn('should appear');
         $files = glob($this->tmpDir . '/*app.log');
-        $content = $files ? file_get_contents($files[0]) : '';
+        $this->assertIsArray($files);
+        $this->assertNotEmpty($files);
+        $content = file_get_contents($files[0]);
         $this->assertStringNotContainsString('DEBUG', (string) $content);
         $this->assertStringContainsString('WARN', (string) $content);
     }

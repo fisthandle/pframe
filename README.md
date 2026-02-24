@@ -2,14 +2,15 @@
 
 Single-file PHP 8.4+ micro-framework. Zero dependencies, copy-paste deployment.
 
-One file. 15 classes. ~1800 LOC. Everything you need, nothing you don't.
+One file. 19 classes. Single-file core in `src/PFrame.php` (~2800 LOC). Everything you need, nothing you don't.
 
 ## Quick Start
 
 ```
 myproject/
 ├── public/index.php
-├── lib/PFrame.php          # just copy this file
+├── src/PFrame.php          # from this repo
+├── lib/PFrame.php          # optional copied/renamed location
 ├── config/app.php
 ├── controllers/
 ├── templates/
@@ -21,7 +22,7 @@ myproject/
 <?php
 // public/index.php
 declare(strict_types=1);
-require dirname(__DIR__) . '/lib/PFrame.php';
+require dirname(__DIR__) . '/src/PFrame.php'; // or /lib/PFrame.php if copied
 
 class P1 extends \PFrame\Base {}
 
@@ -135,12 +136,16 @@ Layout:
 | `Db` | PDO wrapper with prepared statements, tx state and formatted query log |
 | `View` | Template engine with layouts and partials |
 | `Controller` | Base controller with auth, CSRF, pagination and view data bag helpers |
+| `Middleware` | Built-in middleware factories (`auth`, `csrf`) |
 | `Session` | Database-backed session handler with advisory locks |
 | `Csrf` | CSRF token + per-action nonce generation |
 | `Flash` | Flash messages |
 | `Log` | File logger with level filtering |
 | `Validator` | Input validation (email, phone, postcode, length, slug) |
 | `Cache` | File cache with APCu fallback and rate limiting |
+| `TickTask` | Task definition for periodic background work (interval, time window, callback/command) |
+| `Tick` | Scheduler that runs registered `TickTask` instances with global throttle and file-lock dedup |
+| `DebugBar` | Request timing + SQL query debug overlay renderer |
 | `Base` | Static facade for app/db/config access |
 | `HttpException` | HTTP error responses (401, 403, 404, 405) |
 
@@ -194,6 +199,31 @@ Built-in middleware:
 - `\PFrame\Middleware::auth()` -- guest -> flash warning + redirect to `login` route
 - `\PFrame\Middleware::csrf()` -- validates token from `csrf_token` field or `X-Csrf-Token` header
 
+### Error Handling Pipeline
+
+`App` has a built-in 4-stage error pipeline:
+1. `3xx` `HttpException` passthrough (redirect-style responses are returned directly)
+2. optional custom error handler
+3. AJAX fallback (`text/plain`)
+4. default inline HTML error page (`text/html; charset=UTF-8`)
+
+Register a custom handler:
+
+```php
+$app->setErrorPageHandler(function (
+    \PFrame\HttpException $e,
+    \PFrame\Request $request,
+    \PFrame\App $app
+): ?\PFrame\Response {
+    // return Response to handle; return null to fallback to framework default
+    return null;
+});
+```
+
+Notes:
+- original exception headers (e.g. `Allow` for 405) are preserved in fallbacks
+- unhandled `\Throwable` is logged and routed through the same HTTP error pipeline as `HttpException(500)`
+
 ### Trusted Proxies
 
 `Request::fromGlobalsWithProxies()` trusts forwarded headers only for exact IPs from `trusted_proxies`.
@@ -235,6 +265,26 @@ $handler = static function () use ($app): void {
 ### Rate Limiting Helper
 
 `Cache::rateCheck($scope, $id, $max, $window)` is protected by a lock file to keep updates atomic between concurrent requests.
+
+### Periodic Tasks (Tick)
+
+Register background tasks that run on a timer, optionally within a time window:
+
+```php
+$tick = new \PFrame\Tick(new \PFrame\Cache('/tmp/tick'));
+$tick->task('cleanup')
+    ->every(3600)
+    ->run(fn () => cleanOldRecords());
+
+$tick->task('report')
+    ->every(86400)
+    ->between('02:00', '04:00')
+    ->command('php /app/bin/daily-report.php');
+
+$tick->run(); // call from a cron or worker loop
+```
+
+Tasks are deduplicated via file locks and globally throttled (min 30s between tick cycles).
 
 ## Migration Compatibility
 

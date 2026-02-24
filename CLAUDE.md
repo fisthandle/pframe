@@ -4,7 +4,7 @@ Single-file PHP 8.4+ micro-framework. Zero dependencies, copy-paste deployment.
 
 ## Architektura
 
-- **Jeden plik:** `src/PFrame.php` — cały framework (~1800 LOC)
+- **Jeden plik:** `src/PFrame.php` — cały framework (~2800 LOC)
 - **Namespace:** `PFrame` (klasy) + globalne helpery w `namespace {}`
 - **Brak mail:** do maili używamy PHPMailer (zewnętrznie)
 - **Fasada:** `PFrame\Base` — projekty definiują `class P1 extends \PFrame\Base` z project-specific stałymi
@@ -15,7 +15,7 @@ Konwencje kodu, Docker, backup, testy, deploy: `/php-standards` (skill) lub `~/d
 
 ## Klasy (PFrame namespace)
 
-HttpException, Request, Response, SseResponse, App, Db, View, Session, Csrf, Flash, Controller, Log, Validator, Cache, Base (fasada)
+HttpException, Request, Response, SseResponse, App, Db, View, Session, Csrf, Flash, Middleware, Controller, Log, Validator, Cache, TickTask, Tick, DebugBar, Base (fasada)
 
 ## Globalne helpery
 
