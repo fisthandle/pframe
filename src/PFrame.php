@@ -53,6 +53,9 @@ namespace PFrame {
         private array $params = [];
         /** @var array<string, string> */
         public readonly array $headers;
+        private bool $jsonBodyParsed = false;
+        /** @var array<string, mixed>|null */
+        private ?array $jsonBodyCache = null;
 
         /**
          * @param array<string, mixed> $query
@@ -224,11 +227,18 @@ namespace PFrame {
 
         /** @return array<string, mixed>|null */
         public function jsonBody(): ?array {
+            if ($this->jsonBodyParsed) {
+                return $this->jsonBodyCache;
+            }
+
+            $this->jsonBodyParsed = true;
             if ($this->body === '') {
                 return null;
             }
+
             $decoded = json_decode($this->body, true);
-            return is_array($decoded) ? $decoded : null;
+            $this->jsonBodyCache = is_array($decoded) ? $decoded : null;
+            return $this->jsonBodyCache;
         }
     }
 
@@ -357,6 +367,23 @@ namespace PFrame {
         /** @var array<callable> */
         private array $middleware = [];
 
+        private const HTTP_STATUS_TEXT = [
+            400 => 'Bad Request',
+            401 => 'Unauthorized',
+            403 => 'Forbidden',
+            404 => 'Not Found',
+            405 => 'Method Not Allowed',
+            408 => 'Request Timeout',
+            422 => 'Unprocessable Entity',
+            429 => 'Too Many Requests',
+            500 => 'Internal Server Error',
+            502 => 'Bad Gateway',
+            503 => 'Service Unavailable',
+        ];
+
+        /** @var (callable(HttpException, Request, App): ?Response)|null */
+        private $errorPageHandler = null;
+
         /** @var array<int, array{prefix: string, middleware: array<callable>, name_prefix: string}> */
         private array $routeGroups = [['prefix' => '', 'middleware' => [], 'name_prefix' => '']];
 
@@ -466,6 +493,11 @@ namespace PFrame {
             $this->lastView = $view;
         }
 
+        /** @param callable(HttpException, Request, self): ?Response $handler */
+        public function setErrorPageHandler(callable $handler): void {
+            $this->errorPageHandler = $handler;
+        }
+
         /** @param array<callable> $mw */
         public function get(string $path, string $controller, string $action, array $mw = [], ?string $name = null, bool $ajax = false): void {
             $this->addRoute('GET|HEAD', $path, $controller, $action, $mw, $name, $ajax);
@@ -512,6 +544,9 @@ namespace PFrame {
             $middleware = array_merge($group['middleware'], $middleware);
             if ($name !== null && $group['name_prefix'] !== '') {
                 $name = $group['name_prefix'] . $name;
+            }
+            if ($name !== null && isset($this->namedRoutes[$name])) {
+                throw new \RuntimeException('Duplicate route name: ' . $name);
             }
 
             $methodList = array_values(array_filter(array_map('trim', explode('|', strtoupper($methods)))));
@@ -615,9 +650,9 @@ namespace PFrame {
                 try {
                     return $handler($request);
                 } catch (HttpException $e) {
-                    return $this->handleHttpException($e);
+                    return $this->handleHttpException($e, $request);
                 } catch (\Throwable $e) {
-                    return $this->handleException($e);
+                    return $this->handleException($e, $request);
                 }
             });
         }
@@ -794,30 +829,71 @@ namespace PFrame {
             return new Response((string) ($result ?? ''));
         }
 
-        private function handleHttpException(HttpException $e): Response {
+        private function handleHttpException(HttpException $e, Request $request): Response {
+            if ($e->statusCode >= 300 && $e->statusCode < 400) {
+                return new Response($e->getMessage(), $e->statusCode, $e->headers);
+            }
+
+            if ($this->errorPageHandler !== null) {
+                $response = ($this->errorPageHandler)($e, $request, $this);
+                if ($response instanceof Response) {
+                    return $response;
+                }
+            }
+
             $debug = (int) $this->config('debug', 0);
-            $body = $debug >= 3 ? $e->getMessage() : match ($e->statusCode) {
-                401 => 'Wymagane logowanie',
-                403 => 'Brak dostępu',
-                404 => 'Nie znaleziono',
-                405 => 'Niedozwolona metoda',
-                422 => $e->getMessage() !== '' ? $e->getMessage() : 'Błąd walidacji',
-                default => 'Błąd serwera',
-            };
-            return new Response($body, $e->statusCode, $e->headers);
+            if ($request->isAjax()) {
+                $body = $debug >= 3
+                    ? $e->getMessage()
+                    : (self::HTTP_STATUS_TEXT[$e->statusCode] ?? 'Error');
+                return new Response($body, $e->statusCode, array_merge(
+                    $e->headers,
+                    ['Content-Type' => 'text/plain; charset=UTF-8'],
+                ));
+            }
+
+            $html = $this->renderDefaultErrorPage($e);
+            return new Response($html, $e->statusCode, array_merge(
+                $e->headers,
+                ['Content-Type' => 'text/html; charset=UTF-8'],
+            ));
         }
 
-        private function handleException(\Throwable $e): Response {
+        private function handleException(\Throwable $e, Request $request): Response {
             Log::error('Unhandled exception', [
                 'message' => $e->getMessage(),
                 'file' => $e->getFile(),
                 'line' => $e->getLine(),
             ]);
             $debug = (int) $this->config('debug', 0);
-            $body = $debug >= 3
+            $message = $debug >= 3
                 ? $e->getMessage() . "\n" . $e->getTraceAsString()
-                : 'Wystąpił błąd serwera.';
-            return new Response($body, 500);
+                : '';
+            return $this->handleHttpException(new HttpException(500, $message), $request);
+        }
+
+        private function renderDefaultErrorPage(HttpException $e): string {
+            $code = $e->statusCode;
+            $status = self::HTTP_STATUS_TEXT[$code] ?? 'Error';
+            $debug = (int) $this->config('debug', 0);
+            $message = $e->getMessage();
+            $showMessage = $debug >= 1 || in_array($code, [400, 422, 429], true);
+            $msgHtml = ($showMessage && $message !== '')
+                ? '<p style="color:#666;margin:1rem 0 0;">' . htmlspecialchars($message, ENT_QUOTES | ENT_HTML5, 'UTF-8') . '</p>'
+                : '';
+
+            return <<<HTML
+                <!DOCTYPE html>
+                <html>
+                <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width,initial-scale=1">
+                <title>Error {$code}</title>
+                <style>body{font-family:system-ui,-apple-system,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f8f9fa;color:#212529}.e{text-align:center;max-width:480px;padding:2rem}.c{font-size:5rem;font-weight:700;color:#dee2e6;line-height:1}h1{font-size:1.5rem;margin:.5rem 0}a{color:#0d6efd}</style>
+                </head>
+                <body><div class="e"><div class="c">{$code}</div><h1>{$status}</h1>{$msgHtml}</div></body>
+                </html>
+                HTML;
         }
 
         /** @param array<string, string|null> $overrides */
@@ -2109,24 +2185,294 @@ namespace PFrame {
 
         private function withRateLock(string $key, callable $callback): ?int {
             $lockPath = $this->dir . '/' . md5($key) . '.lock';
-            $handle = fopen($lockPath, 'c');
+            $handle = @fopen($lockPath, 'c');
             if ($handle === false) {
-                return $callback();
+                return 1;
             }
 
             try {
-                if (!flock($handle, LOCK_EX)) {
-                    return $callback();
+                if (!@flock($handle, LOCK_EX)) {
+                    return 1;
                 }
 
                 try {
                     return $callback();
                 } finally {
-                    flock($handle, LOCK_UN);
+                    @flock($handle, LOCK_UN);
                 }
             } finally {
                 fclose($handle);
             }
+        }
+    }
+
+    class TickTask {
+        private int $interval = 60;
+        private ?string $windowFrom = null;
+        private ?string $windowTo = null;
+        /** @var ?\Closure */
+        private ?\Closure $callback = null;
+        private ?string $cmd = null;
+        private int $cmdTimeout = 60;
+
+        public function __construct(
+            public readonly string $name,
+        ) {}
+
+        public function every(int $seconds): self {
+            $this->interval = $seconds;
+            return $this;
+        }
+
+        public function between(string $from, string $to): self {
+            $this->windowFrom = $from;
+            $this->windowTo = $to;
+            return $this;
+        }
+
+        /** @param callable $callback */
+        public function run(callable $callback): self {
+            $this->callback = $callback(...);
+            return $this;
+        }
+
+        public function command(string $cmd, int $timeout = 60): self {
+            $this->cmd = $cmd;
+            $this->cmdTimeout = $timeout;
+            return $this;
+        }
+
+        public function getInterval(): int {
+            return $this->interval;
+        }
+
+        public function inTimeWindow(): bool {
+            if ($this->windowFrom === null || $this->windowTo === null) {
+                return true;
+            }
+            $now = date('H:i');
+            return $now >= $this->windowFrom && $now < $this->windowTo;
+        }
+
+        /** @return array{success: bool, error?: string} */
+        public function execute(): array {
+            try {
+                if ($this->cmd !== null) {
+                    return $this->executeCommand();
+                }
+                if ($this->callback !== null) {
+                    ($this->callback)();
+                    return ['success' => true];
+                }
+                return ['success' => false, 'error' => 'No callback or command configured'];
+            } catch (\Throwable $e) {
+                return ['success' => false, 'error' => $e->getMessage()];
+            }
+        }
+
+        /** @return array{success: bool, error?: string, output?: string} */
+        private function executeCommand(): array {
+            $descriptors = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+            $process = proc_open($this->cmd, $descriptors, $pipes);
+            if (!is_resource($process)) {
+                return ['success' => false, 'error' => 'Failed to start process'];
+            }
+
+            stream_set_blocking($pipes[1], false);
+            stream_set_blocking($pipes[2], false);
+
+            $deadline = time() + $this->cmdTimeout;
+            $stdout = '';
+            $stderr = '';
+
+            while (true) {
+                $status = proc_get_status($process);
+                if (!$status['running']) {
+                    break;
+                }
+                if (time() >= $deadline) {
+                    // Kill process GROUP (negative PID) to include children
+                    $pid = $status['pid'];
+                    @posix_kill(-$pid, 9);
+                    proc_close($process);
+                    return ['success' => false, 'error' => "Timeout after {$this->cmdTimeout}s"];
+                }
+                $stdout .= stream_get_contents($pipes[1]) ?: '';
+                $stderr .= stream_get_contents($pipes[2]) ?: '';
+                usleep(50_000); // 50ms poll
+            }
+
+            $stdout .= stream_get_contents($pipes[1]) ?: '';
+            $stderr .= stream_get_contents($pipes[2]) ?: '';
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+
+            $exitCode = proc_close($process);
+
+            if ($exitCode !== 0) {
+                return ['success' => false, 'error' => "Exit code {$exitCode}: " . trim($stderr ?: $stdout)];
+            }
+            return ['success' => true, 'output' => trim($stdout)];
+        }
+    }
+
+    class Tick {
+        private const GLOBAL_THROTTLE_KEY = 'tick:global';
+        private const GLOBAL_THROTTLE_SECONDS = 30;
+        private const KEY_PREFIX = 'tick:';
+
+        /** @var array<string, TickTask> */
+        private array $tasks = [];
+        private bool $hasApcu;
+        private string $tickDir;
+
+        public function __construct(private readonly string $cacheDir) {
+            $this->hasApcu = function_exists('apcu_enabled') && apcu_enabled();
+            $this->tickDir = $this->cacheDir . '/tick';
+            if (!is_dir($this->tickDir)) {
+                @mkdir($this->tickDir, 0755, true);
+            }
+        }
+
+        public function task(string $name): TickTask {
+            $task = new TickTask($name);
+            $this->tasks[$name] = $task;
+            return $task;
+        }
+
+        /**
+         * Evaluate and run due tasks.
+         * @return array<string, array{success: bool, error?: string}>
+         */
+        public function dispatch(bool $forceRun = false): array {
+            if (!$forceRun && !$this->globalThrottlePass()) {
+                return [];
+            }
+
+            $dueTasks = [];
+            foreach ($this->tasks as $name => $task) {
+                if (!$this->isDue($task)) {
+                    continue;
+                }
+                if (!$this->tryLock($name, min($task->getInterval(), 300))) {
+                    continue;
+                }
+                $dueTasks[$name] = $task;
+            }
+
+            if (empty($dueTasks)) {
+                return [];
+            }
+
+            $results = [];
+            foreach ($dueTasks as $name => $task) {
+                $results[$name] = $task->execute();
+                $this->setLastRun($name, time());
+                $this->unlock($name);
+            }
+
+            return $results;
+        }
+
+        private function globalThrottlePass(): bool {
+            $key = self::GLOBAL_THROTTLE_KEY;
+            if ($this->hasApcu) {
+                return apcu_add($key, 1, self::GLOBAL_THROTTLE_SECONDS);
+            }
+            // File fallback: flock + mtime for atomic throttle
+            $path = $this->tickDir . '/global.tick';
+            $handle = @fopen($path, 'c');
+            if ($handle === false) {
+                return true; // fail-open: run if can't check
+            }
+            if (!flock($handle, LOCK_EX | LOCK_NB)) {
+                fclose($handle);
+                return false;
+            }
+            $mtime = @filemtime($path);
+            if ($mtime !== false && (time() - $mtime) < self::GLOBAL_THROTTLE_SECONDS) {
+                flock($handle, LOCK_UN);
+                fclose($handle);
+                return false;
+            }
+            // Update mtime while holding lock
+            ftruncate($handle, 0);
+            fwrite($handle, (string)time());
+            fflush($handle);
+            flock($handle, LOCK_UN);
+            fclose($handle);
+            return true;
+        }
+
+        private function isDue(TickTask $task): bool {
+            if (!$task->inTimeWindow()) {
+                return false;
+            }
+            $lastRun = $this->getLastRun($task->name);
+            if ($lastRun === null) {
+                return true;
+            }
+            return (time() - $lastRun) >= $task->getInterval();
+        }
+
+        private function getLastRun(string $name): ?int {
+            $key = self::KEY_PREFIX . $name . ':last';
+            if ($this->hasApcu) {
+                $val = apcu_fetch($key, $success);
+                return $success ? (int)$val : null;
+            }
+            $path = $this->tickDir . '/' . md5($name) . '.last';
+            if (!is_file($path)) {
+                return null;
+            }
+            $content = @file_get_contents($path);
+            return $content !== false ? (int)$content : null;
+        }
+
+        private function setLastRun(string $name, int $timestamp): void {
+            $key = self::KEY_PREFIX . $name . ':last';
+            if ($this->hasApcu) {
+                apcu_store($key, $timestamp, 0);
+            }
+            // Always write file (persistent across APCu clears/restarts)
+            $path = $this->tickDir . '/' . md5($name) . '.last';
+            @file_put_contents($path, (string)$timestamp, LOCK_EX);
+        }
+
+        /** @var array<string, resource> File lock handles (kept open until unlock) */
+        private array $lockHandles = [];
+
+        private function tryLock(string $name, int $ttl): bool {
+            $key = self::KEY_PREFIX . $name . ':lock';
+            if ($this->hasApcu) {
+                return apcu_add($key, getmypid(), $ttl);
+            }
+            // File lock fallback — flock is atomic and race-safe
+            $path = $this->tickDir . '/' . md5($name) . '.lock';
+            $handle = @fopen($path, 'c');
+            if ($handle === false) {
+                return false;
+            }
+            if (!flock($handle, LOCK_EX | LOCK_NB)) {
+                fclose($handle);
+                return false;
+            }
+            $this->lockHandles[$name] = $handle;
+            return true;
+        }
+
+        private function unlock(string $name): void {
+            $key = self::KEY_PREFIX . $name . ':lock';
+            if ($this->hasApcu) {
+                apcu_delete($key);
+            }
+            if (isset($this->lockHandles[$name])) {
+                flock($this->lockHandles[$name], LOCK_UN);
+                fclose($this->lockHandles[$name]);
+                unset($this->lockHandles[$name]);
+            }
+            $path = $this->tickDir . '/' . md5($name) . '.lock';
+            @unlink($path);
         }
     }
 
