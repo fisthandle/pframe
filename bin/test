@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+PROFILE="${1:-quick}"
+
+usage() {
+    cat <<'USAGE'
+Usage: ./bin/test [quick|full|ci|coverage|contracts|e2e|ui]
+
+Profiles:
+  quick      syntax + unit + integration (no coverage)
+  full       quick + contracts + phpstan
+  ci         full + coverage report
+  coverage   phpunit with coverage artifacts
+  contracts  contract/governance tests
+  e2e        not applicable for pframe (returns success)
+  ui         not applicable for pframe (returns success)
+USAGE
+}
+
+if [[ "$PROFILE" == "--help" || "$PROFILE" == "-h" ]]; then
+    usage
+    exit 0
+fi
+
+step() {
+    local label="$1"
+    echo "step=$label"
+}
+
+step_result() {
+    local label="$1"
+    local status="$2"
+    local started_at="$3"
+    local finished_at
+    local duration
+
+    finished_at="$(date +%s)"
+    duration=$((finished_at - started_at))
+    echo "status=$status duration=${duration}s step=$label"
+}
+
+run_step() {
+    local label="$1"
+    shift
+
+    local started_at
+    started_at="$(date +%s)"
+
+    step "$label"
+    if "$@"; then
+        step_result "$label" "ok" "$started_at"
+        return 0
+    fi
+
+    step_result "$label" "fail" "$started_at"
+    return 1
+}
+
+run_php_lint() {
+    local file
+
+    while IFS= read -r -d '' file; do
+        php -l "$file" > /dev/null
+    done < <(find src tests -type f -name '*.php' -print0)
+}
+
+run_quick() {
+    run_step "Syntax check" run_php_lint
+    run_step "Unit tests" composer test:unit
+    run_step "Integration tests" composer test:integration
+}
+
+run_contracts() {
+    run_step "Contracts tests" composer test:contracts
+}
+
+run_full() {
+    run_quick
+    run_contracts
+    run_step "Static analysis (phpstan)" composer phpstan
+}
+
+run_coverage() {
+    mkdir -p build/coverage
+
+    if php -r 'exit((extension_loaded("xdebug") || extension_loaded("pcov")) ? 0 : 1);'; then
+        run_step "Coverage report" env XDEBUG_MODE=coverage vendor/bin/phpunit --testsuite Unit,Integration,Contracts --coverage-text --coverage-clover build/coverage/clover.xml --coverage-html build/coverage/html
+        return 0
+    fi
+
+    if command -v phpdbg >/dev/null 2>&1; then
+        run_step "Coverage report" phpdbg -qrr vendor/bin/phpunit --testsuite Unit,Integration,Contracts --coverage-text --coverage-clover build/coverage/clover.xml --coverage-html build/coverage/html
+        return 0
+    fi
+
+    step "Coverage report"
+    echo "Coverage driver unavailable (xdebug/pcov/phpdbg). Skipping coverage artifacts."
+    echo "status=ok duration=0s step=Coverage report"
+}
+
+run_not_applicable() {
+    local label="$1"
+    step "$label"
+    echo "Profile is not applicable for pframe (framework-level repository)."
+    echo "status=ok duration=0s step=$label"
+}
+
+case "$PROFILE" in
+    quick)
+        run_quick
+        ;;
+    full)
+        run_full
+        ;;
+    ci)
+        run_full
+        run_coverage
+        ;;
+    coverage)
+        run_coverage
+        ;;
+    contracts)
+        run_contracts
+        ;;
+    e2e)
+        run_not_applicable "E2E tests (N/A)"
+        ;;
+    ui)
+        run_not_applicable "UI tests (N/A)"
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac

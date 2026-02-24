@@ -8,6 +8,25 @@
 4. **Composable** — traity zamiast monolitycznej base class
 5. **Zero boilerplate** — PFrame dostarcza TestCase, projekt dodaje factory methods
 
+## Standard testowy v1 (runner contract)
+
+Jedyny runner: `./bin/test <profile>`.
+
+| Profil | Zakres |
+|-------|--------|
+| `quick` | syntax + `Unit` + `Integration` |
+| `full` | `quick` + `Contracts` + `phpstan` |
+| `ci` | `full` + coverage report |
+| `coverage` | phpunit z coverage artifacts (`build/coverage`) |
+| `contracts` | governance runnera i testy kontraktowe |
+| `e2e`/`ui` | w repo frameworka N/A (czytelny komunikat + exit 0) |
+
+Komendy `composer test*` są aliasami do tego kontraktu (`composer test` = `./bin/test quick`).
+CI uruchamia dokładnie `./bin/test ci`, bez duplikowania kroków w workflow.
+
+Gdy środowisko nie ma drivera coverage (`xdebug`, `pcov` lub `phpdbg`), profile `coverage` i `ci`
+wypisują komunikat o fallbacku i kończą się sukcesem, zamiast przerywać cały pipeline.
+
 ## Struktura testów
 
     tests/

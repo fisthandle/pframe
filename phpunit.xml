@@ -11,10 +11,15 @@
         <testsuite name="Integration">
             <directory>tests/Integration</directory>
         </testsuite>
+        <testsuite name="Contracts">
+            <directory>tests/Contracts</directory>
+        </testsuite>
     </testsuites>
     <source>
         <include>
             <directory suffix=".php">src</directory>
         </include>
     </source>
+    <coverage includeUncoveredFiles="false"
+              pathCoverage="false" />
 </phpunit>

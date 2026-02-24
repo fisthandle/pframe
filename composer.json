@@ -21,9 +21,14 @@
         }
     },
     "scripts": {
-        "test": "phpunit",
+        "test": "./bin/test quick",
         "test:unit": "phpunit --testsuite Unit",
         "test:integration": "phpunit --testsuite Integration",
+        "test:contracts": "phpunit --testsuite Contracts",
+        "test:quick": "./bin/test quick",
+        "test:full": "./bin/test full",
+        "test:ci": "./bin/test ci",
+        "test:coverage": "./bin/test coverage",
         "phpstan": "phpstan analyse"
     }
 }

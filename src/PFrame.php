@@ -2273,7 +2273,12 @@ namespace PFrame {
         /** @return array{success: bool, error?: string, output?: string} */
         private function executeCommand(): array {
             $descriptors = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
-            $process = proc_open($this->cmd, $descriptors, $pipes);
+            $command = $this->cmd;
+            if ($command === null) {
+                return ['success' => false, 'error' => 'No command configured'];
+            }
+
+            $process = proc_open($command, $descriptors, $pipes);
             if (!is_resource($process)) {
                 return ['success' => false, 'error' => 'Failed to start process'];
             }

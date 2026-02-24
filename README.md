@@ -303,8 +303,38 @@ For F3-to-PFrame migration scenarios, the framework now includes:
 
 ```bash
 composer install
-vendor/bin/phpunit
+./bin/test quick
 ```
+
+Test standard v1 profiles:
+
+```bash
+./bin/test quick      # syntax + unit + integration
+./bin/test full       # quick + contracts + phpstan
+./bin/test ci         # full + coverage report
+./bin/test coverage   # coverage artifacts only
+./bin/test contracts  # governance/contracts suite
+./bin/test e2e        # not applicable in framework repo (success)
+./bin/test ui         # not applicable in framework repo (success)
+```
+
+Composer aliases:
+
+```bash
+composer test
+composer test:unit
+composer test:integration
+composer test:contracts
+composer test:quick
+composer test:full
+composer test:ci
+composer test:coverage
+composer phpstan
+```
+
+Coverage artifacts are generated in `build/coverage/` (`clover.xml`, `html/`). If no coverage
+driver is available (`xdebug`, `pcov`, `phpdbg`), `coverage`/`ci` print a clear fallback message
+and continue successfully.
 
 ## License
 
