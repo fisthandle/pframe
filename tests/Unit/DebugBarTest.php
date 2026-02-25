@@ -163,9 +163,12 @@ class DebugBarTest extends TestCase {
         $bar = new DebugBar($app);
         $html = $bar->render();
 
-        $this->assertStringContainsString('Top slow:', $html);
+        $this->assertStringNotContainsString('Top slow:', $html);
         $this->assertStringContainsString('N+1 candidates:', $html);
         $this->assertStringContainsString('2×', $html);
+        $this->assertStringContainsString('-dups-short', $html);
+        $this->assertStringContainsString('-dups-full', $html);
+        $this->assertStringContainsString("['queries','slow','dups']", $html);
         $this->assertStringContainsString('Files:', $html);
     }
 
@@ -177,7 +180,22 @@ class DebugBarTest extends TestCase {
         $bar = new DebugBar($app);
         $html = $bar->render();
 
-        $this->assertStringContainsString('Top slow:', $html);
+        $this->assertStringNotContainsString('Top slow:', $html);
         $this->assertStringNotContainsString('N+1 candidates:', $html);
+        $this->assertStringNotContainsString('-insights', $html);
+    }
+
+    public function testRenderShowsTopSlowWhenDbCountAtLeastTen(): void {
+        $app = new App();
+        $app->setConfig('db', ['dsn' => 'sqlite::memory:', 'log_queries' => true]);
+        $app->db()->exec('CREATE TABLE t (id INTEGER PRIMARY KEY)');
+        for ($i = 1; $i <= 9; $i++) {
+            $app->db()->exec('INSERT INTO t (id) VALUES (?)', [$i]);
+        }
+
+        $bar = new DebugBar($app);
+        $html = $bar->render();
+
+        $this->assertStringContainsString('Top slow:', $html);
     }
 }

@@ -2472,6 +2472,45 @@ namespace PFrame {
             private App $app,
         ) {}
 
+        /**
+         * @param list<array<string, mixed>> $rows
+         * @param callable(array<string, mixed>, int): array{prefix: string, sql: string} $formatter
+         * @return array{short: string, full: string}
+         */
+        private function buildSqlViews(array $rows, int $shortLimit, callable $formatter): array {
+            $shortRows = '';
+            $fullRows = '';
+            foreach ($rows as $i => $row) {
+                $line = $formatter($row, $i);
+                $sql = (string) preg_replace('/\s+/', ' ', trim($line['sql']));
+                $shortSql = mb_strlen($sql) > $shortLimit ? mb_substr($sql, 0, $shortLimit) . '…' : $sql;
+                $prefix = $line['prefix'] === '' ? '' : $line['prefix'] . ' ';
+                $shortRows .= '<div>' . $prefix . h($shortSql) . '</div>';
+                $fullRows .= '<div>' . $prefix . h($sql) . '</div>';
+            }
+
+            return ['short' => $shortRows, 'full' => $fullRows];
+        }
+
+        private function renderSqlToggleSection(
+            string $id,
+            string $suffix,
+            string $shortRows,
+            string $fullRows,
+            string $shortStyle,
+            string $fullStyle,
+            bool $compact = true,
+        ): string {
+            $shortDisplay = $compact ? 'block' : 'none';
+            $fullDisplay = $compact ? 'none' : 'block';
+
+            return '<pre style="' . $shortStyle . ';display:' . $shortDisplay . '" id="' . $id . '-' . $suffix . '-short">'
+                . $shortRows
+                . '</pre><pre style="' . $fullStyle . ';display:' . $fullDisplay . '" id="' . $id . '-' . $suffix . '-full">'
+                . $fullRows
+                . '</pre>';
+        }
+
         /** @return array{gen_ms: float, db_ms: float, db_count: int, view_ms: float, views: list<array{template: string, ms: float}>, mem_mb: float, peak_mb: float, included_files: list<string>, queries: list<array{sql: string, ms: float}>, duplicates: list<array{pattern: string|null, count: int, total_ms: float}>, slowest: list<array{sql: string, ms: float}>} */
         public function toArray(): array {
             $queries = [];
@@ -2537,20 +2576,23 @@ namespace PFrame {
             $id = 'pf-dbg-' . mt_rand(1000, 9999);
             $qs = $d['queries'];
 
-            $shortRows = '';
-            $fullRows = '';
+            $queryViews = ['short' => '', 'full' => ''];
             if ($qs === []) {
-                $shortRows = '<div>Brak zapytań.</div>';
-                $fullRows = $shortRows;
+                $queryViews['short'] = '<div>Brak zapytań.</div>';
+                $queryViews['full'] = $queryViews['short'];
             } else {
-                foreach ($qs as $i => $q) {
-                    $n = $i + 1;
-                    $sql = (string) preg_replace('/\s+/', ' ', trim($q['sql']));
-                    $shortSql = mb_strlen($sql) > 120 ? mb_substr($sql, 0, 120) . '…' : $sql;
-                    $ms = $q['ms'];
-                    $shortRows .= '<div>' . $n . '. (' . $ms . 'ms) ' . h($shortSql) . '</div>';
-                    $fullRows .= '<div>' . $n . '. (' . $ms . 'ms) ' . h($sql) . '</div>';
-                }
+                $queryViews = $this->buildSqlViews(
+                    $qs,
+                    120,
+                    static function (array $q, int $i): array {
+                        $n = $i + 1;
+
+                        return [
+                            'prefix' => $n . '. (' . $q['ms'] . 'ms)',
+                            'sql' => (string) $q['sql'],
+                        ];
+                    },
+                );
             }
 
             // Files list: views with times first (sorted by time desc), then the rest
@@ -2591,48 +2633,72 @@ namespace PFrame {
                 . ' | <span style="cursor:pointer;text-decoration:underline" id="' . $id . '-files-toggle">Files: <b>' . $fileCount . '</b></span>'
                 . ' | <span style="cursor:pointer;text-decoration:underline" id="' . $id . '-toggle">toggle</span>';
 
-            // Top slow — short/full versions like queries
-            $slowShort = '';
-            $slowFull = '';
-            if ($d['slowest'] !== []) {
-                foreach ($d['slowest'] as $s) {
-                    $sql = (string) preg_replace('/\s+/', ' ', trim($s['sql']));
-                    $short = mb_strlen($sql) > 100 ? mb_substr($sql, 0, 100) . '…' : $sql;
-                    $slowShort .= '<div>  <b>' . $s['ms'] . 'ms</b> ' . h($short) . '</div>';
-                    $slowFull .= '<div>  <b>' . $s['ms'] . 'ms</b> ' . h($sql) . '</div>';
-                }
+            $querySection = $this->renderSqlToggleSection(
+                $id,
+                'queries',
+                $queryViews['short'],
+                $queryViews['full'],
+                'margin:0;font:inherit;white-space:pre-wrap',
+                'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+            );
+
+            $slowSection = '';
+            if ($d['db_count'] >= 10 && $d['slowest'] !== []) {
+                $slowViews = $this->buildSqlViews(
+                    $d['slowest'],
+                    100,
+                    static fn(array $s, int $_): array => [
+                        'prefix' => '<b>' . $s['ms'] . 'ms</b>',
+                        'sql' => (string) $s['sql'],
+                    ],
+                );
+                $slowSection = '<div><b>Top slow:</b></div>'
+                    . $this->renderSqlToggleSection(
+                        $id,
+                        'slow',
+                        $slowViews['short'],
+                        $slowViews['full'],
+                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+                    );
             }
 
-            // N+1 candidates
-            $dupsHtml = '';
+            $dupsSection = '';
             if ($d['duplicates'] !== []) {
-                $dupsHtml .= '<div style="margin-top:4px"><b>N+1 candidates:</b></div>';
-                foreach ($d['duplicates'] as $dup) {
-                    $pat = $dup['pattern'] ?? '';
-                    $pattern = mb_strlen($pat) > 90 ? mb_substr($pat, 0, 90) . '…' : $pat;
-                    $dupsHtml .= '<div>  <b>' . $dup['count'] . '×</b> (' . $dup['total_ms'] . 'ms) ' . h($pattern) . '</div>';
-                }
+                $dupsViews = $this->buildSqlViews(
+                    $d['duplicates'],
+                    90,
+                    static fn(array $dup, int $_): array => [
+                        'prefix' => '<b>' . $dup['count'] . '×</b> (' . $dup['total_ms'] . 'ms)',
+                        'sql' => (string) ($dup['pattern'] ?? ''),
+                    ],
+                );
+                $dupsSection = '<div style="margin-top:4px"><b>N+1 candidates:</b></div>'
+                    . $this->renderSqlToggleSection(
+                        $id,
+                        'dups',
+                        $dupsViews['short'],
+                        $dupsViews['full'],
+                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+                    );
             }
 
             $insightsBox = '';
-            if ($slowShort !== '' || $dupsHtml !== '') {
-                $slowLabel = $slowShort !== '' ? '<div><b>Top slow:</b></div>' : '';
-                $slowSection = $slowLabel
-                    . '<pre style="margin:0;font:inherit;white-space:pre;overflow-x:auto" id="' . $id . '-slow-short">' . $slowShort . '</pre>'
-                    . '<pre style="margin:0;font:inherit;white-space:pre;overflow-x:auto;display:none" id="' . $id . '-slow-full">' . $slowFull . '</pre>';
+            if ($slowSection !== '' || $dupsSection !== '') {
                 $insightsBox = '<div style="background:#f5f5f0;border:1px solid #ddd;padding:6px 10px;margin-top:8px;border-radius:3px" id="' . $id . '-insights">'
                     . $slowSection
-                    . $dupsHtml
+                    . $dupsSection
                     . '</div>';
             }
 
             return <<<HTML
             <div id="{$id}" style="background:#e8e8e8;color:#333;font-family:monospace;font-size:14px;padding:10px 14px;border-top:1px solid #ccc;margin-top:2rem;line-height:1.6">
-            <pre style="margin:0;font:inherit;white-space:pre-wrap"><div id="{$id}-short">{$shortRows}</div></pre><pre style="margin:0;font:inherit;white-space:pre;overflow-x:auto;display:none" id="{$id}-full">{$fullRows}</pre>{$insightsBox}
+            {$querySection}{$insightsBox}
             <div style="margin-top:6px">{$summary}</div>
             <pre style="margin:0;font:inherit;white-space:pre;overflow-x:auto;display:none;margin-top:6px;font-size:12px;color:#555" id="{$id}-files">{$filesList}</pre>
             </div>
-            <script>document.getElementById('{$id}-toggle').addEventListener('click',function(){var s=document.getElementById('{$id}-short'),f=document.getElementById('{$id}-full'),ss=document.getElementById('{$id}-slow-short'),sf=document.getElementById('{$id}-slow-full');if(f.style.display==='none'){f.style.display='block';s.style.display='none';if(ss){ss.style.display='none';sf.style.display='block'}}else{f.style.display='none';s.style.display='block';if(ss){ss.style.display='block';sf.style.display='none'}}});document.getElementById('{$id}-files-toggle').addEventListener('click',function(){var fl=document.getElementById('{$id}-files');fl.style.display=fl.style.display==='none'?'block':'none'})</script>
+            <script>document.getElementById('{$id}-toggle').addEventListener('click',function(){['queries','slow','dups'].forEach(function(name){var s=document.getElementById('{$id}-'+name+'-short'),f=document.getElementById('{$id}-'+name+'-full');if(!s||!f){return}if(f.style.display==='none'){f.style.display='block';s.style.display='none'}else{f.style.display='none';s.style.display='block'}})});document.getElementById('{$id}-files-toggle').addEventListener('click',function(){var fl=document.getElementById('{$id}-files');fl.style.display=fl.style.display==='none'?'block':'none'})</script>
             HTML;
         }
     }
