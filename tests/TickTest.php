@@ -9,17 +9,41 @@ use PFrame\TickTask;
 
 class TickTest extends TestCase {
     private string $cacheDir;
+    /** @var list<string> */
+    private array $cacheDirs = [];
 
     protected function setUp(): void {
-        $this->cacheDir = sys_get_temp_dir() . '/pframe_tick_test_' . uniqid();
-        mkdir($this->cacheDir, 0755, true);
+        $this->cacheDir = $this->createCacheDir('pframe_tick_test_');
     }
 
     protected function tearDown(): void {
-        // cleanup cache dir
-        foreach (glob($this->cacheDir . '/tick/*') ?: [] as $f) { unlink($f); }
-        @rmdir($this->cacheDir . '/tick');
-        @rmdir($this->cacheDir);
+        foreach ($this->cacheDirs as $cacheDir) {
+            foreach (glob($cacheDir . '/tick/*') ?: [] as $file) {
+                @unlink($file);
+            }
+            @rmdir($cacheDir . '/tick');
+            foreach (glob($cacheDir . '/*') ?: [] as $file) {
+                @unlink($file);
+            }
+            @rmdir($cacheDir);
+        }
+    }
+
+    private function createCacheDir(string $prefix): string {
+        $dir = sys_get_temp_dir() . '/' . $prefix . uniqid('', true);
+        mkdir($dir, 0755, true);
+        $this->cacheDirs[] = $dir;
+        return $dir;
+    }
+
+    private function lockPath(string $cacheDir, string $taskName, string $prefix = ''): string {
+        $keyPrefix = 'tick:' . ($prefix !== '' ? $prefix : md5($cacheDir)) . ':';
+        return $cacheDir . '/tick/' . md5($keyPrefix . $taskName . ':lock') . '.lock';
+    }
+
+    private function failPath(string $cacheDir, string $taskName, string $prefix = ''): string {
+        $keyPrefix = 'tick:' . ($prefix !== '' ? $prefix : md5($cacheDir)) . ':';
+        return $cacheDir . '/tick/' . md5($keyPrefix . $taskName . ':fail') . '.fail';
     }
 
     public function testTaskRegistration(): void {
@@ -73,46 +97,24 @@ class TickTest extends TestCase {
         self::assertSame(1, $counter);
     }
 
-    public function testBetweenTimeWindow(): void {
-        $tick = new Tick($this->cacheDir);
-        $counter = 0;
+    public function testMidnightCrossingTimeWindowDeterministic(): void {
+        $task = (new TickTask('night_window'))
+            ->between('23:00', '02:00');
 
-        $tick->task('windowed')
-            ->every(60)
-            ->between('03:00', '05:00')
-            ->run(function() use (&$counter) { $counter++; });
-
-        // Dispatch — will only run if current time is in window
-        $results = $tick->dispatch(forceRun: true);
-
-        $hour = (int)date('G');
-        if ($hour >= 3 && $hour < 5) {
-            self::assertSame(1, $counter);
-        } else {
-            self::assertSame(0, $counter);
-        }
+        self::assertTrue($task->inTimeWindow('23:00'));
+        self::assertTrue($task->inTimeWindow('01:59'));
+        self::assertFalse($task->inTimeWindow('02:00'));
+        self::assertFalse($task->inTimeWindow('22:59'));
     }
 
-    public function testBetweenTimeWindowWithOverride(): void {
-        $tick = new Tick($this->cacheDir);
-        $counter = 0;
+    public function testNormalTimeWindowDeterministicOverride(): void {
+        $task = (new TickTask('day_window'))
+            ->between('03:00', '05:00');
 
-        // Window that's definitely NOT now (unless test runs at exactly this time)
-        $tick->task('windowed')
-            ->every(1)
-            ->between('02:00', '02:01')
-            ->run(function() use (&$counter) { $counter++; });
-
-        $results = $tick->dispatch(forceRun: true);
-
-        $hour = (int)date('G');
-        $minute = (int)date('i');
-        if ($hour === 2 && $minute === 0) {
-            self::assertSame(1, $counter); // extremely unlikely
-        } else {
-            self::assertSame(0, $counter);
-            self::assertEmpty($results);
-        }
+        self::assertFalse($task->inTimeWindow('02:59'));
+        self::assertTrue($task->inTimeWindow('03:00'));
+        self::assertTrue($task->inTimeWindow('04:59'));
+        self::assertFalse($task->inTimeWindow('05:00'));
     }
 
     public function testCommandTask(): void {
@@ -195,5 +197,152 @@ class TickTest extends TestCase {
         $tick2->dispatch(); // no forceRun — global throttle active
         // Should still be 1 because global throttle blocks re-evaluation
         self::assertSame(1, $counter);
+    }
+
+    public function testCustomThrottleConstructorArg(): void {
+        $tick = new Tick($this->cacheDir, throttleSeconds: 1);
+        $counter = 0;
+
+        $tick->task('custom_throttle')
+            ->every(0)
+            ->run(function() use (&$counter) { $counter++; });
+
+        $tick->dispatch();
+        self::assertSame(1, $counter);
+
+        $tick->dispatch();
+        self::assertSame(1, $counter);
+
+        usleep(1_100_000);
+        $tick->dispatch();
+        self::assertSame(2, $counter);
+    }
+
+    public function testPrefixIsolationStateForTwoCacheDirs(): void {
+        $cacheDirA = $this->createCacheDir('pframe_tick_a_');
+        $cacheDirB = $this->createCacheDir('pframe_tick_b_');
+        $counterA = 0;
+        $counterB = 0;
+
+        $tickA = new Tick($cacheDirA);
+        $tickA->task('shared')
+            ->every(3600)
+            ->run(function() use (&$counterA) { $counterA++; });
+
+        $tickB = new Tick($cacheDirB);
+        $tickB->task('shared')
+            ->every(3600)
+            ->run(function() use (&$counterB) { $counterB++; });
+
+        $tickA->dispatch(forceRun: true);
+        $tickB->dispatch(forceRun: true);
+
+        self::assertSame(1, $counterA);
+        self::assertSame(1, $counterB);
+    }
+
+    public function testLockPreventsExecutionWhenLockHeld(): void {
+        $tick = new Tick($this->cacheDir);
+        $counter = 0;
+
+        $tick->task('locked')
+            ->every(1)
+            ->run(function() use (&$counter) { $counter++; });
+
+        $lockPath = $this->lockPath($this->cacheDir, 'locked');
+        $handle = fopen($lockPath, 'c');
+        self::assertNotFalse($handle);
+        if ($handle === false) {
+            return;
+        }
+
+        try {
+            self::assertTrue(flock($handle, LOCK_EX | LOCK_NB));
+            $results = $tick->dispatch(forceRun: true);
+            self::assertSame(0, $counter);
+            self::assertSame([], $results);
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+            @unlink($lockPath);
+        }
+    }
+
+    public function testFailedTaskRetriesThenSucceeds(): void {
+        $tick = new Tick($this->cacheDir);
+        $attempts = 0;
+
+        $tick->task('retry_then_success')
+            ->every(3600)
+            ->retries(3)
+            ->run(function() use (&$attempts) {
+                $attempts++;
+                if ($attempts < 3) {
+                    throw new \RuntimeException('not yet');
+                }
+            });
+
+        $res1 = $tick->dispatch(forceRun: true);
+        $res2 = $tick->dispatch(forceRun: true);
+        $res3 = $tick->dispatch(forceRun: true);
+        $res4 = $tick->dispatch(forceRun: true);
+
+        self::assertFalse($res1['retry_then_success']['success']);
+        self::assertFalse($res2['retry_then_success']['success']);
+        self::assertTrue($res3['retry_then_success']['success']);
+        self::assertSame(3, $attempts);
+        self::assertSame([], $res4);
+    }
+
+    public function testExhaustedRetriesWaitsFullInterval(): void {
+        $tick = new Tick($this->cacheDir);
+        $attempts = 0;
+
+        $tick->task('always_fail')
+            ->every(3600)
+            ->retries(2)
+            ->run(function() use (&$attempts) {
+                $attempts++;
+                throw new \RuntimeException('still failing');
+            });
+
+        $res1 = $tick->dispatch(forceRun: true);
+        $res2 = $tick->dispatch(forceRun: true);
+        $res3 = $tick->dispatch(forceRun: true);
+
+        self::assertFalse($res1['always_fail']['success']);
+        self::assertFalse($res2['always_fail']['success']);
+        self::assertSame([], $res3);
+        self::assertSame(2, $attempts);
+    }
+
+    public function testSuccessResetsFailCount(): void {
+        $tick = new Tick($this->cacheDir);
+        $attempts = 0;
+
+        $tick->task('reset_fail_count')
+            ->every(1)
+            ->retries(2)
+            ->run(function() use (&$attempts) {
+                $attempts++;
+                if ($attempts === 2) {
+                    return;
+                }
+                throw new \RuntimeException('fail ' . $attempts);
+            });
+
+        $res1 = $tick->dispatch(forceRun: true);
+        $res2 = $tick->dispatch(forceRun: true);
+        usleep(1_100_000);
+        $res3 = $tick->dispatch(forceRun: true);
+        $res4 = $tick->dispatch(forceRun: true);
+        $failPath = $this->failPath($this->cacheDir, 'reset_fail_count');
+
+        self::assertFalse($res1['reset_fail_count']['success']);
+        self::assertTrue($res2['reset_fail_count']['success']);
+        self::assertFileDoesNotExist($failPath);
+        self::assertFalse($res3['reset_fail_count']['success']);
+        self::assertFalse($res4['reset_fail_count']['success']);
+        self::assertSame(4, $attempts);
     }
 }

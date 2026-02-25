@@ -271,20 +271,23 @@ $handler = static function () use ($app): void {
 Register background tasks that run on a timer, optionally within a time window:
 
 ```php
-$tick = new \PFrame\Tick('/tmp/tick');
+$tick = new \PFrame\Tick('/tmp/tick', throttleSeconds: 15, prefix: 'worker-a');
 $tick->task('cleanup')
     ->every(3600)
     ->run(fn () => cleanOldRecords());
 
 $tick->task('report')
     ->every(86400)
-    ->between('02:00', '04:00')
+    ->between('23:00', '02:00')
+    ->retries(5)
     ->command('php /app/bin/daily-report.php');
 
 $tick->dispatch(); // call from a cron or worker loop
 ```
 
-Tasks are deduplicated via file locks and globally throttled (min 30s between tick cycles).
+Tasks are deduplicated via file locks and globally throttled (`throttleSeconds`, default `30`).
+Time windows support crossing midnight (for example `23:00` → `02:00`).
+Failed tasks are retried on subsequent dispatches until `retries()` is exhausted, then they wait a full interval again.
 
 ## Migration Compatibility
 

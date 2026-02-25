@@ -2231,6 +2231,7 @@ namespace PFrame {
         private int $interval = 60;
         private ?string $windowFrom = null;
         private ?string $windowTo = null;
+        private int $maxRetries = 3;
         /** @var ?\Closure */
         private ?\Closure $callback = null;
         private ?string $cmd = null;
@@ -2251,12 +2252,24 @@ namespace PFrame {
             return $this;
         }
 
+        public function retries(int $max): self {
+            $this->maxRetries = max(0, $max);
+            return $this;
+        }
+
         /** @param callable $callback */
         public function run(callable $callback): self {
             $this->callback = $callback(...);
             return $this;
         }
 
+        /**
+         * Run a shell command as the task action.
+         *
+         * WARNING: The command string is passed directly to the shell via proc_open().
+         * Never build commands from untrusted input without proper escaping
+         * (escapeshellarg()/escapeshellcmd()). The caller is responsible for safety.
+         */
         public function command(string $cmd, int $timeout = 60): self {
             $this->cmd = $cmd;
             $this->cmdTimeout = $timeout;
@@ -2267,12 +2280,21 @@ namespace PFrame {
             return $this->interval;
         }
 
-        public function inTimeWindow(): bool {
+        public function getMaxRetries(): int {
+            return $this->maxRetries;
+        }
+
+        public function inTimeWindow(?string $now = null): bool {
             if ($this->windowFrom === null || $this->windowTo === null) {
                 return true;
             }
-            $now = date('H:i');
-            return $now >= $this->windowFrom && $now < $this->windowTo;
+
+            $timeNow = $now ?? date('H:i');
+            if ($this->windowFrom <= $this->windowTo) {
+                return $timeNow >= $this->windowFrom && $timeNow < $this->windowTo;
+            }
+
+            return $timeNow >= $this->windowFrom || $timeNow < $this->windowTo;
         }
 
         /** @return array{success: bool, error?: string} */
@@ -2343,18 +2365,20 @@ namespace PFrame {
     }
 
     class Tick {
-        private const GLOBAL_THROTTLE_KEY = 'tick:global';
-        private const GLOBAL_THROTTLE_SECONDS = 30;
-        private const KEY_PREFIX = 'tick:';
-
         /** @var array<string, TickTask> */
         private array $tasks = [];
         private bool $hasApcu;
         private string $tickDir;
+        private string $keyPrefix;
 
-        public function __construct(private readonly string $cacheDir) {
+        public function __construct(
+            private readonly string $cacheDir,
+            private readonly int $throttleSeconds = 30,
+            string $prefix = '',
+        ) {
             $this->hasApcu = function_exists('apcu_enabled') && apcu_enabled();
             $this->tickDir = $this->cacheDir . '/tick';
+            $this->keyPrefix = 'tick:' . ($prefix !== '' ? $prefix : md5($cacheDir)) . ':';
             if (!is_dir($this->tickDir)) {
                 @mkdir($this->tickDir, 0755, true);
             }
@@ -2377,24 +2401,42 @@ namespace PFrame {
 
             $results = [];
             foreach ($this->tasks as $name => $task) {
-                if (!$this->isDue($task) || !$this->tryLock($name, min($task->getInterval(), 300))) {
+                if (!$this->isDue($task) || !$this->tryLock($name)) {
                     continue;
                 }
-                $results[$name] = $task->execute();
-                $this->setLastRun($name, time());
-                $this->unlock($name);
+
+                try {
+                    $results[$name] = $task->execute();
+                    if ($results[$name]['success']) {
+                        $this->setLastRun($name, time());
+                        $this->resetFailCount($name);
+                        continue;
+                    }
+
+                    $failures = $this->incrementFailCount($name);
+                    if ($failures >= $task->getMaxRetries()) {
+                        $this->setLastRun($name, time());
+                        $this->resetFailCount($name);
+                    }
+                } finally {
+                    $this->unlock($name);
+                }
             }
             return $results;
         }
 
         private function globalThrottlePass(): bool {
-            $key = self::GLOBAL_THROTTLE_KEY;
-            if ($this->hasApcu) {
-                return apcu_add($key, 1, self::GLOBAL_THROTTLE_SECONDS);
+            if ($this->throttleSeconds <= 0) {
+                return true;
             }
-            // File fallback: flock + mtime for atomic throttle
-            $path = $this->tickDir . '/global.tick';
-            $handle = @fopen($path, 'c');
+
+            $key = $this->keyPrefix . 'global';
+            if ($this->hasApcu) {
+                return apcu_add($key, 1, $this->throttleSeconds);
+            }
+            // File fallback: flock + persisted timestamp for atomic throttle.
+            $path = $this->tickDir . '/' . md5($key) . '.tick';
+            $handle = @fopen($path, 'c+');
             if ($handle === false) {
                 return true; // fail-open: run if can't check
             }
@@ -2402,14 +2444,18 @@ namespace PFrame {
                 fclose($handle);
                 return false;
             }
-            $mtime = @filemtime($path);
-            if ($mtime !== false && (time() - $mtime) < self::GLOBAL_THROTTLE_SECONDS) {
+            rewind($handle);
+            $content = stream_get_contents($handle);
+            $lastThrottle = $content === false || trim($content) === '' ? null : (int)trim($content);
+            if ($lastThrottle !== null && (time() - $lastThrottle) < $this->throttleSeconds) {
                 flock($handle, LOCK_UN);
                 fclose($handle);
                 return false;
             }
-            // Update mtime while holding lock
+
+            // Store current throttle timestamp while holding lock.
             ftruncate($handle, 0);
+            rewind($handle);
             fwrite($handle, (string)time());
             fflush($handle);
             flock($handle, LOCK_UN);
@@ -2429,12 +2475,12 @@ namespace PFrame {
         }
 
         private function getLastRun(string $name): ?int {
-            $key = self::KEY_PREFIX . $name . ':last';
+            $key = $this->keyPrefix . $name . ':last';
             if ($this->hasApcu) {
                 $val = apcu_fetch($key, $success);
                 return $success ? (int)$val : null;
             }
-            $path = $this->tickDir . '/' . md5($name) . '.last';
+            $path = $this->tickDir . '/' . md5($key) . '.last';
             if (!is_file($path)) {
                 return null;
             }
@@ -2443,25 +2489,67 @@ namespace PFrame {
         }
 
         private function setLastRun(string $name, int $timestamp): void {
-            $key = self::KEY_PREFIX . $name . ':last';
+            $key = $this->keyPrefix . $name . ':last';
             if ($this->hasApcu) {
                 apcu_store($key, $timestamp, 0);
             }
             // Always write file (persistent across APCu clears/restarts)
-            $path = $this->tickDir . '/' . md5($name) . '.last';
+            $path = $this->tickDir . '/' . md5($key) . '.last';
             @file_put_contents($path, (string)$timestamp, LOCK_EX);
+        }
+
+        private function getFailCount(string $name): int {
+            $path = $this->tickDir . '/' . md5($this->keyPrefix . $name . ':fail') . '.fail';
+            if (!is_file($path)) {
+                return 0;
+            }
+            $content = @file_get_contents($path);
+            if ($content === false) {
+                return 0;
+            }
+            return max(0, (int)$content);
+        }
+
+        private function incrementFailCount(string $name): int {
+            $path = $this->tickDir . '/' . md5($this->keyPrefix . $name . ':fail') . '.fail';
+            $handle = @fopen($path, 'c+');
+            if ($handle === false) {
+                $count = $this->getFailCount($name) + 1;
+                @file_put_contents($path, (string)$count, LOCK_EX);
+                return $count;
+            }
+
+            try {
+                if (!flock($handle, LOCK_EX)) {
+                    $count = $this->getFailCount($name) + 1;
+                    @file_put_contents($path, (string)$count, LOCK_EX);
+                    return $count;
+                }
+
+                rewind($handle);
+                $content = stream_get_contents($handle);
+                $count = max(0, (int)($content ?: '0')) + 1;
+                ftruncate($handle, 0);
+                rewind($handle);
+                fwrite($handle, (string)$count);
+                fflush($handle);
+                flock($handle, LOCK_UN);
+                return $count;
+            } finally {
+                fclose($handle);
+            }
+        }
+
+        private function resetFailCount(string $name): void {
+            @unlink($this->tickDir . '/' . md5($this->keyPrefix . $name . ':fail') . '.fail');
         }
 
         /** @var array<string, resource> File lock handles (kept open until unlock) */
         private array $lockHandles = [];
 
-        private function tryLock(string $name, int $ttl): bool {
-            $key = self::KEY_PREFIX . $name . ':lock';
-            if ($this->hasApcu) {
-                return apcu_add($key, getmypid(), $ttl);
-            }
-            // File lock fallback — flock is atomic and race-safe
-            $path = $this->tickDir . '/' . md5($name) . '.lock';
+        private function tryLock(string $name): bool {
+            // File lock — flock is atomic and race-safe.
+            $path = $this->tickDir . '/' . md5($this->keyPrefix . $name . ':lock') . '.lock';
             $handle = @fopen($path, 'c');
             if ($handle === false) {
                 return false;
@@ -2475,16 +2563,12 @@ namespace PFrame {
         }
 
         private function unlock(string $name): void {
-            if ($this->hasApcu) {
-                apcu_delete(self::KEY_PREFIX . $name . ':lock');
-                return;
-            }
             if (isset($this->lockHandles[$name])) {
                 flock($this->lockHandles[$name], LOCK_UN);
                 fclose($this->lockHandles[$name]);
                 unset($this->lockHandles[$name]);
             }
-            @unlink($this->tickDir . '/' . md5($name) . '.lock');
+            @unlink($this->tickDir . '/' . md5($this->keyPrefix . $name . ':lock') . '.lock');
         }
     }
 
