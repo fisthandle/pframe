@@ -1316,10 +1316,6 @@ namespace PFrame {
         }
 
         public function resetRequestState(): void {
-            if ($this->trans()) {
-                $this->rollbackAll();
-            }
-
             $this->log = [];
             $this->lastRowCount = 0;
             $this->savepointLevel = 0;
