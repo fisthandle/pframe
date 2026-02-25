@@ -132,6 +132,29 @@ class DbTest extends TestCase {
         $this->assertFalse($this->db->trans());
     }
 
+    public function testRollbackAllUnwindsNestedSavepoints(): void {
+        $this->db->exec('CREATE TABLE IF NOT EXISTS rba_test (id INTEGER PRIMARY KEY, val TEXT)');
+        $this->db->begin();
+        $this->db->exec('INSERT INTO rba_test (val) VALUES (?)', ['a']);
+        $this->db->begin();
+        $this->db->exec('INSERT INTO rba_test (val) VALUES (?)', ['b']);
+        $this->db->begin();
+        $this->db->exec('INSERT INTO rba_test (val) VALUES (?)', ['c']);
+
+        $this->assertTrue($this->db->trans());
+        $this->db->rollbackAll();
+        $this->assertFalse($this->db->trans());
+        $this->assertSame(0, (int) $this->db->var('SELECT COUNT(*) FROM rba_test'));
+    }
+
+    public function testRollbackAllWhenNotInTransaction(): void {
+        $this->assertFalse($this->db->trans());
+        $result = $this->db->rollbackAll();
+
+        $this->assertFalse($result);
+        $this->assertFalse($this->db->trans());
+    }
+
     public function testTransReturnsFalseOutsideTransaction(): void {
         $this->assertFalse($this->db->trans());
     }

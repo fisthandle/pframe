@@ -62,7 +62,7 @@ $handler = static function () use ($app): void {
         $dbConfig = $app->config('db');
         if (is_array($dbConfig)) {
             $db = $app->db();
-            if ($db->trans()) { $db->rollback(); }
+            if ($db->trans()) { $db->rollbackAll(); }
             $db->resetRequestState();
         }
         if (session_status() === PHP_SESSION_ACTIVE) {

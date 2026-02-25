@@ -266,11 +266,18 @@ namespace PFrame {
         }
 
         public static function redirect(string $url, int $status = 302): static {
+            $url = ltrim($url, " \t\n\r\0\x0B");
+
             if (str_starts_with($url, '//')) {
                 throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
             }
 
             if (!str_starts_with($url, '/')) {
+                $scheme = parse_url($url, PHP_URL_SCHEME);
+                if (is_string($scheme) && !in_array(strtolower($scheme), ['http', 'https'], true)) {
+                    throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
+                }
+
                 $host = parse_url($url, PHP_URL_HOST);
                 if (is_string($host)) {
                     $currentHost = (string) ($_SERVER['HTTP_HOST'] ?? '');
@@ -1274,6 +1281,16 @@ namespace PFrame {
             return $this->pdo->rollBack();
         }
 
+        public function rollbackAll(): bool {
+            if (!$this->pdo->inTransaction()) {
+                $this->savepointLevel = 0;
+                return false;
+            }
+
+            $this->savepointLevel = 0;
+            return $this->pdo->rollBack();
+        }
+
         public function trans(): bool {
             return $this->pdo->inTransaction();
         }
@@ -1299,6 +1316,10 @@ namespace PFrame {
         }
 
         public function resetRequestState(): void {
+            if ($this->trans()) {
+                $this->rollbackAll();
+            }
+
             $this->log = [];
             $this->lastRowCount = 0;
             $this->savepointLevel = 0;

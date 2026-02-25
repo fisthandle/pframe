@@ -40,12 +40,35 @@ class WorkerModeTest extends TestCase {
         $db->begin();
         $db->exec('INSERT INTO items (name) VALUES (?)', ['leaked']);
         if ($db->trans()) {
-            $db->rollback();
+            $db->rollbackAll();
         }
         $db->resetRequestState();
 
         $app->resetRequestState();
         $this->assertSame(0, (int) $db->var('SELECT COUNT(*) FROM items'));
+        $db->resetRequestState();
+    }
+
+    public function testNestedTransactionDoesNotLeakBetweenRequests(): void {
+        $app = new App();
+        $app->setConfig('db', ['dsn' => 'sqlite::memory:']);
+        $db = $app->db();
+        $db->exec('CREATE TABLE nested_items (id INTEGER PRIMARY KEY, name TEXT)');
+
+        $app->resetRequestState();
+        $db->begin();
+        $db->begin();
+        $db->exec('INSERT INTO nested_items (name) VALUES (?)', ['leaked']);
+        $db->begin();
+        $db->exec('INSERT INTO nested_items (name) VALUES (?)', ['also_leaked']);
+        if ($db->trans()) {
+            $db->rollbackAll();
+        }
+        $db->resetRequestState();
+
+        $app->resetRequestState();
+        $this->assertFalse($db->trans(), 'Transaction leaked to next request');
+        $this->assertSame(0, (int) $db->var('SELECT COUNT(*) FROM nested_items'));
         $db->resetRequestState();
     }
 

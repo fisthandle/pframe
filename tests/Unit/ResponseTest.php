@@ -71,6 +71,41 @@ class ResponseTest extends TestCase {
         Response::redirect('//evil.com/phish');
     }
 
+    public function testRedirectBlocksJavascriptScheme(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('External redirect not allowed');
+        Response::redirect('javascript:alert(1)');
+    }
+
+    public function testRedirectBlocksDataScheme(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('External redirect not allowed');
+        Response::redirect('data:text/html,<script>alert(1)</script>');
+    }
+
+    public function testRedirectBlocksJavascriptSchemeUppercase(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('External redirect not allowed');
+        Response::redirect('JaVaScRiPt:alert(1)');
+    }
+
+    public function testRedirectBlocksWhitespaceSchemeBypass(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('External redirect not allowed');
+        Response::redirect(' javascript:alert(1)');
+    }
+
+    public function testRedirectBlocksTabSchemeBypass(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('External redirect not allowed');
+        Response::redirect("\tjavascript:alert(1)");
+    }
+
+    public function testRedirectAllowsQueryStringWithoutSlash(): void {
+        $r = Response::redirect('?page=2');
+        $this->assertSame('?page=2', $r->headers['Location']);
+    }
+
     public function testSendAndExitMethodContract(): void {
         $method = new \ReflectionMethod(Response::class, 'sendAndExit');
         $this->assertTrue($method->hasReturnType());

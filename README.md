@@ -251,7 +251,7 @@ $handler = static function () use ($app): void {
         if (is_array($dbConfig)) {
             $db = $app->db();
             if ($db->trans()) {
-                $db->rollback();
+                $db->rollbackAll();
             }
             $db->resetRequestState();
         }
@@ -271,7 +271,7 @@ $handler = static function () use ($app): void {
 Register background tasks that run on a timer, optionally within a time window:
 
 ```php
-$tick = new \PFrame\Tick(new \PFrame\Cache('/tmp/tick'));
+$tick = new \PFrame\Tick('/tmp/tick');
 $tick->task('cleanup')
     ->every(3600)
     ->run(fn () => cleanOldRecords());
@@ -281,7 +281,7 @@ $tick->task('report')
     ->between('02:00', '04:00')
     ->command('php /app/bin/daily-report.php');
 
-$tick->run(); // call from a cron or worker loop
+$tick->dispatch(); // call from a cron or worker loop
 ```
 
 Tasks are deduplicated via file locks and globally throttled (min 30s between tick cycles).
