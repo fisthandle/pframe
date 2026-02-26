@@ -10,10 +10,12 @@ class CacheTest extends TestCase {
     private string $dir;
 
     private Cache $cache;
+    private bool $hasApcu;
 
     protected function setUp(): void {
         $this->dir = sys_get_temp_dir() . '/p1_cache_test_' . uniqid('', true);
         $this->cache = new Cache($this->dir);
+        $this->hasApcu = function_exists('apcu_enabled') && apcu_enabled();
     }
 
     protected function tearDown(): void {
@@ -84,6 +86,15 @@ class CacheTest extends TestCase {
     }
 
     public function testCorruptedCacheFileFallsBack(): void {
+        if ($this->hasApcu) {
+            $file = $this->dir . '/' . md5('x') . '.cache';
+            file_put_contents($file, 'not serialized');
+
+            $this->cache->set('x', 'y');
+            $this->assertSame('y', $this->cache->get('x', 'd'));
+            return;
+        }
+
         $this->cache->set('x', 'y');
         $file = glob($this->dir . '/*.cache')[0] ?? null;
         $this->assertNotNull($file);

@@ -2098,15 +2098,23 @@ namespace PFrame {
     }
 
     class Cache {
+        private readonly bool $hasApcu;
+        private readonly string $apcuPrefix;
+
         public function __construct(private readonly string $dir) {
+            $this->hasApcu = function_exists('apcu_enabled') && apcu_enabled();
+            $this->apcuPrefix = 'pframe:cache:' . md5($this->dir) . ':';
+
             if (!is_dir($this->dir)) {
                 mkdir($this->dir, 0755, true);
             }
         }
 
         public function get(string $key, mixed $default = null): mixed {
-            if (function_exists('apcu_exists') && apcu_exists($key)) {
-                return apcu_fetch($key);
+            if ($this->hasApcu) {
+                $success = false;
+                $value = apcu_fetch($this->apcuKey($key), $success);
+                return $success ? $value : $default;
             }
 
             $path = $this->path($key);
@@ -2140,8 +2148,9 @@ namespace PFrame {
         }
 
         public function set(string $key, mixed $value, int $ttl = 0): void {
-            if (function_exists('apcu_store') && $ttl > 0) {
-                apcu_store($key, $value, $ttl);
+            if ($this->hasApcu) {
+                apcu_store($this->apcuKey($key), $value, max(0, $ttl));
+                return;
             }
 
             file_put_contents(
@@ -2152,8 +2161,9 @@ namespace PFrame {
         }
 
         public function delete(string $key): void {
-            if (function_exists('apcu_delete')) {
-                apcu_delete($key);
+            if ($this->hasApcu) {
+                apcu_delete($this->apcuKey($key));
+                return;
             }
 
             $path = $this->path($key);
@@ -2163,6 +2173,10 @@ namespace PFrame {
         }
 
         public function clear(): void {
+            if ($this->hasApcu) {
+                $this->clearApcu();
+            }
+
             foreach (glob($this->dir . '/*.cache') ?: [] as $file) {
                 unlink($file);
             }
@@ -2198,6 +2212,33 @@ namespace PFrame {
 
         private function path(string $key): string {
             return $this->dir . '/' . md5($key) . '.cache';
+        }
+
+        private function apcuKey(string $key): string {
+            return $this->apcuPrefix . md5($key);
+        }
+
+        private function clearApcu(): void {
+            if (!function_exists('apcu_cache_info')) {
+                return;
+            }
+
+            $cacheInfo = apcu_cache_info(false);
+            if (!is_array($cacheInfo)) {
+                return;
+            }
+
+            $cacheList = $cacheInfo['cache_list'] ?? null;
+            if (!is_array($cacheList)) {
+                return;
+            }
+
+            foreach ($cacheList as $entry) {
+                $entryKey = is_array($entry) ? ($entry['info'] ?? null) : null;
+                if (is_string($entryKey) && str_starts_with($entryKey, $this->apcuPrefix)) {
+                    apcu_delete($entryKey);
+                }
+            }
         }
 
         private function withRateLock(string $key, callable $callback): ?int {

@@ -142,7 +142,7 @@ Layout:
 | `Flash` | Flash messages |
 | `Log` | File logger with level filtering |
 | `Validator` | Input validation (email, phone, postcode, length, slug) |
-| `Cache` | File cache with APCu fallback and rate limiting |
+| `Cache` | APCu cache with file fallback (when APCu unavailable) and rate limiting |
 | `TickTask` | Task definition for periodic background work (interval, time window, callback/command) |
 | `Tick` | Scheduler that runs registered `TickTask` instances with global throttle and file-lock dedup |
 | `DebugBar` | Request timing + SQL query debug overlay renderer |
