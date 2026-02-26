@@ -149,6 +149,9 @@ Layout:
 | `Base` | Static facade for app/db/config access |
 | `HttpException` | HTTP error responses (401, 403, 404, 405) |
 
+`Cache` constructor: `new \PFrame\Cache(?string $dir = null)`.  
+When APCu is available, `dir` is optional. Without APCu, provide an existing cache directory (constructor fails fast if missing).
+
 ### Global Helpers
 
 - `h($val)` -- HTML escape

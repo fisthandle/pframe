@@ -14,6 +14,7 @@ class CacheTest extends TestCase {
 
     protected function setUp(): void {
         $this->dir = sys_get_temp_dir() . '/p1_cache_test_' . uniqid('', true);
+        mkdir($this->dir, 0755, true);
         $this->cache = new Cache($this->dir);
         $this->hasApcu = function_exists('apcu_enabled') && apcu_enabled();
     }
@@ -32,6 +33,32 @@ class CacheTest extends TestCase {
 
     public function testDefault(): void {
         $this->assertSame('fallback', $this->cache->get('nope', 'fallback'));
+    }
+
+    public function testConstructorWithoutDirThrowsWhenApcuUnavailable(): void {
+        if ($this->hasApcu) {
+            $this->markTestSkipped('APCu is enabled in this environment.');
+        }
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Cache directory is required when APCu is unavailable.');
+        new Cache();
+    }
+
+    public function testApcuModeWorksWithoutDir(): void {
+        if (!$this->hasApcu) {
+            $this->markTestSkipped('APCu is disabled in this environment.');
+        }
+
+        $cache = new Cache();
+        $cache->set('no-dir-key', 'value', 60);
+        $this->assertSame('value', $cache->get('no-dir-key'));
+        $this->assertNull($cache->rateCheck('login', '9.8.7.6', 1, 60));
+        $retry = $cache->rateCheck('login', '9.8.7.6', 1, 60);
+        $this->assertIsInt($retry);
+
+        $cache->clear();
+        $this->assertSame('fallback', $cache->get('no-dir-key', 'fallback'));
     }
 
     public function testDelete(): void {

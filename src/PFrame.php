@@ -2100,14 +2100,20 @@ namespace PFrame {
     class Cache {
         private readonly bool $hasApcu;
         private readonly string $apcuPrefix;
+        private readonly ?string $dir;
 
-        public function __construct(private readonly string $dir) {
+        public function __construct(?string $dir = null) {
             $this->hasApcu = function_exists('apcu_enabled') && apcu_enabled();
-            $this->apcuPrefix = 'pframe:cache:' . md5($this->dir) . ':';
-
-            if (!is_dir($this->dir)) {
-                mkdir($this->dir, 0755, true);
+            if (!$this->hasApcu && $dir === null) {
+                throw new \RuntimeException('Cache directory is required when APCu is unavailable.');
             }
+
+            if ($dir !== null && !is_dir($dir)) {
+                throw new \RuntimeException('Cache directory does not exist: ' . $dir);
+            }
+
+            $this->dir = $dir;
+            $this->apcuPrefix = 'pframe:cache:' . md5($dir ?? '__no_dir__') . ':';
         }
 
         public function get(string $key, mixed $default = null): mixed {
@@ -2177,6 +2183,10 @@ namespace PFrame {
                 $this->clearApcu();
             }
 
+            if ($this->dir === null) {
+                return;
+            }
+
             foreach (glob($this->dir . '/*.cache') ?: [] as $file) {
                 unlink($file);
             }
@@ -2211,7 +2221,7 @@ namespace PFrame {
         }
 
         private function path(string $key): string {
-            return $this->dir . '/' . md5($key) . '.cache';
+            return $this->requireDir() . '/' . md5($key) . '.cache';
         }
 
         private function apcuKey(string $key): string {
@@ -2241,7 +2251,31 @@ namespace PFrame {
             }
         }
 
+        private function requireDir(): string {
+            if ($this->dir === null) {
+                throw new \RuntimeException('Cache directory is required for file backend.');
+            }
+            return $this->dir;
+        }
+
         private function withRateLock(string $key, callable $callback): ?int {
+            if ($this->dir === null) {
+                if (!$this->hasApcu || !function_exists('apcu_add')) {
+                    return 1;
+                }
+
+                $lockKey = $this->apcuPrefix . 'lock:' . md5($key);
+                if (!apcu_add($lockKey, 1, 1)) {
+                    return 1;
+                }
+
+                try {
+                    return $callback();
+                } finally {
+                    apcu_delete($lockKey);
+                }
+            }
+
             $lockPath = $this->dir . '/' . md5($key) . '.lock';
             $handle = @fopen($lockPath, 'c');
             if ($handle === false) {
