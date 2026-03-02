@@ -82,3 +82,18 @@ Key rules:
 - `session_start()` musi być w per-request handlerze, nie podczas bootstrap
 - rollback transakcji w `finally` zapobiega tx leak
 - `Db::resetRequestState()` wywołuj zawsze (nie warunkuj `log_queries`)
+
+## Testy
+
+bin/test profiles: `quick|full|ci|coverage|contracts|e2e|ui`
+- `bin/test quick` — szybkie unit testy
+- `bin/test full` — pełny suite
+- `composer test` = alias do `bin/test quick`
+
+## Gotchas
+
+- `paginate()` zwraca `per_page`/`offset`, NIE `limit`
+- `Response::statusCode()` — usunięty
+- `$app->addMiddleware(...)` — NIE `$app->use(...)`
+- `App::instance()` throws `LogicException` przy konflikcie klas
+- `example/` jest w `.gitignore` — footgun przy demo
