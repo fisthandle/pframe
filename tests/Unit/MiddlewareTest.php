@@ -11,6 +11,7 @@ use PFrame\HttpException;
 use PFrame\Middleware;
 use PFrame\Request;
 use PFrame\Response;
+use PFrame\Session;
 use PHPUnit\Framework\TestCase;
 
 class MiddlewareTest extends TestCase {
@@ -45,6 +46,70 @@ class MiddlewareTest extends TestCase {
         $response = $mw(new Request(method: 'GET', path: '/private'), fn (Request $req): Response => new Response('ok'));
 
         $this->assertSame('/login', $response->headers['Location'] ?? null);
+    }
+
+    public function testAuthStoresIntendedUrlInSessionForGet(): void {
+        $app = new App();
+        $app->get('/login', MiddlewareLoginCtrl::class, 'index', name: 'login');
+
+        $mw = Middleware::auth();
+        $mw(
+            new Request(method: 'GET', path: '/admin/dashboard', query: ['page' => '2']),
+            fn (Request $req): Response => new Response('ok'),
+        );
+
+        $this->assertSame('/admin/dashboard?page=2', $_SESSION[Session::INTENDED_URL_KEY] ?? null);
+    }
+
+    public function testAuthStoresPathOnlyWhenNoQueryString(): void {
+        $app = new App();
+        $app->get('/login', MiddlewareLoginCtrl::class, 'index', name: 'login');
+
+        $mw = Middleware::auth();
+        $mw(
+            new Request(method: 'GET', path: '/private'),
+            fn (Request $req): Response => new Response('ok'),
+        );
+
+        $this->assertSame('/private', $_SESSION[Session::INTENDED_URL_KEY] ?? null);
+    }
+
+    public function testAuthStoresIntendedUrlInSessionForHead(): void {
+        $app = new App();
+        $app->get('/login', MiddlewareLoginCtrl::class, 'index', name: 'login');
+
+        $mw = Middleware::auth();
+        $mw(
+            new Request(method: 'HEAD', path: '/admin/audit', query: ['tab' => 'logs']),
+            fn (Request $req): Response => new Response('ok'),
+        );
+
+        $this->assertSame('/admin/audit?tab=logs', $_SESSION[Session::INTENDED_URL_KEY] ?? null);
+    }
+
+    public function testAuthDoesNotStoreIntendedUrlForAuthenticatedUser(): void {
+        $_SESSION['user'] = ['id' => 1];
+
+        $mw = Middleware::auth();
+        $mw(
+            new Request(method: 'GET', path: '/admin/dashboard'),
+            fn (Request $req): Response => new Response('ok'),
+        );
+
+        $this->assertArrayNotHasKey(Session::INTENDED_URL_KEY, $_SESSION);
+    }
+
+    public function testAuthDoesNotStoreIntendedUrlForPost(): void {
+        $app = new App();
+        $app->get('/login', MiddlewareLoginCtrl::class, 'index', name: 'login');
+
+        $mw = Middleware::auth();
+        $mw(
+            new Request(method: 'POST', path: '/api/data'),
+            fn (Request $req): Response => new Response('ok'),
+        );
+
+        $this->assertArrayNotHasKey(Session::INTENDED_URL_KEY, $_SESSION);
     }
 
     public function testCsrfAllowsSafeMethodWithoutToken(): void {

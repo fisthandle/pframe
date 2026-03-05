@@ -124,4 +124,43 @@ class SessionTest extends TestCase {
         $session = new Session($db, advisory: false);
         $this->assertTrue($session->write('sid_mysql', 'payload'));
     }
+
+    public function testPullIntendedUrlReturnsStoredUrlAndClearsIt(): void {
+        $_SESSION[Session::INTENDED_URL_KEY] = '/admin/dashboard?page=2';
+
+        $url = Session::pullIntendedUrl('/');
+
+        $this->assertSame('/admin/dashboard?page=2', $url);
+        $this->assertArrayNotHasKey(Session::INTENDED_URL_KEY, $_SESSION);
+    }
+
+    public function testPullIntendedUrlReturnsDefaultWhenNoStoredUrl(): void {
+        $url = Session::pullIntendedUrl('/home');
+
+        $this->assertSame('/home', $url);
+    }
+
+    public function testPullIntendedUrlReturnsSlashByDefault(): void {
+        $url = Session::pullIntendedUrl();
+
+        $this->assertSame('/', $url);
+    }
+
+    public function testPullIntendedUrlRejectsExternalUrl(): void {
+        $_SESSION[Session::INTENDED_URL_KEY] = 'https://evil.com/steal';
+
+        $url = Session::pullIntendedUrl('/safe');
+
+        $this->assertSame('/safe', $url);
+        $this->assertArrayNotHasKey(Session::INTENDED_URL_KEY, $_SESSION);
+    }
+
+    public function testPullIntendedUrlRejectsProtocolRelativeUrl(): void {
+        $_SESSION[Session::INTENDED_URL_KEY] = '//evil.com/steal';
+
+        $url = Session::pullIntendedUrl('/safe');
+
+        $this->assertSame('/safe', $url);
+        $this->assertArrayNotHasKey(Session::INTENDED_URL_KEY, $_SESSION);
+    }
 }

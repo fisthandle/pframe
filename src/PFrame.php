@@ -1532,6 +1532,8 @@ namespace PFrame {
     }
 
     class Session implements \SessionHandlerInterface {
+        public const INTENDED_URL_KEY = '_intended_url';
+
         private ?string $lockName = null;
         private bool $lockAcquired = false;
         private readonly bool $useAdvisoryLock;
@@ -1642,6 +1644,17 @@ namespace PFrame {
         public function gc(int $max_lifetime): int|false {
             $result = $this->db->exec('DELETE FROM sessions WHERE stamp < ?', [time() - $max_lifetime]);
             return is_int($result) ? $result : false;
+        }
+
+        public static function pullIntendedUrl(string $default = '/'): string {
+            $url = $_SESSION[self::INTENDED_URL_KEY] ?? null;
+            unset($_SESSION[self::INTENDED_URL_KEY]);
+
+            if (!is_string($url) || $url === '' || !str_starts_with($url, '/') || str_starts_with($url, '//')) {
+                return $default;
+            }
+
+            return $url;
         }
 
         private function acquireLock(string $id): void {
@@ -1785,6 +1798,11 @@ namespace PFrame {
         public static function auth(string $loginRoute = 'login', string $message = 'Musisz się zalogować.'): callable {
             return function (Request $req, callable $next) use ($loginRoute, $message): Response {
                 if (!isset($_SESSION['user'])) {
+                    if (in_array($req->method, ['GET', 'HEAD'], true)) {
+                        $queryString = http_build_query($req->query, '', '&', PHP_QUERY_RFC3986);
+                        $_SESSION[Session::INTENDED_URL_KEY] = $req->path . ($queryString !== '' ? '?' . $queryString : '');
+                    }
+
                     (new Flash())->warning($message);
                     try {
                         return Response::redirect(App::instance()->url($loginRoute));
