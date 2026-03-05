@@ -1533,7 +1533,7 @@ namespace PFrame {
             $t = microtime(true);
             ob_start();
             try {
-                include $filePath;
+                include $realFile;
             } catch (\Throwable $e) {
                 ob_end_clean();
                 throw $e;
