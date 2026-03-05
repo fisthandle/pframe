@@ -137,12 +137,12 @@ Layout:
 | `View` | Template engine with layouts and partials |
 | `Controller` | Base controller with auth, CSRF, pagination and view data bag helpers |
 | `Middleware` | Built-in middleware factories (`auth`, `csrf`) |
-| `Session` | Database-backed session handler with advisory locks |
+| `Session` | Database-backed session handler with advisory locks, lazy-write and intended URL |
 | `Csrf` | CSRF token + per-action nonce generation |
 | `Flash` | Flash messages |
 | `Log` | File logger with level filtering |
 | `Validator` | Input validation (email, phone, postcode, length, slug) |
-| `Cache` | APCu cache with file fallback (when APCu unavailable) and rate limiting |
+| `Cache` | Single-backend cache: APCu when available, file otherwise. Rate limiting included |
 | `TickTask` | Task definition for periodic background work (interval, time window, callback/command) |
 | `Tick` | Scheduler that runs registered `TickTask` instances with global throttle and file-lock dedup |
 | `DebugBar` | Request timing + SQL query debug overlay renderer |
@@ -182,6 +182,19 @@ $sqlLog = P1::db()->log();  // "(X.XXms) SQL" lines
 
 DB sessions require the `sessions` table -- see `db/sessions.sql`.
 
+### Session
+
+Database-backed handler with advisory locks (MySQL), lazy-write optimization, and intended URL support.
+
+```php
+$session = new \PFrame\Session($db, advisory: true, lockTimeout: 30);
+session_set_save_handler($session);
+```
+
+- **Lazy-write**: when session data is unchanged between `read()` and `write()`, only the timestamp is updated (lightweight `UPDATE` instead of full `INSERT OR REPLACE`)
+- **Advisory locks** (MySQL only): single `GET_LOCK` with configurable timeout prevents concurrent writes
+- **Intended URL**: `Session::pullIntendedUrl(string $default = '/')` retrieves and clears the URL stored by `Middleware::auth()`
+
 ## Security
 
 Built-in:
@@ -191,7 +204,7 @@ Built-in:
 - Security headers middleware (CSP, HSTS, X-Frame-Options, etc.)
 - Session hardening (strict mode, httponly, samesite)
 - Path traversal protection in template rendering
-- Open redirect prevention
+- Open redirect prevention (blocks `//`, `\`, scheme-without-authority, non-http schemes)
 - Trusted proxy IP resolution
 
 ```php
@@ -199,8 +212,10 @@ $app->addSecurityHeaders(); // CSP, XFO, XCTO, Referrer-Policy, Permissions-Poli
 ```
 
 Built-in middleware:
-- `\PFrame\Middleware::auth()` -- guest -> flash warning + redirect to `login` route
+- `\PFrame\Middleware::auth()` -- guest -> stores intended URL in session (GET/HEAD only), flash warning + redirect to `login` route
 - `\PFrame\Middleware::csrf()` -- validates token from `csrf_token` field or `X-Csrf-Token` header
+
+After login, retrieve the intended URL with `\PFrame\Session::pullIntendedUrl()` (returns stored path or default `/`, clears session key).
 
 ### Error Handling Pipeline
 
@@ -291,6 +306,23 @@ $tick->dispatch(); // call from a cron or worker loop
 Tasks are deduplicated via file locks and globally throttled (`throttleSeconds`, default `30`).
 Time windows support crossing midnight (for example `23:00` → `02:00`).
 Failed tasks are retried on subsequent dispatches until `retries()` is exhausted, then they wait a full interval again.
+
+## Testing Traits
+
+`src/PFrameTesting.php` provides PHPUnit traits for integration testing:
+
+| Trait | Purpose |
+|-------|---------|
+| `DatabaseTransactions` | Wraps each test in a transaction, rolls back all levels (including savepoints) on teardown |
+| `RefreshDatabase` | Runs SQL migrations once per suite, wraps tests in transactions |
+| `HttpTesting` | `get()`, `post()`, `postJson()`, `put()`, `patch()`, `delete()` with automatic CSRF injection |
+| `ResponseAssertions` | `assertOk()`, `assertNotFound()`, `assertRedirectTo()`, `assertSee()`, `assertJson()`, etc. |
+| `DatabaseAssertions` | `assertDatabaseHas()`, `assertDatabaseMissing()`, `assertDatabaseCount()` |
+| `FlashAssertions` | `assertFlash()`, `assertNoFlash()` |
+| `SessionAssertions` | `assertAuthenticated()`, `assertGuest()`, `assertSessionHas()` |
+| `ActingAs` | `actingAs($user)`, `actingAsGuest()` for auth simulation |
+
+JSON requests (`postJson`) send CSRF via `X-Csrf-Token` header (matching production JSON API behavior), form requests via `csrf_token` POST field.
 
 ## Migration Compatibility
 
