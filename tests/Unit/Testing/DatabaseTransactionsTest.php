@@ -45,4 +45,17 @@ class DatabaseTransactionsTest extends TestCase {
         // tearDown should not throw — trans() guard handles this
         $this->assertTrue(true);
     }
+
+    public function testTearDownRollsBackNestedSavepoints(): void {
+        $db = Base::db();
+
+        $db->begin();
+        $db->begin();
+
+        $this->tearDownDatabaseTransactions();
+
+        $this->assertFalse($db->trans(), 'All transaction levels should be rolled back');
+
+        $this->setUpDatabaseTransactions();
+    }
 }

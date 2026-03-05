@@ -5,6 +5,7 @@ namespace PFrame\Tests\Unit\Testing;
 
 use PFrame\App;
 use PFrame\Controller;
+use PFrame\Csrf;
 use PFrame\Response;
 use PFrame\Testing\HttpTesting;
 use PFrame\Testing\ResponseAssertions;
@@ -96,6 +97,13 @@ class HttpTestingTest extends TestCase {
         ]);
     }
 
+    public function testPostJsonSendsCsrfViaHeaderNotPost(): void {
+        $this->postJson('/json', ['name' => 'test']);
+        $this->assertOk();
+        $body = json_decode($this->response->body, true);
+        $this->assertSame('header', $body['csrf_source'], 'CSRF should come from X-Csrf-Token header, not form field');
+    }
+
     public function testPostJsonWithoutCsrfFails(): void {
         $this->withoutCsrf()->postJson('/json', ['name' => 'Joe']);
         $this->assertForbidden();
@@ -162,10 +170,14 @@ class HttpTestingJsonCtrl extends Controller {
     public function store(): Response {
         $this->validateCsrf();
         $json = $this->request->jsonBody() ?? [];
+        $source = $this->request->header('X-Csrf-Token') !== null
+            ? 'header'
+            : ($this->request->post(Csrf::FIELD_NAME) !== null ? 'post' : 'missing');
         return Response::json([
             'name' => $json['name'] ?? null,
             'is_ajax' => $this->request->isAjax(),
             'content_type' => $this->request->header('Content-Type'),
+            'csrf_source' => $source,
         ]);
     }
 }

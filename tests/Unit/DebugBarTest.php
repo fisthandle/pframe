@@ -34,6 +34,17 @@ class DebugBarTest extends TestCase {
         $this->assertGreaterThan(0, $data['mem_mb']);
     }
 
+    public function testToArrayDoesNotInitializeDb(): void {
+        $app = new App();
+        $app->setConfig('db', ['dsn' => 'sqlite::memory:', 'log_queries' => true]);
+
+        $bar = new DebugBar($app);
+        $data = $bar->toArray();
+
+        $this->assertNull($app->dbIfInitialized(), 'toArray() should not force DB initialization');
+        $this->assertSame([], $data['queries']);
+    }
+
     public function testToArrayWithQueries(): void {
         $app = new App();
         $app->setConfig('db', ['dsn' => 'sqlite::memory:', 'log_queries' => true]);

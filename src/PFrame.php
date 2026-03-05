@@ -268,14 +268,23 @@ namespace PFrame {
         public static function redirect(string $url, int $status = 302): static {
             $url = ltrim($url, " \t\n\r\0\x0B");
 
+            if (str_contains($url, '\\')) {
+                throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
+            }
+
             if (str_starts_with($url, '//')) {
                 throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
             }
 
             if (!str_starts_with($url, '/')) {
                 $scheme = parse_url($url, PHP_URL_SCHEME);
-                if (is_string($scheme) && !in_array(strtolower($scheme), ['http', 'https'], true)) {
-                    throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
+                if (is_string($scheme)) {
+                    if (!in_array(strtolower($scheme), ['http', 'https'], true)) {
+                        throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
+                    }
+                    if (!preg_match('/^[a-z][a-z0-9+.-]*:\/\//i', $url)) {
+                        throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
+                    }
                 }
 
                 $host = parse_url($url, PHP_URL_HOST);
@@ -485,6 +494,10 @@ namespace PFrame {
                 }
                 $this->db = new Db($config);
             }
+            return $this->db;
+        }
+
+        public function dbIfInitialized(): ?Db {
             return $this->db;
         }
 
@@ -1537,10 +1550,13 @@ namespace PFrame {
         private ?string $lockName = null;
         private bool $lockAcquired = false;
         private readonly bool $useAdvisoryLock;
+        private string $initialData = '';
+        private bool $initialDataLoaded = false;
 
         public function __construct(
             private readonly Db $db,
             private readonly bool $advisory = true,
+            private readonly int $lockTimeout = 30,
         ) {
             $this->useAdvisoryLock = $this->advisory && $this->db->driver() === 'mysql';
             $this->lockAcquired = !$this->useAdvisoryLock;
@@ -1582,6 +1598,8 @@ namespace PFrame {
         }
 
         public function open(string $path, string $name): bool {
+            $this->initialData = '';
+            $this->initialDataLoaded = false;
             return true;
         }
 
@@ -1592,7 +1610,10 @@ namespace PFrame {
 
             try {
                 $data = $this->db->var('SELECT data FROM sessions WHERE session_id = ?', [$id]);
-                return is_string($data) ? $data : '';
+                $result = is_string($data) ? $data : '';
+                $this->initialData = $result;
+                $this->initialDataLoaded = true;
+                return $result;
             } catch (\Throwable $e) {
                 $this->releaseLock();
                 throw $e;
@@ -1606,6 +1627,11 @@ namespace PFrame {
             }
 
             try {
+                if ($this->initialDataLoaded && $data === $this->initialData) {
+                    $this->db->exec('UPDATE sessions SET stamp = ? WHERE session_id = ?', [time(), $id]);
+                    return true;
+                }
+
                 $ip = (string) ($_SERVER['REMOTE_ADDR'] ?? '');
                 $agent = substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 5000);
                 $stamp = time();
@@ -1623,6 +1649,8 @@ namespace PFrame {
                         [$id, $data, $ip, $agent, $stamp],
                     );
                 }
+                $this->initialData = $data;
+                $this->initialDataLoaded = true;
             } finally {
                 $this->releaseLock();
             }
@@ -1637,6 +1665,8 @@ namespace PFrame {
 
         public function destroy(string $id): bool {
             $this->db->exec('DELETE FROM sessions WHERE session_id = ?', [$id]);
+            $this->initialData = '';
+            $this->initialDataLoaded = false;
             $this->releaseLock();
             return true;
         }
@@ -1671,13 +1701,8 @@ namespace PFrame {
                     $this->db->pdo()->rollBack();
                 }
 
-                $result = $this->db->var('SELECT GET_LOCK(?, 10)', [$this->lockName]);
-                if ((int) $result === 1) {
-                    $this->lockAcquired = true;
-                    return;
-                }
-
-                $result = $this->db->var('SELECT GET_LOCK(?, 20)', [$this->lockName]);
+                $timeout = max(0, $this->lockTimeout);
+                $result = $this->db->var('SELECT GET_LOCK(?, ?)', [$this->lockName, $timeout]);
                 if ((int) $result === 1) {
                     $this->lockAcquired = true;
                     return;
@@ -2430,7 +2455,12 @@ namespace PFrame {
                 if (time() >= $deadline) {
                     // Kill process GROUP (negative PID) to include children
                     $pid = $status['pid'];
-                    @posix_kill(-$pid, 9);
+                    if (function_exists('posix_kill')) {
+                        @posix_kill(-$pid, 9);
+                    }
+                    @proc_terminate($process, 9);
+                    fclose($pipes[1]);
+                    fclose($pipes[2]);
                     proc_close($process);
                     return ['success' => false, 'error' => "Timeout after {$this->cmdTimeout}s"];
                 }
@@ -2705,12 +2735,114 @@ namespace PFrame {
                 . '</pre>';
         }
 
+        /**
+         * @param array{included_files: list<string>, views: list<array{template: string, ms: float}>} $d
+         * @return array{list: string, count: int}
+         */
+        private function renderFilesList(array $d): array {
+            $files = $d['included_files'];
+            $viewTimes = [];
+            foreach ($d['views'] as $v) {
+                $viewTimes[$v['template']] = $v['ms'];
+            }
+
+            $viewFiles = [];
+            $otherFiles = [];
+            foreach ($files as $f) {
+                $matched = false;
+                foreach ($viewTimes as $tpl => $ms) {
+                    if (str_ends_with($f, '/' . ltrim($tpl, '/'))) {
+                        $viewFiles[] = ['path' => $f, 'ms' => $ms];
+                        $matched = true;
+                        break;
+                    }
+                }
+                if (!$matched) {
+                    $otherFiles[] = $f;
+                }
+            }
+
+            usort($viewFiles, static fn(array $a, array $b): int => $b['ms'] <=> $a['ms']);
+            $list = '';
+            foreach ($viewFiles as $vf) {
+                $list .= '<div><b style="color:#986801">(' . $vf['ms'] . 'ms)</b> ' . h($vf['path']) . '</div>';
+            }
+            foreach ($otherFiles as $f) {
+                $list .= '<div>' . h($f) . '</div>';
+            }
+
+            return ['list' => $list, 'count' => count($files)];
+        }
+
+        /** @param array{gen_ms: float, db_ms: float, db_count: int, view_ms: float, views: list<array{template: string, ms: float}>, mem_mb: float, peak_mb: float} $d */
+        private function renderSummary(array $d, string $id, int $fileCount): string {
+            return 'Gen: <b>' . $d['gen_ms'] . 'ms</b>'
+                . ' | DB: <b>' . $d['db_ms'] . 'ms</b> (' . $d['db_count'] . ')'
+                . ' | View: <b>' . $d['view_ms'] . 'ms</b> (' . count($d['views']) . ')'
+                . ' | Mem: <b>' . $d['mem_mb'] . 'MB</b> (peak: ' . $d['peak_mb'] . 'MB)'
+                . ' | <span style="cursor:pointer;text-decoration:underline" id="' . $id . '-files-toggle">Files: <b>' . $fileCount . '</b></span>'
+                . ' | <span style="cursor:pointer;text-decoration:underline" id="' . $id . '-toggle">toggle</span>';
+        }
+
+        /** @param array{db_count: int, slowest: list<array{sql: string, ms: float}>, duplicates: list<array{pattern: string|null, count: int, total_ms: float}>} $d */
+        private function renderInsightsBox(array $d, string $id): string {
+            $slowSection = '';
+            if ($d['db_count'] >= 10 && $d['slowest'] !== []) {
+                $slowViews = $this->buildSqlViews(
+                    $d['slowest'],
+                    100,
+                    static fn(array $s, int $_): array => [
+                        'prefix' => '<b>' . $s['ms'] . 'ms</b>',
+                        'sql' => (string) $s['sql'],
+                    ],
+                );
+                $slowSection = '<div><b>Top slow:</b></div>'
+                    . $this->renderSqlToggleSection(
+                        $id,
+                        'slow',
+                        $slowViews['short'],
+                        $slowViews['full'],
+                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+                    );
+            }
+
+            $dupsSection = '';
+            if ($d['duplicates'] !== []) {
+                $dupsViews = $this->buildSqlViews(
+                    $d['duplicates'],
+                    90,
+                    static fn(array $dup, int $_): array => [
+                        'prefix' => '<b>' . $dup['count'] . '×</b> (' . $dup['total_ms'] . 'ms)',
+                        'sql' => (string) ($dup['pattern'] ?? ''),
+                    ],
+                );
+                $dupsSection = '<div style="margin-top:4px"><b>N+1 candidates:</b></div>'
+                    . $this->renderSqlToggleSection(
+                        $id,
+                        'dups',
+                        $dupsViews['short'],
+                        $dupsViews['full'],
+                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+                    );
+            }
+
+            if ($slowSection === '' && $dupsSection === '') {
+                return '';
+            }
+
+            return '<div style="background:#f5f5f0;border:1px solid #ddd;padding:6px 10px;margin-top:8px;border-radius:3px" id="' . $id . '-insights">'
+                . $slowSection
+                . $dupsSection
+                . '</div>';
+        }
+
         /** @return array{gen_ms: float, db_ms: float, db_count: int, view_ms: float, views: list<array{template: string, ms: float}>, mem_mb: float, peak_mb: float, included_files: list<string>, queries: list<array{sql: string, ms: float}>, duplicates: list<array{pattern: string|null, count: int, total_ms: float}>, slowest: list<array{sql: string, ms: float}>} */
         public function toArray(): array {
             $queries = [];
-            $dbConfig = $this->app->config('db');
-            if (is_array($dbConfig)) {
-                $db = $this->app->db();
+            $db = $this->app->dbIfInitialized();
+            if ($db !== null) {
                 foreach ($db->queryLog() as $entry) {
                     $queries[] = [
                         'sql' => $entry['sql'],
@@ -2778,55 +2910,15 @@ namespace PFrame {
                 $queryViews = $this->buildSqlViews(
                     $qs,
                     120,
-                    static function (array $q, int $i): array {
-                        $n = $i + 1;
-
-                        return [
-                            'prefix' => $n . '. (' . $q['ms'] . 'ms)',
-                            'sql' => (string) $q['sql'],
-                        ];
-                    },
+                    static fn(array $q, int $i): array => [
+                        'prefix' => ($i + 1) . '. (' . $q['ms'] . 'ms)',
+                        'sql' => (string) $q['sql'],
+                    ],
                 );
             }
 
-            // Files list: views with times first (sorted by time desc), then the rest
-            $files = $d['included_files'];
-            $fileCount = count($files);
-            $viewTimes = [];
-            foreach ($d['views'] as $v) {
-                $viewTimes[$v['template']] = $v['ms'];
-            }
-            $viewFiles = [];
-            $otherFiles = [];
-            foreach ($files as $f) {
-                $matched = false;
-                foreach ($viewTimes as $tpl => $ms) {
-                    if (str_ends_with($f, '/' . ltrim($tpl, '/'))) {
-                        $viewFiles[] = ['path' => $f, 'ms' => $ms];
-                        $matched = true;
-                        break;
-                    }
-                }
-                if (!$matched) {
-                    $otherFiles[] = $f;
-                }
-            }
-            usort($viewFiles, static fn(array $a, array $b): int => $b['ms'] <=> $a['ms']);
-            $filesList = '';
-            foreach ($viewFiles as $vf) {
-                $filesList .= '<div><b style="color:#986801">(' . $vf['ms'] . 'ms)</b> ' . h($vf['path']) . '</div>';
-            }
-            foreach ($otherFiles as $f) {
-                $filesList .= '<div>' . h($f) . '</div>';
-            }
-
-            $summary = 'Gen: <b>' . $d['gen_ms'] . 'ms</b>'
-                . ' | DB: <b>' . $d['db_ms'] . 'ms</b> (' . $d['db_count'] . ')'
-                . ' | View: <b>' . $d['view_ms'] . 'ms</b> (' . count($d['views']) . ')'
-                . ' | Mem: <b>' . $d['mem_mb'] . 'MB</b> (peak: ' . $d['peak_mb'] . 'MB)'
-                . ' | <span style="cursor:pointer;text-decoration:underline" id="' . $id . '-files-toggle">Files: <b>' . $fileCount . '</b></span>'
-                . ' | <span style="cursor:pointer;text-decoration:underline" id="' . $id . '-toggle">toggle</span>';
-
+            $files = $this->renderFilesList($d);
+            $summary = $this->renderSummary($d, $id, $files['count']);
             $querySection = $this->renderSqlToggleSection(
                 $id,
                 'queries',
@@ -2835,62 +2927,13 @@ namespace PFrame {
                 'margin:0;font:inherit;white-space:pre-wrap',
                 'margin:0;font:inherit;white-space:pre;overflow-x:auto',
             );
-
-            $slowSection = '';
-            if ($d['db_count'] >= 10 && $d['slowest'] !== []) {
-                $slowViews = $this->buildSqlViews(
-                    $d['slowest'],
-                    100,
-                    static fn(array $s, int $_): array => [
-                        'prefix' => '<b>' . $s['ms'] . 'ms</b>',
-                        'sql' => (string) $s['sql'],
-                    ],
-                );
-                $slowSection = '<div><b>Top slow:</b></div>'
-                    . $this->renderSqlToggleSection(
-                        $id,
-                        'slow',
-                        $slowViews['short'],
-                        $slowViews['full'],
-                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
-                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
-                    );
-            }
-
-            $dupsSection = '';
-            if ($d['duplicates'] !== []) {
-                $dupsViews = $this->buildSqlViews(
-                    $d['duplicates'],
-                    90,
-                    static fn(array $dup, int $_): array => [
-                        'prefix' => '<b>' . $dup['count'] . '×</b> (' . $dup['total_ms'] . 'ms)',
-                        'sql' => (string) ($dup['pattern'] ?? ''),
-                    ],
-                );
-                $dupsSection = '<div style="margin-top:4px"><b>N+1 candidates:</b></div>'
-                    . $this->renderSqlToggleSection(
-                        $id,
-                        'dups',
-                        $dupsViews['short'],
-                        $dupsViews['full'],
-                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
-                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
-                    );
-            }
-
-            $insightsBox = '';
-            if ($slowSection !== '' || $dupsSection !== '') {
-                $insightsBox = '<div style="background:#f5f5f0;border:1px solid #ddd;padding:6px 10px;margin-top:8px;border-radius:3px" id="' . $id . '-insights">'
-                    . $slowSection
-                    . $dupsSection
-                    . '</div>';
-            }
+            $insightsBox = $this->renderInsightsBox($d, $id);
 
             return <<<HTML
             <div id="{$id}" style="background:#e8e8e8;color:#333;font-family:monospace;font-size:14px;padding:10px 14px;border-top:1px solid #ccc;margin-top:2rem;line-height:1.6">
             {$querySection}{$insightsBox}
             <div style="margin-top:6px">{$summary}</div>
-            <pre style="margin:0;font:inherit;white-space:pre;overflow-x:auto;display:none;margin-top:6px;font-size:12px;color:#555" id="{$id}-files">{$filesList}</pre>
+            <pre style="margin:0;font:inherit;white-space:pre;overflow-x:auto;display:none;margin-top:6px;font-size:12px;color:#555" id="{$id}-files">{$files['list']}</pre>
             </div>
             <script>document.getElementById('{$id}-toggle').addEventListener('click',function(){['queries','slow','dups'].forEach(function(name){var s=document.getElementById('{$id}-'+name+'-short'),f=document.getElementById('{$id}-'+name+'-full');if(!s||!f){return}if(f.style.display==='none'){f.style.display='block';s.style.display='none'}else{f.style.display='none';s.style.display='block'}})});document.getElementById('{$id}-files-toggle').addEventListener('click',function(){var fl=document.getElementById('{$id}-files');fl.style.display=fl.style.display==='none'?'block':'none'})</script>
             HTML;

@@ -17,7 +17,7 @@ trait DatabaseTransactions {
 
     protected function tearDownDatabaseTransactions(): void {
         if (Base::db()->trans()) {
-            Base::db()->rollback();
+            Base::db()->rollbackAll();
         }
     }
 }
@@ -237,7 +237,11 @@ trait HttpTesting {
         $method = strtoupper($method);
 
         if ($this->withCsrf && in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE'], true)) {
-            $post[Csrf::FIELD_NAME] ??= Csrf::token();
+            if ($body !== '') {
+                $this->extraHeaders['X-Csrf-Token'] ??= Csrf::token();
+            } else {
+                $post[Csrf::FIELD_NAME] ??= Csrf::token();
+            }
         }
 
         $request = new Request(

@@ -125,6 +125,70 @@ class SessionTest extends TestCase {
         $this->assertTrue($session->write('sid_mysql', 'payload'));
     }
 
+    public function testWriteSkipsFullInsertWhenDataUnchanged(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:', 'log_queries' => true]);
+        $db->pdo()->exec('CREATE TABLE sessions (session_id TEXT PRIMARY KEY, data TEXT, ip TEXT, agent TEXT, stamp INTEGER)');
+
+        $session = new Session($db, advisory: false);
+        $session->open('', '');
+        $session->read('test-lazy');
+        $session->write('test-lazy', 'data|s:5:"hello";');
+
+        $db->resetRequestState();
+        $session->read('test-lazy');
+        $session->write('test-lazy', 'data|s:5:"hello";');
+
+        $log = $db->queryLog();
+        $lastQuery = end($log);
+        $this->assertIsArray($lastQuery);
+        $this->assertStringContainsString('UPDATE', $lastQuery['sql'], 'Unchanged data should only UPDATE stamp');
+    }
+
+    public function testWriteRefreshesStampWhenDataUnchanged(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:', 'log_queries' => true]);
+        $db->pdo()->exec('CREATE TABLE sessions (session_id TEXT PRIMARY KEY, data TEXT, ip TEXT, agent TEXT, stamp INTEGER)');
+
+        $session = new Session($db, advisory: false);
+        $session->open('', '');
+        $session->read('test-stamp');
+        $session->write('test-stamp', 'data|s:5:"hello";');
+
+        $db->exec('UPDATE sessions SET stamp = ? WHERE session_id = ?', [1000, 'test-stamp']);
+
+        $db->resetRequestState();
+        $session->read('test-stamp');
+        $session->write('test-stamp', 'data|s:5:"hello";');
+
+        $row = $db->row('SELECT stamp FROM sessions WHERE session_id = ?', ['test-stamp']);
+        $this->assertNotNull($row);
+        $this->assertGreaterThan(1000, (int) $row['stamp'], 'Stamp should be refreshed even when data unchanged');
+    }
+
+    public function testWriteDoesFullInsertWhenDataChanged(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:', 'log_queries' => true]);
+        $db->pdo()->exec('CREATE TABLE sessions (session_id TEXT PRIMARY KEY, data TEXT, ip TEXT, agent TEXT, stamp INTEGER)');
+
+        $session = new Session($db, advisory: false);
+        $session->open('', '');
+        $session->read('test-change');
+        $session->write('test-change', 'data|s:5:"hello";');
+
+        $db->resetRequestState();
+        $session->read('test-change');
+        $session->write('test-change', 'data|s:7:"changed";');
+
+        $log = $db->queryLog();
+        $lastQuery = end($log);
+        $this->assertIsArray($lastQuery);
+        $this->assertStringContainsString('INSERT', $lastQuery['sql'], 'Changed data should do full INSERT OR REPLACE');
+    }
+
+    public function testConstructorAcceptsLockTimeout(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:']);
+        $session = new Session($db, advisory: true, lockTimeout: 5);
+        $this->assertInstanceOf(Session::class, $session);
+    }
+
     public function testPullIntendedUrlReturnsStoredUrlAndClearsIt(): void {
         $_SESSION[Session::INTENDED_URL_KEY] = '/admin/dashboard?page=2';
 

@@ -145,6 +145,18 @@ class TickTest extends TestCase {
         self::assertStringContainsString('timeout', strtolower($results['slow_cmd']['error']));
     }
 
+    public function testCommandTimeoutGracefulKill(): void {
+        $tick = new Tick($this->cacheDir);
+        $task = $tick->task('timeout_test')
+            ->every(1)
+            ->command(PHP_BINARY . ' -r "sleep(30);"', 1);
+
+        $result = $task->execute();
+
+        self::assertFalse($result['success']);
+        self::assertStringContainsString('timeout', strtolower($result['error'] ?? ''));
+    }
+
     public function testTaskErrorHandling(): void {
         $tick = new Tick($this->cacheDir);
 

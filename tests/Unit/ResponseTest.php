@@ -71,6 +71,24 @@ class ResponseTest extends TestCase {
         Response::redirect('//evil.com/phish');
     }
 
+    public function testRedirectBlocksBackslashProtocolRelative(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('External redirect not allowed');
+        Response::redirect('/\\evil.com');
+    }
+
+    public function testRedirectBlocksBackslashInPath(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('External redirect not allowed');
+        Response::redirect('/foo\\bar');
+    }
+
+    public function testRedirectBlocksHttpSchemeWithoutAuthority(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('External redirect not allowed');
+        Response::redirect('http:evil.com');
+    }
+
     public function testRedirectBlocksJavascriptScheme(): void {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('External redirect not allowed');
