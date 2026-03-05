@@ -189,6 +189,87 @@ class SessionTest extends TestCase {
         $this->assertInstanceOf(Session::class, $session);
     }
 
+    public function testAdvisoryMysqlLockUsesConfiguredTimeout(): void {
+        $pdo = new \PDO('sqlite::memory:');
+        $queries = [];
+        $db = $this->getMockBuilder(Db::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['driver', 'pdo', 'var'])
+            ->getMock();
+        $db->method('driver')->willReturn('mysql');
+        $db->method('pdo')->willReturn($pdo);
+        $db->method('var')->willReturnCallback(
+            static function (string $sql, mixed $params = null) use (&$queries): mixed {
+                $queries[] = [$sql, $params];
+
+                if (str_starts_with($sql, 'SELECT GET_LOCK')) {
+                    return 1;
+                }
+                if (str_starts_with($sql, 'SELECT data FROM sessions')) {
+                    return 'payload';
+                }
+                if (str_starts_with($sql, 'SELECT RELEASE_LOCK')) {
+                    return 1;
+                }
+
+                return null;
+            }
+        );
+
+        $session = new Session($db, advisory: true, lockTimeout: 5);
+        $session->open('', '');
+        $this->assertSame('payload', $session->read('sid-lock'));
+        $this->assertTrue($session->close());
+
+        $first = $queries[0] ?? null;
+        $this->assertIsArray($first);
+        $this->assertSame('SELECT GET_LOCK(?, ?)', $first[0]);
+        $this->assertSame(['sess_sid-lock', 5], $first[1]);
+    }
+
+    public function testAdvisoryMysqlLockTimeoutKeepsWriteBlocked(): void {
+        $pdo = new \PDO('sqlite::memory:');
+        $db = $this->getMockBuilder(Db::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['driver', 'pdo', 'var'])
+            ->getMock();
+        $db->method('driver')->willReturn('mysql');
+        $db->method('pdo')->willReturn($pdo);
+        $db->method('var')->willReturnCallback(
+            static function (string $sql, mixed $params = null): mixed {
+                if (str_starts_with($sql, 'SELECT GET_LOCK')) {
+                    return 0;
+                }
+                if (str_starts_with($sql, 'SELECT data FROM sessions')) {
+                    return '';
+                }
+                return null;
+            }
+        );
+
+        $session = new Session($db, advisory: true, lockTimeout: 1);
+        $session->open('', '');
+        $this->assertSame('', $session->read('sid-timeout'));
+        $this->assertFalse($session->write('sid-timeout', 'value'));
+    }
+
+    public function testRegenerateReturnsBoolean(): void {
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+
+        $session = new Session($this->db, advisory: false);
+        $session->register(['secure' => false]);
+        session_id(bin2hex(random_bytes(8)));
+        session_start();
+
+        $this->assertIsBool($session->regenerate(false));
+
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+    }
+
     public function testPullIntendedUrlReturnsStoredUrlAndClearsIt(): void {
         $_SESSION[Session::INTENDED_URL_KEY] = '/admin/dashboard?page=2';
 

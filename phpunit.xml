@@ -7,6 +7,7 @@
     <testsuites>
         <testsuite name="Unit">
             <directory>tests/Unit</directory>
+            <file>tests/TickTest.php</file>
         </testsuite>
         <testsuite name="Integration">
             <directory>tests/Integration</directory>

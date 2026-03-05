@@ -156,4 +156,15 @@ class ResponseTest extends TestCase {
 
         unlink($tmpFile);
     }
+
+    public function testSendOutputsBodyAndSetsStatusWithHeaders(): void {
+        $response = new Response('hello body', 201, ['X-Test' => 'yes']);
+
+        ob_start();
+        $response->send();
+        $output = (string) ob_get_clean();
+
+        $this->assertSame('hello body', $output);
+        $this->assertSame(201, http_response_code());
+    }
 }
