@@ -68,4 +68,42 @@ class LogTest extends TestCase {
         $this->expectException(\InvalidArgumentException::class);
         Log::toFile("evil\0.log", 'pwned');
     }
+
+    public function testErrorFallsBackToErrorLogWhenNotInitialized(): void {
+        $basePath = new \ReflectionProperty(Log::class, 'basePath');
+        $basePath->setValue(null, null);
+
+        $logFile = $this->tmpDir . '/php_errors.log';
+        $oldErrorLog = ini_set('error_log', $logFile);
+
+        try {
+            Log::error('fallback test', ['key' => 'val']);
+        } finally {
+            ini_set('error_log', $oldErrorLog !== false ? $oldErrorLog : '');
+            Log::init($this->tmpDir, 1);
+        }
+
+        $this->assertFileExists($logFile);
+        $content = (string) file_get_contents($logFile);
+        $this->assertStringContainsString('fallback test', $content);
+        $this->assertStringContainsString('"key":"val"', $content);
+    }
+
+    public function testToFileFallsBackToErrorLogOnWriteFailure(): void {
+        Log::init('/proc/fake_not_writable', 1);
+
+        $logFile = $this->tmpDir . '/php_errors.log';
+        $oldErrorLog = ini_set('error_log', $logFile);
+
+        try {
+            Log::toFile('app.log', 'write-fail test');
+        } finally {
+            ini_set('error_log', $oldErrorLog !== false ? $oldErrorLog : '');
+            Log::init($this->tmpDir, 1);
+        }
+
+        $this->assertFileExists($logFile);
+        $content = (string) file_get_contents($logFile);
+        $this->assertStringContainsString('write-fail test', $content);
+    }
 }

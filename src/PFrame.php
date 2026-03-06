@@ -884,10 +884,27 @@ namespace PFrame {
                 return new Response($e->getMessage(), $e->statusCode, $e->headers);
             }
 
+            if ($e->statusCode >= 500) {
+                $cause = $e->getPrevious() ?? $e;
+                Log::error("HTTP {$e->statusCode}", [
+                    'message' => $cause->getMessage(),
+                    'file' => $cause->getFile(),
+                    'line' => $cause->getLine(),
+                ]);
+            }
+
             if ($this->errorPageHandler !== null) {
-                $response = ($this->errorPageHandler)($e, $request, $this);
-                if ($response instanceof Response) {
-                    return $response;
+                try {
+                    $response = ($this->errorPageHandler)($e, $request, $this);
+                    if ($response instanceof Response) {
+                        return $response;
+                    }
+                } catch (\Throwable $handlerError) {
+                    Log::error('Error page handler failed', [
+                        'message' => $handlerError->getMessage(),
+                        'file' => $handlerError->getFile(),
+                        'line' => $handlerError->getLine(),
+                    ]);
                 }
             }
 
@@ -910,11 +927,6 @@ namespace PFrame {
         }
 
         private function handleException(\Throwable $e, Request $request): Response {
-            Log::error('Unhandled exception', [
-                'message' => $e->getMessage(),
-                'file' => $e->getFile(),
-                'line' => $e->getLine(),
-            ]);
             $debug = (int) $this->config('debug', 0);
             $message = $debug >= 3
                 ? $e->getMessage() . "\n" . $e->getTraceAsString()
@@ -2065,6 +2077,7 @@ namespace PFrame {
 
         public static function toFile(string $filename, string $message): void {
             if (self::$basePath === null) {
+                error_log('[PFrame] ' . $message);
                 return;
             }
             if (str_contains($filename, '/') || str_contains($filename, '\\') || str_contains($filename, "\0")) {
@@ -2076,7 +2089,10 @@ namespace PFrame {
             }
 
             $path = self::$basePath . '/' . date('Y') . '_' . $filename;
-            @file_put_contents($path, date('[Y-m-d H:i:s] ') . $message . "\n", FILE_APPEND | LOCK_EX);
+            $written = @file_put_contents($path, date('[Y-m-d H:i:s] ') . $message . "\n", FILE_APPEND | LOCK_EX);
+            if ($written === false) {
+                error_log('[PFrame] Log write failed (' . $path . '): ' . $message);
+            }
         }
 
         /** @param array<string, mixed> $ctx */
@@ -2456,6 +2472,11 @@ namespace PFrame {
                 }
                 return ['success' => false, 'error' => 'No callback or command configured'];
             } catch (\Throwable $e) {
+                Log::error("Tick task '{$this->name}' failed", [
+                    'message' => $e->getMessage(),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine(),
+                ]);
                 return ['success' => false, 'error' => $e->getMessage()];
             }
         }
@@ -2590,6 +2611,7 @@ namespace PFrame {
             $path = $this->tickDir . '/' . md5($key) . '.tick';
             $handle = @fopen($path, 'c+');
             if ($handle === false) {
+                $this->logIoError('cannot open scheduler state file: ' . $path);
                 return true; // fail-open: run if can't check
             }
             if (!flock($handle, LOCK_EX | LOCK_NB)) {
@@ -2606,10 +2628,17 @@ namespace PFrame {
             }
 
             // Store current throttle timestamp while holding lock.
-            ftruncate($handle, 0);
+            if (ftruncate($handle, 0) === false) {
+                $this->logIoError('cannot truncate scheduler state file: ' . $path);
+            }
             rewind($handle);
-            fwrite($handle, (string)time());
-            fflush($handle);
+            $written = fwrite($handle, (string)time());
+            if ($written === false) {
+                $this->logIoError('cannot write scheduler state file: ' . $path);
+            }
+            if (!fflush($handle)) {
+                $this->logIoError('cannot flush scheduler state file: ' . $path);
+            }
             flock($handle, LOCK_UN);
             fclose($handle);
             return true;
@@ -2647,7 +2676,10 @@ namespace PFrame {
             }
             // Always write file (persistent across APCu clears/restarts)
             $path = $this->tickDir . '/' . md5($key) . '.last';
-            @file_put_contents($path, (string)$timestamp, LOCK_EX);
+            $written = @file_put_contents($path, (string)$timestamp, LOCK_EX);
+            if ($written === false) {
+                $this->logIoError("cannot write last-run for '{$name}': {$path}");
+            }
         }
 
         private function getFailCount(string $name): int {
@@ -2666,25 +2698,40 @@ namespace PFrame {
             $path = $this->tickDir . '/' . md5($this->keyPrefix . $name . ':fail') . '.fail';
             $handle = @fopen($path, 'c+');
             if ($handle === false) {
+                $this->logIoError("cannot open fail count for '{$name}': {$path}");
                 $count = $this->getFailCount($name) + 1;
-                @file_put_contents($path, (string)$count, LOCK_EX);
+                $written = @file_put_contents($path, (string)$count, LOCK_EX);
+                if ($written === false) {
+                    $this->logIoError("cannot write fail count for '{$name}': {$path}");
+                }
                 return $count;
             }
 
             try {
                 if (!flock($handle, LOCK_EX)) {
+                    $this->logIoError("cannot lock fail count for '{$name}': {$path}");
                     $count = $this->getFailCount($name) + 1;
-                    @file_put_contents($path, (string)$count, LOCK_EX);
+                    $written = @file_put_contents($path, (string)$count, LOCK_EX);
+                    if ($written === false) {
+                        $this->logIoError("cannot write fail count for '{$name}': {$path}");
+                    }
                     return $count;
                 }
 
                 rewind($handle);
                 $content = stream_get_contents($handle);
                 $count = max(0, (int)($content ?: '0')) + 1;
-                ftruncate($handle, 0);
+                if (ftruncate($handle, 0) === false) {
+                    $this->logIoError("cannot truncate fail count for '{$name}': {$path}");
+                }
                 rewind($handle);
-                fwrite($handle, (string)$count);
-                fflush($handle);
+                $written = fwrite($handle, (string)$count);
+                if ($written === false) {
+                    $this->logIoError("cannot write fail count for '{$name}': {$path}");
+                }
+                if (!fflush($handle)) {
+                    $this->logIoError("cannot flush fail count for '{$name}': {$path}");
+                }
                 flock($handle, LOCK_UN);
                 return $count;
             } finally {
@@ -2704,6 +2751,7 @@ namespace PFrame {
             $path = $this->tickDir . '/' . md5($this->keyPrefix . $name . ':lock') . '.lock';
             $handle = @fopen($path, 'c');
             if ($handle === false) {
+                $this->logIoError("cannot open lock file for '{$name}': {$path}");
                 return false;
             }
             if (!flock($handle, LOCK_EX | LOCK_NB)) {
@@ -2721,6 +2769,10 @@ namespace PFrame {
                 unset($this->lockHandles[$name]);
             }
             @unlink($this->tickDir . '/' . md5($this->keyPrefix . $name . ':lock') . '.lock');
+        }
+
+        private function logIoError(string $message): void {
+            error_log('[PFrame] Tick: ' . $message);
         }
     }
 

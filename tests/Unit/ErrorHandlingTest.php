@@ -5,11 +5,31 @@ namespace PFrame\Tests\Unit;
 
 use PFrame\App;
 use PFrame\HttpException;
+use PFrame\Log;
 use PFrame\Request;
 use PFrame\Response;
 use PHPUnit\Framework\TestCase;
 
 class ErrorHandlingTest extends TestCase {
+    /** @return array{basePath: ?string, minLevel: int} */
+    private function captureLogState(): array {
+        $basePath = new \ReflectionProperty(Log::class, 'basePath');
+        $minLevel = new \ReflectionProperty(Log::class, 'minLevel');
+
+        return [
+            'basePath' => $basePath->getValue(),
+            'minLevel' => $minLevel->getValue(),
+        ];
+    }
+
+    /** @param array{basePath: ?string, minLevel: int} $state */
+    private function restoreLogState(array $state): void {
+        $basePath = new \ReflectionProperty(Log::class, 'basePath');
+        $minLevel = new \ReflectionProperty(Log::class, 'minLevel');
+        $basePath->setValue(null, $state['basePath']);
+        $minLevel->setValue(null, $state['minLevel']);
+    }
+
     public function testDefaultHtml404And500(): void {
         $app = new App();
         $app->get('/missing', ErrorTestController::class, 'throw404');
@@ -181,6 +201,51 @@ class ErrorHandlingTest extends TestCase {
         $this->assertSame(409, $response->status);
         $this->assertSame('ajax-custom', $response->body);
         $this->assertSame('text/plain; charset=UTF-8', $response->headers['Content-Type'] ?? null);
+    }
+
+    public function testErrorPageHandlerCrashFallsBackToDefaultPage(): void {
+        $app = new App();
+        $app->setConfig('debug', 0);
+        $app->get('/fail', ErrorTestController::class, 'throw500');
+
+        $app->setErrorPageHandler(function (): Response {
+            throw new \RuntimeException('Handler crashed');
+        });
+
+        $response = $app->handle(new Request(method: 'GET', path: '/fail'));
+
+        $this->assertSame(500, $response->status);
+        $this->assertSame('text/html; charset=UTF-8', $response->headers['Content-Type'] ?? null);
+        $this->assertStringContainsString('500', $response->body);
+        $this->assertStringContainsString('Internal Server Error', $response->body);
+    }
+
+    public function testErrorPageHandlerCrashIsLogged(): void {
+        $state = $this->captureLogState();
+        $basePath = new \ReflectionProperty(Log::class, 'basePath');
+        $basePath->setValue(null, null);
+
+        $app = new App();
+        $app->get('/fail', ErrorTestController::class, 'throw500');
+        $app->setErrorPageHandler(function (): Response {
+            throw new \RuntimeException('Handler crashed');
+        });
+
+        $logFile = sys_get_temp_dir() . '/pframe_err_handler_' . uniqid('', true) . '.log';
+        $oldErrorLog = ini_set('error_log', $logFile);
+
+        try {
+            $app->handle(new Request(method: 'GET', path: '/fail'));
+        } finally {
+            ini_set('error_log', $oldErrorLog !== false ? $oldErrorLog : '');
+            $this->restoreLogState($state);
+        }
+
+        $this->assertFileExists($logFile);
+        $content = (string) file_get_contents($logFile);
+        $this->assertStringContainsString('Error page handler failed', $content);
+        $this->assertStringContainsString('Handler crashed', $content);
+        @unlink($logFile);
     }
 
     public function testUnhandledRuntimeExceptionUsesSamePipelineDefaultAndCustom(): void {

@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace PFrame\Tests\Unit;
 
 use PHPUnit\Framework\TestCase;
+use PFrame\Log;
 use PFrame\Tick;
 use PFrame\TickTask;
 
@@ -44,6 +45,25 @@ class TickTest extends TestCase {
     private function failPath(string $cacheDir, string $taskName, string $prefix = ''): string {
         $keyPrefix = 'tick:' . ($prefix !== '' ? $prefix : md5($cacheDir)) . ':';
         return $cacheDir . '/tick/' . md5($keyPrefix . $taskName . ':fail') . '.fail';
+    }
+
+    /** @return array{basePath: ?string, minLevel: int} */
+    private function captureLogState(): array {
+        $basePath = new \ReflectionProperty(Log::class, 'basePath');
+        $minLevel = new \ReflectionProperty(Log::class, 'minLevel');
+
+        return [
+            'basePath' => $basePath->getValue(),
+            'minLevel' => $minLevel->getValue(),
+        ];
+    }
+
+    /** @param array{basePath: ?string, minLevel: int} $state */
+    private function restoreLogState(array $state): void {
+        $basePath = new \ReflectionProperty(Log::class, 'basePath');
+        $minLevel = new \ReflectionProperty(Log::class, 'minLevel');
+        $basePath->setValue(null, $state['basePath']);
+        $minLevel->setValue(null, $state['minLevel']);
     }
 
     public function testTaskRegistration(): void {
@@ -170,6 +190,36 @@ class TickTest extends TestCase {
         self::assertStringContainsString('boom', $results['failing']['error']);
     }
 
+    public function testTaskFailureIsLogged(): void {
+        $state = $this->captureLogState();
+        $basePath = new \ReflectionProperty(Log::class, 'basePath');
+        $basePath->setValue(null, null);
+
+        $tick = new Tick($this->cacheDir);
+        $task = $tick->task('log-fail-test')
+            ->every(1)
+            ->run(function(): void {
+                throw new \RuntimeException('Task kaboom');
+            });
+
+        $logFile = $this->cacheDir . '/php_errors.log';
+        $oldErrorLog = ini_set('error_log', $logFile);
+
+        try {
+            $result = $task->execute();
+        } finally {
+            ini_set('error_log', $oldErrorLog !== false ? $oldErrorLog : '');
+            $this->restoreLogState($state);
+        }
+
+        self::assertFalse($result['success']);
+        self::assertSame('Task kaboom', $result['error']);
+        self::assertFileExists($logFile);
+        $content = (string) file_get_contents($logFile);
+        self::assertStringContainsString('Task kaboom', $content);
+        self::assertStringContainsString('log-fail-test', $content);
+    }
+
     public function testMultipleTasksExecuteInOrder(): void {
         $tick = new Tick($this->cacheDir);
         $order = [];
@@ -278,6 +328,28 @@ class TickTest extends TestCase {
             fclose($handle);
             @unlink($lockPath);
         }
+    }
+
+    public function testTickLogsWhenStateDirectoryIsNotWritable(): void {
+        $tick = new Tick('/proc/fake/tick_dir_' . uniqid('', true));
+        $tick->task('io-fail-test')
+            ->every(1)
+            ->run(function(): void {});
+
+        $logFile = $this->cacheDir . '/tick_io_errors.log';
+        $oldErrorLog = ini_set('error_log', $logFile);
+
+        try {
+            $results = $tick->dispatch();
+        } finally {
+            ini_set('error_log', $oldErrorLog !== false ? $oldErrorLog : '');
+        }
+
+        self::assertSame([], $results);
+        self::assertFileExists($logFile);
+        $content = (string) file_get_contents($logFile);
+        self::assertStringContainsString('Tick: cannot open', $content);
+        self::assertStringContainsString('io-fail-test', $content);
     }
 
     public function testFailedTaskRetriesThenSucceeds(): void {
