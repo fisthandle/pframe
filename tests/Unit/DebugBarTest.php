@@ -4,7 +4,6 @@ declare(strict_types=1);
 namespace PFrame\Tests\Unit;
 
 use PFrame\App;
-use PFrame\Db;
 use PFrame\DebugBar;
 use PHPUnit\Framework\TestCase;
 

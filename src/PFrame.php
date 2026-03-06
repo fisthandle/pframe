@@ -225,7 +225,7 @@ namespace PFrame {
             return strtolower($this->header('X-Requested-With') ?? '') === 'xmlhttprequest';
         }
 
-        /** @return array<string, mixed>|null */
+        /** @return array<string|int, mixed>|null */
         public function jsonBody(): ?array {
             if ($this->jsonBodyParsed) {
                 return $this->jsonBodyCache;
@@ -346,6 +346,22 @@ namespace PFrame {
                 'X-Accel-Buffering' => 'no',
             ], $headers), $filePath);
             $this->callback = $body;
+        }
+
+        public static function json(mixed $data, int $status = 200): static {
+            throw new \LogicException('SseResponse does not support json(). Use the callback to send SSE events.');
+        }
+
+        public static function html(string $body, int $status = 200): static {
+            throw new \LogicException('SseResponse does not support html(). Use the callback to send SSE events.');
+        }
+
+        public static function file(string $path, array $headers = [], int $status = 200): static {
+            throw new \LogicException('SseResponse does not support file(). Use the callback to send SSE events.');
+        }
+
+        public static function redirect(string $url, int $status = 302): static {
+            throw new \LogicException('SseResponse does not support redirect(). Use the callback to send SSE events.');
         }
 
         public function send(): void {
@@ -533,7 +549,10 @@ namespace PFrame {
             $this->addRoute($methods, $path, $controller, $action, $mw, $name, $ajax);
         }
 
-        /** @param array<callable> $mw */
+        /**
+         * @param callable(self): void $callback
+         * @param array<callable> $mw
+         */
         public function group(string $prefix, callable $callback, array $mw = [], ?string $namePrefix = null): void {
             $group = $this->currentRouteGroup();
             $this->routeGroups[] = [
@@ -790,7 +809,15 @@ namespace PFrame {
                     }
                 }
 
-                $argTypes[] = 'null';
+                if ($param->isDefaultValueAvailable()) {
+                    $argTypes[] = 'default';
+                    continue;
+                }
+                $typeName = $type instanceof \ReflectionNamedType ? $type->getName() : (string) $type;
+                throw new \LogicException(
+                    sprintf('Controller %s::%s() parameter $%s has unsupported type %s. Only Request and App are injectable.',
+                        get_class($controller), $method, $param->getName(), $typeName)
+                );
             }
 
             return ['invoke_without_args' => false, 'arg_types' => $argTypes];
@@ -805,6 +832,9 @@ namespace PFrame {
 
             $args = [];
             foreach ($plan['arg_types'] as $argType) {
+                if ($argType === 'default') {
+                    break;
+                }
                 $args[] = match ($argType) {
                     'request' => $request,
                     'app' => $this,
@@ -889,7 +919,7 @@ namespace PFrame {
             $message = $debug >= 3
                 ? $e->getMessage() . "\n" . $e->getTraceAsString()
                 : '';
-            return $this->handleHttpException(new HttpException(500, $message), $request);
+            return $this->handleHttpException(new HttpException(500, $message, $e), $request);
         }
 
         private function renderDefaultErrorPage(HttpException $e): string {
@@ -1710,7 +1740,8 @@ namespace PFrame {
 
                 error_log('[SESSION] Advisory lock timeout for ' . $this->lockName);
                 $this->lockName = null;
-            } catch (\Throwable) {
+            } catch (\Throwable $e) {
+                error_log('[SESSION] Advisory lock error: ' . $e->getMessage());
                 $this->lockName = null;
             }
         }
@@ -1962,6 +1993,8 @@ namespace PFrame {
         }
 
         /**
+         * Extract request data (POST body + query string) for the given keys.
+         *
          * @param list<string> $keys
          * @return array<string, mixed>
          */
@@ -2411,7 +2444,7 @@ namespace PFrame {
             return $timeNow >= $this->windowFrom || $timeNow < $this->windowTo;
         }
 
-        /** @return array{success: bool, error?: string} */
+        /** @return array{success: bool, error?: string, output?: string} */
         public function execute(): array {
             try {
                 if ($this->cmd !== null) {

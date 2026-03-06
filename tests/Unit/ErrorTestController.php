@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-namespace PFrame\Tests\Unit\PFrame;
+namespace PFrame\Tests\Unit;
 
 use PFrame\HttpException;
 use PFrame\Response;

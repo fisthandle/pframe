@@ -359,7 +359,10 @@ trait RefreshDatabase {
         $db = Base::db();
         foreach ($files as $file) {
             $sql = file_get_contents($file);
-            if ($sql === false || trim($sql) === '') {
+            if ($sql === false) {
+                throw new \RuntimeException('Failed to read migration file: ' . $file);
+            }
+            if (trim($sql) === '') {
                 continue;
             }
             $db->pdo()->exec($sql);

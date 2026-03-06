@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-namespace PFrame\Tests;
+namespace PFrame\Tests\Unit;
 
 use PHPUnit\Framework\TestCase;
 use PFrame\Tick;
