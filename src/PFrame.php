@@ -1766,8 +1766,8 @@ namespace PFrame {
 
             try {
                 $this->db->var('SELECT RELEASE_LOCK(?)', [$this->lockName]);
-            } catch (\Throwable) {
-                // Ignore release errors for non-MySQL drivers.
+            } catch (\Throwable $e) {
+                error_log("[SESSION] Lock release failed ({$this->lockName}): " . $e->getMessage());
             }
 
             $this->lockName = null;
