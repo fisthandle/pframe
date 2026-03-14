@@ -330,6 +330,49 @@ class TickTest extends TestCase {
         }
     }
 
+    public function testUnlockKeepsSingleLockInode(): void {
+        $tick = new Tick($this->cacheDir);
+        $ref = new \ReflectionClass($tick);
+        $tryLock = $ref->getMethod('tryLock');
+        $unlock = $ref->getMethod('unlock');
+        $tryLock->setAccessible(true);
+        $unlock->setAccessible(true);
+
+        $lockPath = $this->lockPath($this->cacheDir, 'inode-safe');
+        self::assertTrue($tryLock->invoke($tick, 'inode-safe'));
+
+        $waitingHandle = fopen($lockPath, 'c');
+        self::assertNotFalse($waitingHandle);
+        if ($waitingHandle === false) {
+            return;
+        }
+
+        $newHandle = null;
+        try {
+            $unlock->invoke($tick, 'inode-safe');
+
+            self::assertTrue(flock($waitingHandle, LOCK_EX | LOCK_NB));
+
+            $newHandle = fopen($lockPath, 'c');
+            self::assertNotFalse($newHandle);
+            if ($newHandle === false) {
+                return;
+            }
+
+            self::assertFalse(
+                flock($newHandle, LOCK_EX | LOCK_NB),
+                'Lock file must stay on the same inode after unlock',
+            );
+        } finally {
+            flock($waitingHandle, LOCK_UN);
+            fclose($waitingHandle);
+            if (is_resource($newHandle)) {
+                fclose($newHandle);
+            }
+            @unlink($lockPath);
+        }
+    }
+
     public function testTickLogsWhenStateDirectoryIsNotWritable(): void {
         $tick = new Tick('/proc/fake/tick_dir_' . uniqid('', true));
         $tick->task('io-fail-test')

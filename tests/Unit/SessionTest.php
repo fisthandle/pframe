@@ -90,7 +90,7 @@ class SessionTest extends TestCase {
         $this->assertStringContainsString('test', $data);
     }
 
-    public function testWriteFailsWhenLockWasNotAcquired(): void {
+    public function testWriteThrowsWhenLockWasNotAcquired(): void {
         $session = new Session($this->db, advisory: false);
         $id = bin2hex(random_bytes(16));
 
@@ -99,10 +99,10 @@ class SessionTest extends TestCase {
         $lockProp->setAccessible(true);
         $lockProp->setValue($session, false);
 
-        $written = $session->write($id, 'locked-out-data');
-
-        $this->assertFalse($written);
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Nie można zapisać sesji bez blokady.');
         $this->assertSame('', $session->read($id));
+        $session->write($id, 'locked-out-data');
     }
 
     public function testWriteUsesMysqlUpsertQueryWhenDriverIsMysql(): void {
@@ -227,7 +227,7 @@ class SessionTest extends TestCase {
         $this->assertSame(['sess_sid-lock', 5], $first[1]);
     }
 
-    public function testAdvisoryMysqlLockTimeoutKeepsWriteBlocked(): void {
+    public function testAdvisoryMysqlLockTimeoutThrows(): void {
         $pdo = new \PDO('sqlite::memory:');
         $db = $this->getMockBuilder(Db::class)
             ->disableOriginalConstructor()
@@ -249,8 +249,9 @@ class SessionTest extends TestCase {
 
         $session = new Session($db, advisory: true, lockTimeout: 1);
         $session->open('', '');
-        $this->assertSame('', $session->read('sid-timeout'));
-        $this->assertFalse($session->write('sid-timeout', 'value'));
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Nie można uzyskać blokady sesji.');
+        $session->read('sid-timeout');
     }
 
     public function testRegenerateReturnsBoolean(): void {

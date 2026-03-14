@@ -230,7 +230,10 @@ class AppTest extends TestCase {
         $response = $app->handle(new Request(method: 'GET', path: '/', server: ['HTTPS' => 'on']));
         $this->assertSame('DENY', $response->headers['X-Frame-Options'] ?? null);
         $this->assertSame('nosniff', $response->headers['X-Content-Type-Options'] ?? null);
-        $this->assertArrayHasKey('Content-Security-Policy', $response->headers);
+        $this->assertSame(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+            $response->headers['Content-Security-Policy'] ?? null,
+        );
         $this->assertSame('max-age=63072000; includeSubDomains; preload', $response->headers['Strict-Transport-Security'] ?? null);
     }
 

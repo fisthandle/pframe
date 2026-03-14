@@ -153,7 +153,7 @@ namespace PFrame {
 
             $xff = (string) ($server['HTTP_X_FORWARDED_FOR'] ?? '');
             if ($xff !== '') {
-                foreach (array_map('trim', explode(',', $xff)) as $ip) {
+                foreach (array_reverse(array_map('trim', explode(',', $xff))) as $ip) {
                     if ($ip === '' || in_array($ip, $trustedProxies, true)) {
                         continue;
                     }
@@ -965,7 +965,6 @@ namespace PFrame {
                 'X-Content-Type-Options' => 'nosniff',
                 'Referrer-Policy' => 'strict-origin-when-cross-origin',
                 'Permissions-Policy' => 'geolocation=(), microphone=(), camera=()',
-                'Content-Security-Policy' => "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
             ];
             foreach ($overrides as $name => $value) {
                 $headers[$name] = $value;
@@ -974,7 +973,10 @@ namespace PFrame {
             $this->addMiddleware(function (Request $req, callable $next) use ($headers): Response {
                 $response = $next($req);
                 $finalHeaders = $headers;
-                if (!array_key_exists('Strict-Transport-Security', $finalHeaders) && $this->isHttps($req)) {
+                if (!$this->hasHeader($finalHeaders, 'Content-Security-Policy')) {
+                    $finalHeaders['Content-Security-Policy'] = $this->defaultContentSecurityPolicy();
+                }
+                if (!$this->hasHeader($finalHeaders, 'Strict-Transport-Security') && $this->isHttps($req)) {
                     $finalHeaders['Strict-Transport-Security'] = 'max-age=63072000; includeSubDomains; preload';
                 }
 
@@ -982,20 +984,28 @@ namespace PFrame {
                     if ($value === null) {
                         continue;
                     }
-                    $exists = false;
-                    foreach ($response->headers as $key => $_) {
-                        if (strcasecmp((string) $key, (string) $name) === 0) {
-                            $exists = true;
-                            break;
-                        }
-                    }
-                    if (!$exists) {
+                    if (!$this->hasHeader($response->headers, $name)) {
                         $response->headers[$name] = $value;
                     }
                 }
 
                 return $response;
             });
+        }
+
+        /** @param array<string, string|null> $headers */
+        private function hasHeader(array $headers, string $name): bool {
+            foreach ($headers as $key => $_) {
+                if (strcasecmp((string) $key, $name) === 0) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private function defaultContentSecurityPolicy(): string {
+            return "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
         }
 
         private function isHttps(Request $request): bool {
@@ -1588,6 +1598,8 @@ namespace PFrame {
 
     class Session implements \SessionHandlerInterface {
         public const INTENDED_URL_KEY = '_intended_url';
+        private const LOCK_FAILURE_MESSAGE = 'Nie można uzyskać blokady sesji.';
+        private const WRITE_WITHOUT_LOCK_MESSAGE = 'Nie można zapisać sesji bez blokady.';
 
         private ?string $lockName = null;
         private bool $lockAcquired = false;
@@ -1665,7 +1677,7 @@ namespace PFrame {
         public function write(string $id, string $data): bool {
             if (!$this->lockAcquired) {
                 error_log('[SESSION] Refused write without advisory lock for ' . $id);
-                return false;
+                throw new \RuntimeException(self::WRITE_WITHOUT_LOCK_MESSAGE);
             }
 
             try {
@@ -1752,9 +1764,14 @@ namespace PFrame {
 
                 error_log('[SESSION] Advisory lock timeout for ' . $this->lockName);
                 $this->lockName = null;
+                throw new \RuntimeException(self::LOCK_FAILURE_MESSAGE);
             } catch (\Throwable $e) {
+                if ($e instanceof \RuntimeException) {
+                    throw $e;
+                }
                 error_log('[SESSION] Advisory lock error: ' . $e->getMessage());
                 $this->lockName = null;
+                throw new \RuntimeException(self::LOCK_FAILURE_MESSAGE, 0, $e);
             }
         }
 
@@ -2768,7 +2785,6 @@ namespace PFrame {
                 fclose($this->lockHandles[$name]);
                 unset($this->lockHandles[$name]);
             }
-            @unlink($this->tickDir . '/' . md5($this->keyPrefix . $name . ':lock') . '.lock');
         }
 
         private function logIoError(string $message): void {
@@ -2810,14 +2826,16 @@ namespace PFrame {
             string $fullStyle,
             bool $compact = true,
         ): string {
-            $shortDisplay = $compact ? 'block' : 'none';
-            $fullDisplay = $compact ? 'none' : 'block';
+            if (!$compact) {
+                return '<pre style="' . $fullStyle . '" id="' . $id . '-' . $suffix . '-full">'
+                    . $fullRows
+                    . '</pre>';
+            }
 
-            return '<pre style="' . $shortStyle . ';display:' . $shortDisplay . '" id="' . $id . '-' . $suffix . '-short">'
+            return '<pre style="' . $shortStyle . '" id="' . $id . '-' . $suffix . '-short">'
                 . $shortRows
-                . '</pre><pre style="' . $fullStyle . ';display:' . $fullDisplay . '" id="' . $id . '-' . $suffix . '-full">'
-                . $fullRows
-                . '</pre>';
+                . '</pre><details style="margin-top:4px"><summary style="cursor:pointer">toggle</summary><pre style="'
+                . $fullStyle . '" id="' . $id . '-' . $suffix . '-full">' . $fullRows . '</pre></details>';
         }
 
         /**
@@ -2860,13 +2878,12 @@ namespace PFrame {
         }
 
         /** @param array{gen_ms: float, db_ms: float, db_count: int, view_ms: float, views: list<array{template: string, ms: float}>, mem_mb: float, peak_mb: float} $d */
-        private function renderSummary(array $d, string $id, int $fileCount): string {
+        private function renderSummary(array $d, int $fileCount): string {
             return 'Gen: <b>' . $d['gen_ms'] . 'ms</b>'
                 . ' | DB: <b>' . $d['db_ms'] . 'ms</b> (' . $d['db_count'] . ')'
                 . ' | View: <b>' . $d['view_ms'] . 'ms</b> (' . count($d['views']) . ')'
                 . ' | Mem: <b>' . $d['mem_mb'] . 'MB</b> (peak: ' . $d['peak_mb'] . 'MB)'
-                . ' | <span style="cursor:pointer;text-decoration:underline" id="' . $id . '-files-toggle">Files: <b>' . $fileCount . '</b></span>'
-                . ' | <span style="cursor:pointer;text-decoration:underline" id="' . $id . '-toggle">toggle</span>';
+                . ' | Files: <b>' . $fileCount . '</b>';
         }
 
         /** @param array{db_count: int, slowest: list<array{sql: string, ms: float}>, duplicates: list<array{pattern: string|null, count: int, total_ms: float}>} $d */
@@ -3003,7 +3020,7 @@ namespace PFrame {
             }
 
             $files = $this->renderFilesList($d);
-            $summary = $this->renderSummary($d, $id, $files['count']);
+            $summary = $this->renderSummary($d, $files['count']);
             $querySection = $this->renderSqlToggleSection(
                 $id,
                 'queries',
@@ -3018,9 +3035,8 @@ namespace PFrame {
             <div id="{$id}" style="background:#e8e8e8;color:#333;font-family:monospace;font-size:14px;padding:10px 14px;border-top:1px solid #ccc;margin-top:2rem;line-height:1.6">
             {$querySection}{$insightsBox}
             <div style="margin-top:6px">{$summary}</div>
-            <pre style="margin:0;font:inherit;white-space:pre;overflow-x:auto;display:none;margin-top:6px;font-size:12px;color:#555" id="{$id}-files">{$files['list']}</pre>
+            <details style="margin-top:6px"><summary style="cursor:pointer">toggle files</summary><pre style="margin:0;font:inherit;white-space:pre;overflow-x:auto;margin-top:6px;font-size:12px;color:#555" id="{$id}-files">{$files['list']}</pre></details>
             </div>
-            <script>document.getElementById('{$id}-toggle').addEventListener('click',function(){['queries','slow','dups'].forEach(function(name){var s=document.getElementById('{$id}-'+name+'-short'),f=document.getElementById('{$id}-'+name+'-full');if(!s||!f){return}if(f.style.display==='none'){f.style.display='block';s.style.display='none'}else{f.style.display='none';s.style.display='block'}})});document.getElementById('{$id}-files-toggle').addEventListener('click',function(){var fl=document.getElementById('{$id}-files');fl.style.display=fl.style.display==='none'?'block':'none'})</script>
             HTML;
         }
     }
@@ -3138,6 +3154,9 @@ namespace {
         if ($value === null) {
             return '';
         }
+        if (!is_scalar($value) && !$value instanceof \Stringable) {
+            return '';
+        }
 
         return trim((string) $value, $characters);
     }
@@ -3146,11 +3165,18 @@ namespace {
         if ($date === null || $date === '') {
             return false;
         }
+        if (!is_scalar($date) && !$date instanceof \Stringable) {
+            return false;
+        }
 
         return strtotime((string) $date);
     }
 
     function strip_tagsS(mixed $s): string {
+        if ($s !== null && !is_scalar($s) && !$s instanceof \Stringable) {
+            return '';
+        }
+
         return trim(strip_tags((string) ($s ?? '')));
     }
 

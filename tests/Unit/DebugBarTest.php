@@ -85,7 +85,8 @@ class DebugBarTest extends TestCase {
         $this->assertStringContainsString('DB:', $html);
         $this->assertStringContainsString('Mem:', $html);
         $this->assertStringContainsString('toggle', $html);
-        $this->assertStringContainsString('<script>', $html);
+        $this->assertStringNotContainsString('<script>', $html);
+        $this->assertStringContainsString('<details', $html);
         $this->assertStringContainsString('CREATE TABLE', $html);
         $this->assertStringContainsString('(2)', $html);
     }
@@ -178,7 +179,7 @@ class DebugBarTest extends TestCase {
         $this->assertStringContainsString('2×', $html);
         $this->assertStringContainsString('-dups-short', $html);
         $this->assertStringContainsString('-dups-full', $html);
-        $this->assertStringContainsString("['queries','slow','dups']", $html);
+        $this->assertStringContainsString('<details', $html);
         $this->assertStringContainsString('Files:', $html);
     }
 

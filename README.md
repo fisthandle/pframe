@@ -193,6 +193,7 @@ session_set_save_handler($session);
 
 - **Lazy-write**: when session data is unchanged between `read()` and `write()`, only the timestamp is updated (lightweight `UPDATE` instead of full `INSERT OR REPLACE`)
 - **Advisory locks** (MySQL only): single `GET_LOCK` with configurable timeout prevents concurrent writes
+- **Fail-closed on lock timeout**: if the advisory lock cannot be acquired, the session handler throws instead of silently dropping writes
 - **Intended URL**: `Session::pullIntendedUrl(string $default = '/')` retrieves and clears the URL stored by `Middleware::auth()`
 
 ## Security
@@ -205,11 +206,15 @@ Built-in:
 - Session hardening (strict mode, httponly, samesite)
 - Path traversal protection in template rendering
 - Open redirect prevention (blocks `//`, `\`, scheme-without-authority, non-http schemes)
-- Trusted proxy IP resolution
+- Trusted proxy IP resolution (nearest untrusted IP from `X-Forwarded-For`)
 
 ```php
 $app->addSecurityHeaders(); // CSP, XFO, XCTO, Referrer-Policy, Permissions-Policy, HSTS
 ```
+
+Default CSP:
+- `script-src 'self'`
+- `style-src 'self' 'unsafe-inline'` (allows built-in error pages and DebugBar styles)
 
 Built-in middleware:
 - `\PFrame\Middleware::auth()` -- guest -> stores intended URL in session (GET/HEAD only), flash warning + redirect to `login` route

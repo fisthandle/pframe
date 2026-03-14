@@ -48,17 +48,23 @@ class HelpersTest extends TestCase {
         $this->assertSame('', trimS(null));
         $this->assertSame('42', trimS(42));
         $this->assertSame('hello', trimS('xxxhelloxxx', 'x'));
+        $this->assertSame('', trimS([]));
+        $this->assertSame('', trimS(new \stdClass()));
     }
 
     public function testStrtotimeS(): void {
         $this->assertIsInt(strtotimeS('2024-01-01'));
         $this->assertFalse(strtotimeS(null));
         $this->assertFalse(strtotimeS(''));
+        $this->assertFalse(strtotimeS([]));
+        $this->assertFalse(strtotimeS(new \stdClass()));
     }
 
     public function testStripTagsS(): void {
         $this->assertSame('hello', strip_tagsS('<b>hello</b>'));
         $this->assertSame('', strip_tagsS(null));
+        $this->assertSame('', strip_tagsS([]));
+        $this->assertSame('', strip_tagsS(new \stdClass()));
     }
 
     public function testCountS(): void {
