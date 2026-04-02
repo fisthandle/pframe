@@ -90,7 +90,7 @@ class SessionTest extends TestCase {
         $this->assertStringContainsString('test', $data);
     }
 
-    public function testWriteThrowsWhenLockWasNotAcquired(): void {
+    public function testWriteSkipsWhenLockNotAcquired(): void {
         $session = new Session($this->db, advisory: false);
         $id = bin2hex(random_bytes(16));
 
@@ -99,10 +99,11 @@ class SessionTest extends TestCase {
         $lockProp->setAccessible(true);
         $lockProp->setValue($session, false);
 
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Nie można zapisać sesji bez blokady.');
         $this->assertSame('', $session->read($id));
-        $session->write($id, 'locked-out-data');
+        $this->assertTrue($session->write($id, 'should-not-persist'));
+
+        $data = $this->db->var('SELECT data FROM sessions WHERE session_id = ?', [$id]);
+        $this->assertNull($data, 'Data must not be written without advisory lock');
     }
 
     public function testWriteUsesMysqlUpsertQueryWhenDriverIsMysql(): void {
@@ -227,31 +228,44 @@ class SessionTest extends TestCase {
         $this->assertSame(['sess_sid-lock', 5], $first[1]);
     }
 
-    public function testAdvisoryMysqlLockTimeoutThrows(): void {
+    public function testAdvisoryMysqlLockTimeoutDegradesToReadOnly(): void {
         $pdo = new \PDO('sqlite::memory:');
+        $calls = [];
         $db = $this->getMockBuilder(Db::class)
             ->disableOriginalConstructor()
-            ->onlyMethods(['driver', 'pdo', 'var'])
+            ->onlyMethods(['driver', 'pdo', 'var', 'exec'])
             ->getMock();
         $db->method('driver')->willReturn('mysql');
         $db->method('pdo')->willReturn($pdo);
         $db->method('var')->willReturnCallback(
-            static function (string $sql, mixed $params = null): mixed {
+            static function (string $sql, mixed $params = null) use (&$calls): mixed {
+                $calls[] = $sql;
                 if (str_starts_with($sql, 'SELECT GET_LOCK')) {
-                    return 0;
+                    return 0; // timeout
                 }
                 if (str_starts_with($sql, 'SELECT data FROM sessions')) {
-                    return '';
+                    return 'existing-data';
                 }
                 return null;
             }
         );
+        $db->expects($this->never())->method('exec');
 
         $session = new Session($db, advisory: true, lockTimeout: 1);
         $session->open('', '');
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Nie można uzyskać blokady sesji.');
-        $session->read('sid-timeout');
+
+        // read succeeds despite lock timeout
+        $this->assertSame('existing-data', $session->read('sid-timeout'));
+
+        // write silently skips (no exception)
+        $this->assertTrue($session->write('sid-timeout', 'new-data'));
+
+        // close completes cleanly
+        $this->assertTrue($session->close());
+
+        // RELEASE_LOCK never called (lock was never acquired)
+        $releaseCalls = array_filter($calls, fn(string $s) => str_starts_with($s, 'SELECT RELEASE_LOCK'));
+        $this->assertEmpty($releaseCalls, 'RELEASE_LOCK must not be called when lock was never acquired');
     }
 
     public function testRegenerateReturnsBoolean(): void {
@@ -308,5 +322,119 @@ class SessionTest extends TestCase {
 
         $this->assertSame('/safe', $url);
         $this->assertArrayNotHasKey(Session::INTENDED_URL_KEY, $_SESSION);
+    }
+
+    public function testAdvisoryLockDbErrorDegradesToReadOnly(): void {
+        $pdo = new \PDO('sqlite::memory:');
+        $db = $this->getMockBuilder(Db::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['driver', 'pdo', 'var', 'exec'])
+            ->getMock();
+        $db->method('driver')->willReturn('mysql');
+        $db->method('pdo')->willReturn($pdo);
+        $db->method('var')->willReturnCallback(
+            static function (string $sql): mixed {
+                if (str_starts_with($sql, 'SELECT GET_LOCK')) {
+                    throw new \PDOException('MySQL gone away');
+                }
+                if (str_starts_with($sql, 'SELECT data FROM sessions')) {
+                    return 'data-after-error';
+                }
+                return null;
+            }
+        );
+        $db->expects($this->never())->method('exec');
+
+        $session = new Session($db, advisory: true, lockTimeout: 1);
+        $session->open('', '');
+        $this->assertSame('data-after-error', $session->read('sid-error'));
+        $this->assertTrue($session->write('sid-error', 'new'));
+        $this->assertTrue($session->close());
+    }
+
+    public function testAdvisoryMysqlNormalFlowWritesAndReleasesLock(): void {
+        $pdo = new \PDO('sqlite::memory:');
+        $calls = [];
+        $db = $this->getMockBuilder(Db::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['driver', 'pdo', 'var', 'exec'])
+            ->getMock();
+        $db->method('driver')->willReturn('mysql');
+        $db->method('pdo')->willReturn($pdo);
+        $db->method('var')->willReturnCallback(
+            static function (string $sql, mixed $params = null) use (&$calls): mixed {
+                $calls[] = $sql;
+                if (str_starts_with($sql, 'SELECT GET_LOCK')) {
+                    return 1;
+                }
+                if (str_starts_with($sql, 'SELECT data FROM sessions')) {
+                    return 'orig';
+                }
+                if (str_starts_with($sql, 'SELECT RELEASE_LOCK')) {
+                    return 1;
+                }
+                return null;
+            }
+        );
+        $db->expects($this->once())
+            ->method('exec')
+            ->with(
+                $this->stringContains('ON DUPLICATE KEY UPDATE'),
+                $this->anything(),
+            )
+            ->willReturn(1);
+
+        $session = new Session($db, advisory: true, lockTimeout: 5);
+        $session->open('', '');
+        $this->assertSame('orig', $session->read('sid-ok'));
+        $this->assertTrue($session->write('sid-ok', 'updated'));
+
+        // close() calls releaseLock() again — must be safe (no-op since lockName already null)
+        $this->assertTrue($session->close());
+
+        $releaseCalls = array_filter($calls, fn(string $s) => str_starts_with($s, 'SELECT RELEASE_LOCK'));
+        $this->assertCount(1, $releaseCalls, 'RELEASE_LOCK must be called exactly once (by write, not again by close)');
+    }
+
+    public function testDestroyExecutesWithoutAdvisoryLock(): void {
+        $pdo = new \PDO('sqlite::memory:');
+        $db = $this->getMockBuilder(Db::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['driver', 'pdo', 'var', 'exec'])
+            ->getMock();
+        $db->method('driver')->willReturn('mysql');
+        $db->method('pdo')->willReturn($pdo);
+        $db->method('var')->willReturnCallback(
+            static function (string $sql): mixed {
+                if (str_starts_with($sql, 'SELECT GET_LOCK')) {
+                    return 0; // timeout
+                }
+                if (str_starts_with($sql, 'SELECT data FROM sessions')) {
+                    return 'active-session';
+                }
+                return null;
+            }
+        );
+        $db->expects($this->once())
+            ->method('exec')
+            ->with(
+                'DELETE FROM sessions WHERE session_id = ?',
+                ['sid-destroy'],
+            )
+            ->willReturn(1);
+
+        $session = new Session($db, advisory: true, lockTimeout: 1);
+        $session->open('', '');
+        $session->read('sid-destroy');
+        $this->assertTrue($session->destroy('sid-destroy'));
+    }
+
+    public function testConstructorDefaultLockTimeoutIsFive(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:']);
+        $session = new Session($db, advisory: true);
+        $ref = new \ReflectionClass($session);
+        $prop = $ref->getProperty('lockTimeout');
+        $prop->setAccessible(true);
+        $this->assertSame(5, $prop->getValue($session));
     }
 }

@@ -187,13 +187,13 @@ DB sessions require the `sessions` table -- see `db/sessions.sql`.
 Database-backed handler with advisory locks (MySQL), lazy-write optimization, and intended URL support.
 
 ```php
-$session = new \PFrame\Session($db, advisory: true, lockTimeout: 30);
+$session = new \PFrame\Session($db, advisory: true, lockTimeout: 5);
 session_set_save_handler($session);
 ```
 
 - **Lazy-write**: when session data is unchanged between `read()` and `write()`, only the timestamp is updated (lightweight `UPDATE` instead of full `INSERT OR REPLACE`)
 - **Advisory locks** (MySQL only): single `GET_LOCK` with configurable timeout prevents concurrent writes
-- **Fail-closed on lock timeout**: if the advisory lock cannot be acquired, the session handler throws instead of silently dropping writes
+- **Graceful degradation on lock timeout**: if the advisory lock cannot be acquired within `lockTimeout` seconds (default 5), the session degrades to read-only — reads succeed, writes are silently skipped. This prevents 500 cascades under contention while preserving page rendering.
 - **Intended URL**: `Session::pullIntendedUrl(string $default = '/')` retrieves and clears the URL stored by `Middleware::auth()`
 
 ## Security

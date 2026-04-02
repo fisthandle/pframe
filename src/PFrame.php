@@ -1598,9 +1598,6 @@ namespace PFrame {
 
     class Session implements \SessionHandlerInterface {
         public const INTENDED_URL_KEY = '_intended_url';
-        private const LOCK_FAILURE_MESSAGE = 'Nie można uzyskać blokady sesji.';
-        private const WRITE_WITHOUT_LOCK_MESSAGE = 'Nie można zapisać sesji bez blokady.';
-
         private ?string $lockName = null;
         private bool $lockAcquired = false;
         private readonly bool $useAdvisoryLock;
@@ -1610,7 +1607,7 @@ namespace PFrame {
         public function __construct(
             private readonly Db $db,
             private readonly bool $advisory = true,
-            private readonly int $lockTimeout = 30,
+            private readonly int $lockTimeout = 5,
         ) {
             $this->useAdvisoryLock = $this->advisory && $this->db->driver() === 'mysql';
             $this->lockAcquired = !$this->useAdvisoryLock;
@@ -1676,8 +1673,8 @@ namespace PFrame {
 
         public function write(string $id, string $data): bool {
             if (!$this->lockAcquired) {
-                error_log('[SESSION] Refused write without advisory lock for ' . $id);
-                throw new \RuntimeException(self::WRITE_WITHOUT_LOCK_MESSAGE);
+                error_log('[SESSION] Skipping write without advisory lock for ' . $id);
+                return true;
             }
 
             try {
@@ -1718,10 +1715,13 @@ namespace PFrame {
         }
 
         public function destroy(string $id): bool {
-            $this->db->exec('DELETE FROM sessions WHERE session_id = ?', [$id]);
-            $this->initialData = '';
-            $this->initialDataLoaded = false;
-            $this->releaseLock();
+            try {
+                $this->db->exec('DELETE FROM sessions WHERE session_id = ?', [$id]);
+            } finally {
+                $this->initialData = '';
+                $this->initialDataLoaded = false;
+                $this->releaseLock();
+            }
             return true;
         }
 
@@ -1764,14 +1764,9 @@ namespace PFrame {
 
                 error_log('[SESSION] Advisory lock timeout for ' . $this->lockName);
                 $this->lockName = null;
-                throw new \RuntimeException(self::LOCK_FAILURE_MESSAGE);
             } catch (\Throwable $e) {
-                if ($e instanceof \RuntimeException) {
-                    throw $e;
-                }
-                error_log('[SESSION] Advisory lock error: ' . $e->getMessage());
+                error_log('[SESSION] Advisory lock error for ' . ($this->lockName ?? 'unknown') . ': ' . $e->getMessage());
                 $this->lockName = null;
-                throw new \RuntimeException(self::LOCK_FAILURE_MESSAGE, 0, $e);
             }
         }
 
