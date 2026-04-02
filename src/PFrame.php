@@ -679,15 +679,13 @@ namespace PFrame {
         }
 
         public function handle(Request $request): Response {
-            $handler = fn (Request $req): Response => $this->dispatch($req);
-            foreach (array_reverse($this->middleware) as $mw) {
-                $next = $handler;
-                $handler = fn (Request $req): Response => $mw($req, $next);
-            }
-
-            return $this->withErrorHandler(function () use ($handler, $request): Response {
+            return $this->withErrorHandler(function () use ($request): Response {
                 try {
-                    return $handler($request);
+                    return $this->applyMiddleware(
+                        $request,
+                        fn (Request $req): Response => $this->dispatch($req),
+                        $this->middleware,
+                    );
                 } catch (HttpException $e) {
                     return $this->handleHttpException($e, $request);
                 } catch (\Throwable $e) {
@@ -704,18 +702,15 @@ namespace PFrame {
 
             $request->setParams($match['params']);
 
-            $handler = fn (Request $req): Response => $this->invokeController(
-                $req,
-                $match['controller'],
-                $match['action'],
+            return $this->applyMiddleware(
+                $request,
+                fn (Request $req): Response => $this->invokeController(
+                    $req,
+                    $match['controller'],
+                    $match['action'],
+                ),
+                $match['middleware'],
             );
-
-            foreach (array_reverse($match['middleware']) as $mw) {
-                $next = $handler;
-                $handler = fn (Request $req): Response => $mw($req, $next);
-            }
-
-            return $handler($request);
         }
 
         /**
@@ -725,66 +720,92 @@ namespace PFrame {
             $method = strtoupper($method);
             $normalizedPath = $this->normalizeStaticPath($path);
 
-            foreach ($this->staticRoutesByMethod[$method][$normalizedPath] ?? [] as $i) {
+            $match = $this->matchRouteIndexes($this->staticRoutesByMethod[$method][$normalizedPath] ?? [], $path, $isAjax, true);
+            if ($match !== null) {
+                return $match;
+            }
+
+            $match = $this->matchRouteIndexes($this->routesByMethod[$method] ?? [], $path, $isAjax);
+            if ($match !== null) {
+                return $match;
+            }
+
+            $allowed = $this->allowedMethodsForPath($method, $path, $isAjax);
+            if ($allowed !== []) {
+                throw HttpException::methodNotAllowed($allowed);
+            }
+
+            return null;
+        }
+
+        /**
+         * @param array<callable> $middleware
+         * @param callable(Request): Response $destination
+         */
+        private function applyMiddleware(Request $request, callable $destination, array $middleware): Response {
+            $handler = $destination;
+            foreach (array_reverse($middleware) as $mw) {
+                $next = $handler;
+                $handler = fn (Request $req): Response => $mw($req, $next);
+            }
+
+            return $handler($request);
+        }
+
+        /**
+         * @param array<int, int> $indexes
+         * @return array{controller: string, action: string, params: array<string, string>, middleware: array<callable>}|null
+         */
+        private function matchRouteIndexes(array $indexes, string $path, bool $isAjax, bool $staticRoute = false): ?array {
+            foreach ($indexes as $i) {
                 $route = $this->routes[$i];
                 if ($route['ajax'] && !$isAjax) {
                     continue;
                 }
 
-                return [
-                    'controller' => $route['controller'],
-                    'action' => $route['action'],
-                    'params' => [],
-                    'middleware' => $route['middleware'],
-                ];
-            }
-
-            foreach ($this->routesByMethod[$method] ?? [] as $i) {
-                $route = $this->routes[$i];
-                if (!preg_match($route['regex'], $path, $matches)) {
-                    continue;
-                }
-                if ($route['ajax'] && !$isAjax) {
+                $matches = [];
+                if (!$staticRoute && !preg_match($route['regex'], $path, $matches)) {
                     continue;
                 }
 
-                $params = [];
-                foreach ($route['paramNames'] as $paramIndex => $name) {
-                    $params[$name] = $matches[$paramIndex + 1] ?? '';
-                }
-
-                return [
-                    'controller' => $route['controller'],
-                    'action' => $route['action'],
-                    'params' => $params,
-                    'middleware' => $route['middleware'],
-                ];
+                return $this->buildMatchedRoute($route, $matches);
             }
 
+            return null;
+        }
+
+        /**
+         * @param array{methods: list<string>, pattern: string, regex: string, paramNames: list<string>, controller: string, action: string, middleware: array<callable>, name: ?string, ajax: bool} $route
+         * @param array<int, string> $matches
+         * @return array{controller: string, action: string, params: array<string, string>, middleware: array<callable>}
+         */
+        private function buildMatchedRoute(array $route, array $matches = []): array {
+            $params = [];
+            foreach ($route['paramNames'] as $paramIndex => $name) {
+                $params[$name] = $matches[$paramIndex + 1] ?? '';
+            }
+
+            return [
+                'controller' => $route['controller'],
+                'action' => $route['action'],
+                'params' => $params,
+                'middleware' => $route['middleware'],
+            ];
+        }
+
+        /** @return list<string> */
+        private function allowedMethodsForPath(string $method, string $path, bool $isAjax): array {
             $allowed = [];
             foreach ($this->routesByMethod as $httpMethod => $indexes) {
                 if ($httpMethod === $method) {
                     continue;
                 }
-                foreach ($indexes as $i) {
-                    $route = $this->routes[$i];
-                    if (!preg_match($route['regex'], $path)) {
-                        continue;
-                    }
-                    if ($route['ajax'] && !$isAjax) {
-                        continue;
-                    }
-
-                    $allowed[$httpMethod] = true;
-                    break;
+                if ($this->matchRouteIndexes($indexes, $path, $isAjax) !== null) {
+                    $allowed[] = $httpMethod;
                 }
             }
 
-            if ($allowed !== []) {
-                throw HttpException::methodNotAllowed(array_keys($allowed));
-            }
-
-            return null;
+            return $allowed;
         }
 
         /** @return array{invoke_without_args: bool, arg_types: array<int, string>} */
@@ -1125,6 +1146,50 @@ namespace PFrame {
             $request = Request::fromGlobalsWithProxies($trusted);
             $response = $this->handle($request);
             $response->send();
+        }
+
+        public function runWorkerRequest(bool $startSession = false): void {
+            $this->prepareWorkerRequest();
+
+            try {
+                if ($startSession && session_status() !== PHP_SESSION_ACTIVE) {
+                    session_start();
+                }
+
+                $this->run();
+            } finally {
+                $this->finishWorkerRequest();
+            }
+        }
+
+        private function prepareWorkerRequest(): void {
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
+            }
+
+            $db = $this->dbIfInitialized();
+            if ($db !== null) {
+                if ($db->trans()) {
+                    $db->rollbackAll();
+                }
+                $db->resetRequestState();
+            }
+
+            $this->resetRequestState();
+        }
+
+        private function finishWorkerRequest(): void {
+            $db = $this->dbIfInitialized();
+            if ($db !== null) {
+                if ($db->trans()) {
+                    $db->rollbackAll();
+                }
+                $db->resetRequestState();
+            }
+
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
+            }
         }
     }
 
@@ -1751,10 +1816,6 @@ namespace PFrame {
             $this->lockAcquired = false;
 
             try {
-                if ($this->db->pdo()->inTransaction()) {
-                    $this->db->pdo()->rollBack();
-                }
-
                 $timeout = max(0, $this->lockTimeout);
                 $result = $this->db->var('SELECT GET_LOCK(?, ?)', [$this->lockName, $timeout]);
                 if ((int) $result === 1) {
@@ -1793,6 +1854,7 @@ namespace PFrame {
         private const SECRET_KEY = '_csrf_secret';
 
         public const FIELD_NAME = 'csrf_token';
+        public const EXPIRED_MESSAGE = 'Sesja wygasła. Odśwież stronę.';
 
         public static function token(): string {
             if (empty($_SESSION[self::SESSION_KEY])) {
@@ -1813,6 +1875,11 @@ namespace PFrame {
             }
 
             return hash_equals($stored, $token);
+        }
+
+        public static function requestToken(Request $request): ?string {
+            $raw = $request->post(self::FIELD_NAME) ?? $request->header('X-Csrf-Token');
+            return is_scalar($raw) ? (string) $raw : null;
         }
 
         public static function nonce(string $action): string {
@@ -1899,13 +1966,12 @@ namespace PFrame {
          * @param list<string> $methods
          * @return callable(Request, callable): Response
          */
-        public static function csrf(array $methods = ['POST', 'PUT', 'PATCH', 'DELETE'], string $message = 'Sesja wygasła. Odśwież stronę.'): callable {
+        public static function csrf(array $methods = ['POST', 'PUT', 'PATCH', 'DELETE'], string $message = Csrf::EXPIRED_MESSAGE): callable {
             $allowedMethods = array_values(array_unique(array_map(static fn($method) => strtoupper((string) $method), $methods)));
 
             return function (Request $req, callable $next) use ($allowedMethods, $message): Response {
                 if (in_array($req->method, $allowedMethods, true)) {
-                    $token = $req->post(Csrf::FIELD_NAME) ?? $req->header('X-Csrf-Token');
-                    if (!Csrf::validate(is_scalar($token) ? (string) $token : null)) {
+                    if (!Csrf::validate(Csrf::requestToken($req))) {
                         throw HttpException::forbidden($message);
                     }
                 }
@@ -2005,10 +2071,8 @@ namespace PFrame {
         }
 
         protected function validateCsrf(): void {
-            $raw = $this->request->post(Csrf::FIELD_NAME) ?? $this->request->header('X-Csrf-Token');
-            $token = is_scalar($raw) ? (string) $raw : null;
-            if (!Csrf::validate($token)) {
-                throw HttpException::forbidden('Sesja wygasła. Odśwież stronę.');
+            if (!Csrf::validate(Csrf::requestToken($this->request))) {
+                throw HttpException::forbidden(Csrf::EXPIRED_MESSAGE);
             }
         }
 

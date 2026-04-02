@@ -203,6 +203,26 @@ class AppTest extends TestCase {
         $this->assertSame('getting-started/intro', $response->body);
     }
 
+    public function testStaticRouteBeatsDynamicRouteForExactMatch(): void {
+        $app = new App();
+        $app->get('/posts/{slug}', DynamicPriorityCtrl::class, 'dynamic');
+        $app->get('/posts/new', DynamicPriorityCtrl::class, 'static');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/posts/new'));
+        $this->assertSame(200, $response->status);
+        $this->assertSame('static', $response->body);
+    }
+
+    public function testStaticRouteBeatsWildcardRouteForExactMatch(): void {
+        $app = new App();
+        $app->route('GET', '/assets/*', DynamicPriorityCtrl::class, 'wildcard');
+        $app->get('/assets/health', DynamicPriorityCtrl::class, 'static');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/assets/health'));
+        $this->assertSame(200, $response->status);
+        $this->assertSame('static', $response->body);
+    }
+
     public function testMethodNotAllowedReturns405(): void {
         $app = new App();
         $app->get('/ping', HelloStub::class, 'index');
@@ -220,6 +240,20 @@ class AppTest extends TestCase {
         $response = $app->handle(new Request(method: 'PUT', path: '/vote'));
         $this->assertSame(405, $response->status);
         $this->assertSame('GET, HEAD', $response->headers['Allow'] ?? null);
+    }
+
+    public function testMethodNotAllowedIncludesAjaxOnlyRoutesForAjaxRequest(): void {
+        $app = new App();
+        $app->get('/vote', HelloStub::class, 'index');
+        $app->post('/vote', HelloStub::class, 'submit', ajax: true);
+
+        $response = $app->handle(new Request(
+            method: 'PUT',
+            path: '/vote',
+            headers: ['X-Requested-With' => 'XMLHttpRequest'],
+        ));
+        $this->assertSame(405, $response->status);
+        $this->assertSame('GET, HEAD, POST', $response->headers['Allow'] ?? null);
     }
 
     public function testSecurityHeadersMiddlewareAddsDefaults(): void {
@@ -491,6 +525,20 @@ class WildcardCtrl {
 
     public function show(): Response {
         return new Response($this->request->param('*', ''));
+    }
+}
+
+class DynamicPriorityCtrl {
+    public function dynamic(): Response {
+        return new Response('dynamic');
+    }
+
+    public function wildcard(): Response {
+        return new Response('wildcard');
+    }
+
+    public function static(): Response {
+        return new Response('static');
     }
 }
 

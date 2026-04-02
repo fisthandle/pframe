@@ -261,29 +261,17 @@ CIDR ranges are not supported. Use exact addresses.
 
 ### Worker Mode (FrankenPHP)
 
-Use request-scoped reset when running long-lived workers:
+Use `runWorkerRequest()` when running long-lived workers. It resets request-scoped state,
+rolls back leaked DB transactions, resets DB debug counters/logs, and closes the session in `finally`.
 
 ```php
 $handler = static function () use ($app): void {
-    try {
-        $app->resetRequestState();
-        session_start();
-        $app->run();
-    } finally {
-        $dbConfig = $app->config('db');
-        if (is_array($dbConfig)) {
-            $db = $app->db();
-            if ($db->trans()) {
-                $db->rollbackAll();
-            }
-            $db->resetRequestState();
-        }
-        if (session_status() === PHP_SESSION_ACTIVE) {
-            session_write_close();
-        }
-    }
+    $app->runWorkerRequest(startSession: true);
 };
 ```
+
+If your worker entrypoint does not use PHP sessions, call `$app->runWorkerRequest()` with
+the default `startSession: false`.
 
 ### Rate Limiting Helper
 

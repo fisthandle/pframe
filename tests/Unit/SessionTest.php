@@ -268,6 +268,40 @@ class SessionTest extends TestCase {
         $this->assertEmpty($releaseCalls, 'RELEASE_LOCK must not be called when lock was never acquired');
     }
 
+    public function testAdvisoryLockDoesNotRollbackActiveTransaction(): void {
+        $pdo = new \PDO('sqlite::memory:');
+        $this->assertTrue($pdo->beginTransaction());
+
+        $db = $this->getMockBuilder(Db::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['driver', 'pdo', 'var'])
+            ->getMock();
+        $db->method('driver')->willReturn('mysql');
+        $db->method('pdo')->willReturn($pdo);
+        $db->method('var')->willReturnCallback(
+            static function (string $sql): mixed {
+                if (str_starts_with($sql, 'SELECT GET_LOCK')) {
+                    return 1;
+                }
+                if (str_starts_with($sql, 'SELECT data FROM sessions')) {
+                    return 'payload';
+                }
+                if (str_starts_with($sql, 'SELECT RELEASE_LOCK')) {
+                    return 1;
+                }
+
+                return null;
+            }
+        );
+
+        $session = new Session($db, advisory: true, lockTimeout: 5);
+        $session->open('', '');
+        $this->assertSame('payload', $session->read('sid-active-tx'));
+        $this->assertTrue($pdo->inTransaction(), 'Session lock acquisition must not rollback an active transaction');
+        $this->assertTrue($session->close());
+        $this->assertTrue($pdo->rollBack());
+    }
+
     public function testRegenerateReturnsBoolean(): void {
         if (session_status() === PHP_SESSION_ACTIVE) {
             session_write_close();
