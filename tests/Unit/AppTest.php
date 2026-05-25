@@ -311,6 +311,21 @@ class AppTest extends TestCase {
         $this->assertSame('max-age=63072000; includeSubDomains; preload', $response->headers['Strict-Transport-Security'] ?? null);
     }
 
+    public function testSecurityHeadersTrustForwardedProtoFromTrustedProxyHostname(): void {
+        $app = new App();
+        $app->setConfig('trusted_proxies', ['localhost']);
+        $app->addSecurityHeaders();
+        $app->get('/', HelloStub::class, 'index');
+
+        $response = $app->handle(new Request(
+            method: 'GET',
+            path: '/',
+            server: ['REMOTE_ADDR' => '127.0.0.1'],
+            headers: ['X-Forwarded-Proto' => 'https'],
+        ));
+        $this->assertSame('max-age=63072000; includeSubDomains; preload', $response->headers['Strict-Transport-Security'] ?? null);
+    }
+
     public function testSecurityHeadersDoNotOverrideExistingHeaderCaseInsensitive(): void {
         $app = new App();
         $app->addSecurityHeaders();

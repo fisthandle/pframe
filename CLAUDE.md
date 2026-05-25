@@ -97,3 +97,13 @@ bin/test profiles: `quick|full|ci|coverage|contracts|e2e|ui`
 - `$app->addMiddleware(...)` — NIE `$app->use(...)`
 - `App::instance()` throws `LogicException` przy konflikcie klas
 - `example/` jest w `.gitignore` — footgun przy demo
+- Flash PRZED session clear — `session_regenerate_id(true)` nie `destroy()`
+- Logout = POST + CSRF (nie GET)
+- `$app->get()` nie `addRoute()` — sprawdzaj istniejące wzorce routingu
+- Nested transactions w testach: `rollbackAll()` nie pojedynczy `rollback()`
+- `TickTask::command()` uruchamia przez shell — `;` i `&&` wykonywane, wymaga allowlisty/escaping
+- CSP: `style-src 'unsafe-inline'` wymagane (error pages, DebugBar); scripts bez `unsafe-inline`
+- `trusted_proxies` = exact IPs lub resolvable hostnames (np. `infra_caddy`), nie CIDR
+- Cache: jeden backend per request (APCu-only gdy dostępny, file-only bez APCu)
+- OPcache preload: `require` nie `opcache_compile_file`
+- `Tick`: `tryLock()` = flock only; `between()` wspiera okna przez północ; `inTimeWindow(?string $now)` testowalny

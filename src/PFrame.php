@@ -91,7 +91,47 @@ namespace PFrame {
         /** @param list<string> $trustedProxies */
         public static function fromGlobalsWithProxies(array $trustedProxies = []): static {
             $headers = self::parseServerHeaders($_SERVER);
+            $trustedProxies = self::resolveTrustedProxies($trustedProxies);
             return self::buildFromGlobals(self::resolveIp($_SERVER, $headers, $trustedProxies), $headers);
+        }
+
+        /**
+         * @param list<string> $trustedProxies
+         * @return list<string>
+         */
+        public static function resolveTrustedProxies(array $trustedProxies): array {
+            $resolved = [];
+            foreach ($trustedProxies as $proxy) {
+                $proxy = trim($proxy);
+                if ($proxy === '') {
+                    continue;
+                }
+                if (filter_var($proxy, FILTER_VALIDATE_IP)) {
+                    $resolved[$proxy] = true;
+                    continue;
+                }
+                foreach (self::resolveHostname($proxy) as $ip) {
+                    $resolved[$ip] = true;
+                }
+            }
+
+            return array_keys($resolved);
+        }
+
+        /**
+         * @return list<string>
+         */
+        private static function resolveHostname(string $host): array {
+            if (!preg_match('/^[A-Za-z0-9_.-]+$/', $host)) {
+                return [];
+            }
+
+            $addresses = gethostbynamel($host);
+            if (!is_array($addresses)) {
+                return [];
+            }
+
+            return array_values(array_filter($addresses, static fn(string $ip): bool => filter_var($ip, FILTER_VALIDATE_IP) !== false));
         }
 
         /** @param array<string, string>|null $headers */
@@ -1079,6 +1119,8 @@ namespace PFrame {
             if (!is_array($trusted) || $trusted === []) {
                 return false;
             }
+            $trusted = array_values(array_filter($trusted, static fn(mixed $ip): bool => is_string($ip) && $ip !== ''));
+            $trusted = Request::resolveTrustedProxies($trusted);
             $remote = (string) ($request->server['REMOTE_ADDR'] ?? '');
             return $remote !== '' && in_array($remote, $trusted, true);
         }

@@ -44,6 +44,16 @@ class RequestTest extends TestCase {
         $this->assertSame('203.0.113.5', $req->ip);
     }
 
+    public function testFromGlobalsTrustedProxyHostnameUsesForwardedFor(): void {
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/';
+        $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
+        $_SERVER['HTTP_X_FORWARDED_FOR'] = '203.0.113.5, 127.0.0.1';
+
+        $req = Request::fromGlobalsWithProxies(['localhost']);
+        $this->assertSame('203.0.113.5', $req->ip);
+    }
+
     public function testFromGlobalsUntrustedProxyIgnoresForwardedFor(): void {
         $_SERVER['REQUEST_METHOD'] = 'GET';
         $_SERVER['REQUEST_URI'] = '/';
