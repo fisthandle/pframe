@@ -2,11 +2,11 @@
 
 @/home/pawel/dev/infra/docs/rules/php-critical.md
 
-Single-file PHP 8.4+ micro-framework. Zero dependencies, copy-paste deployment.
+Single-file PHP 8.4+ micro-framework. Zero runtime dependencies, copy-paste deployment.
 
 ## Architektura
 
-- **Jeden plik:** `src/PFrame.php` — cały framework (~2800 LOC)
+- **Jeden plik:** `src/PFrame.php` — cały framework (~3300 LOC)
 - **Namespace:** `PFrame` (klasy) + globalne helpery w `namespace {}`
 - **Brak mail:** do maili używamy PHPMailer (zewnętrznie)
 - **Fasada:** `PFrame\Base` — projekty definiują `class P1 extends \PFrame\Base`
@@ -86,9 +86,11 @@ Key rules:
 ## Testy
 
 bin/test profiles: `quick|full|ci|coverage|contracts|e2e|ui`
-- `bin/test quick` — szybkie unit testy
-- `bin/test full` — pełny suite
+- `bin/test quick` — składnia + Unit + Integration
+- `bin/test full` — quick + Contracts + PHPStan
 - `composer test` = alias do `bin/test quick`
+
+PHPUnit 11.5 nie obsługuje `-v`; gdy potrzebny jest szczegółowy przebieg, użyj `--debug`.
 
 ## Gotchas
 
@@ -107,3 +109,16 @@ bin/test profiles: `quick|full|ci|coverage|contracts|e2e|ui`
 - Cache: jeden backend per request (APCu-only gdy dostępny, file-only bez APCu)
 - OPcache preload: `require` nie `opcache_compile_file`
 - `Tick`: `tryLock()` = flock only; `between()` wspiera okna przez północ; `inTimeWindow(?string $now)` testowalny
+
+## Konwencje i zakres
+
+- Zachowuj 1TBS/K&R (otwierający nawias w tej samej linii) oraz polskie komunikaty użytkowe.
+- Null-safe wrappery na funkcje PHP mają sufiks `S` (`trimS`, `countS`, `strtotimeS`). Nie twórz równoległej konwencji.
+- `src/PFrame.php` jest źródłem prawdy. Przy zmianie SQL zaktualizuj testy, które celowo asertują literalne zapytania; po nieudanym patchu najpierw przeczytaj świeży diff i bieżący fragment pliku.
+- `example/` jest ignorowane przez Git. Jeśli świadomie zmieniasz demo, waliduj je osobno i nie zakładaj, że pojawi się w `git status`.
+
+## Wiedza i stan pracy
+
+- Ten rootowy `CLAUDE.md` jest kanoniczną instrukcją. `.codex/napkin.md` jest krótkim inboxem niepromowanych korekt; usuń wpis po utrwaleniu go w kodzie, teście lub tutaj.
+- Dłuższe, zweryfikowane rozwiązanie umieść w dokumentacji tematycznej. Jeśli powstanie backlog, użyj jednego `tasks/TODO.md`.
+- Nowy plan w `docs/plans/` musi mieć status `draft`, `approved`, `active`, `done` albo `superseded`. Nie zakładaj, że istniejący plan jest aktywny bez porównania z kodem.
