@@ -75,8 +75,8 @@ class ViewTest extends TestCase {
         try {
             $view->render('throw.php');
             $this->fail('Expected RuntimeException');
-        } catch (\RuntimeException) {
-            // expected
+        } catch (\RuntimeException $e) {
+            $this->assertSame('boom', $e->getMessage());
         } finally {
             @unlink($dir . '/throw.php');
             @rmdir($dir);

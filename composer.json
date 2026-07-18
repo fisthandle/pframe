@@ -4,10 +4,17 @@
     "type": "library",
     "license": "MIT",
     "require": {
-        "php": ">=8.4"
+        "php": ">=8.4",
+        "ext-mbstring": "*",
+        "ext-pdo": "*"
+    },
+    "suggest": {
+        "ext-pdo_mysql": "Required when PFrame uses MySQL or MariaDB",
+        "ext-pdo_sqlite": "Required when PFrame uses SQLite"
     },
     "require-dev": {
-        "phpunit/phpunit": "^11.0",
+        "ext-simplexml": "*",
+        "phpunit/phpunit": "^13.0",
         "phpstan/phpstan": "^2.0"
     },
     "autoload": {
@@ -19,6 +26,19 @@
         "psr-4": {
             "PFrame\\Tests\\": "tests/"
         }
+    },
+    "archive": {
+        "exclude": [
+            "/.*",
+            "/*",
+            "!/LICENSE",
+            "!/README.md",
+            "!/composer.json",
+            "!/db",
+            "!/docs",
+            "!/src",
+            "/docs/plans"
+        ]
     },
     "scripts": {
         "test": "./bin/test quick",

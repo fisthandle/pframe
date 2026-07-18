@@ -184,6 +184,32 @@ class DbTest extends TestCase {
         $this->assertSame(2, $this->db->count());
     }
 
+    public function testCountTracksRowsFetchedBySelectHelpers(): void {
+        $this->db->var('SELECT name FROM users WHERE id = 1');
+        $this->assertSame(1, $this->db->count());
+
+        $this->db->var('SELECT name FROM users WHERE id = 999');
+        $this->assertSame(0, $this->db->count());
+
+        $this->db->row('SELECT * FROM users WHERE id = 1');
+        $this->assertSame(1, $this->db->count());
+
+        $this->db->row('SELECT * FROM users WHERE id = 999');
+        $this->assertSame(0, $this->db->count());
+
+        $this->db->results('SELECT * FROM users');
+        $this->assertSame(2, $this->db->count());
+
+        $this->db->results('SELECT * FROM users WHERE id = 999');
+        $this->assertSame(0, $this->db->count());
+
+        $this->db->col('SELECT name FROM users');
+        $this->assertSame(2, $this->db->count());
+
+        $this->db->col('SELECT name FROM users WHERE id = 999');
+        $this->assertSame(0, $this->db->count());
+    }
+
     public function testPlaceholders(): void {
         $this->assertSame('?, ?, ?', $this->db->placeholders([1, 2, 3]));
     }

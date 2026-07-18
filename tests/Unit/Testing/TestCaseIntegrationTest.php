@@ -34,21 +34,4 @@ class TestCaseIntegrationTest extends TestCase {
     public function testSessionResetBetweenTests(): void {
         $this->assertEmpty($_SESSION);
     }
-
-    public function testTestCaseHasResponseAssertions(): void {
-        $this->assertTrue(method_exists($this, 'assertOk'));
-        $this->assertTrue(method_exists($this, 'assertRedirect'));
-        $this->assertTrue(method_exists($this, 'assertSee'));
-    }
-
-    public function testTestCaseHasFlashAssertions(): void {
-        $this->assertTrue(method_exists($this, 'assertFlash'));
-        $this->assertTrue(method_exists($this, 'assertNoFlash'));
-    }
-
-    public function testTestCaseHasSessionAssertions(): void {
-        $this->assertTrue(method_exists($this, 'assertAuthenticated'));
-        $this->assertTrue(method_exists($this, 'assertGuest'));
-        $this->assertTrue(method_exists($this, 'assertSessionHas'));
-    }
 }

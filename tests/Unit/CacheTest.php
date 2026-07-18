@@ -98,6 +98,29 @@ class CacheTest extends TestCase {
         }
     }
 
+    public function testRateCheckFailsClosedWhenStateCannotBePersisted(): void {
+        if ($this->hasApcu) {
+            $this->markTestSkipped('This regression exercises the file backend.');
+        }
+
+        $dir = sys_get_temp_dir() . '/p1_cache_test_persist_' . uniqid('', true);
+        mkdir($dir, 0755, true);
+        $lockFile = $dir . '/' . md5('rl:login:state-failure') . '.lock';
+        touch($lockFile);
+        chmod($lockFile, 0666);
+        $cache = new Cache($dir);
+        chmod($dir, 0555);
+
+        try {
+            $this->assertSame(1, $cache->rateCheck('login', 'state-failure', 3, 60));
+            $this->assertSame([], glob($dir . '/*.cache') ?: []);
+        } finally {
+            chmod($dir, 0755);
+            unlink($lockFile);
+            rmdir($dir);
+        }
+    }
+
     public function testExpiresData(): void {
         $file = $this->dir . '/' . md5('ttl') . '.cache';
         file_put_contents($file, serialize(['value' => 'v', 'ttl' => 1, 'time' => time() - 5]));
@@ -128,6 +151,7 @@ class CacheTest extends TestCase {
         file_put_contents((string) $file, 'not serialized');
 
         $this->assertSame('d', $this->cache->get('x', 'd'));
+        $this->assertFileExists((string) $file, 'Reader must not unlink a file that may be replaced concurrently');
     }
 
     public function testClearRemovesRateLimitLockFiles(): void {

@@ -7,6 +7,7 @@ use PFrame\App;
 use PFrame\Controller;
 use PFrame\Csrf;
 use PFrame\Response;
+use PFrame\View;
 use PFrame\Testing\HttpTesting;
 use PFrame\Testing\ResponseAssertions;
 use PHPUnit\Framework\TestCase;
@@ -20,6 +21,7 @@ class HttpTestingTest extends TestCase {
         parent::setUp();
         $_SESSION = [];
         $this->app = new App();
+        $this->app->setConfig('db', ['dsn' => 'sqlite::memory:', 'log_queries' => true]);
         $this->app->get('/', HttpTestingHomeCtrl::class, 'index');
         $this->app->get('/user/{id}', HttpTestingUserCtrl::class, 'show');
         $this->app->post('/submit', HttpTestingFormCtrl::class, 'store');
@@ -28,6 +30,8 @@ class HttpTestingTest extends TestCase {
         $this->app->route('DELETE', '/item/{id}', HttpTestingFormCtrl::class, 'destroy');
         $this->app->get('/json', HttpTestingJsonCtrl::class, 'index');
         $this->app->post('/json', HttpTestingJsonCtrl::class, 'store');
+        $this->app->get('/inspect', HttpTestingInspectCtrl::class, 'index');
+        $this->app->get('/query-count', HttpTestingQueryCtrl::class, 'index');
     }
 
     protected function tearDown(): void {
@@ -110,13 +114,15 @@ class HttpTestingTest extends TestCase {
     }
 
     public function testWithHeadersSendsCustomHeaders(): void {
-        $this->withHeaders(['X-Custom' => 'test'])->get('/');
+        $this->withHeaders(['X-Custom' => 'test'])->get('/inspect');
         $this->assertOk();
+        $this->assertJsonContains(['custom' => 'test']);
     }
 
     public function testAsAjaxSetsXmlHttpRequest(): void {
-        $this->asAjax()->get('/');
+        $this->asAjax()->get('/inspect');
         $this->assertOk();
+        $this->assertJsonContains(['is_ajax' => true]);
     }
 
     public function testWithoutCsrfResetsAfterRequest(): void {
@@ -124,6 +130,54 @@ class HttpTestingTest extends TestCase {
         $this->assertForbidden();
 
         $this->post('/submit', ['title' => 'Y']);
+        $this->assertOk();
+    }
+
+    public function testEachCallResetsRequestDiagnosticsWithoutRollingBackTestTransaction(): void {
+        $db = $this->app->db();
+        $db->var('SELECT 1');
+        $this->app->setLastView(new View(__DIR__ . '/../../fixtures/templates'));
+        $db->begin();
+
+        try {
+            $this->get('/query-count');
+            $this->assertJsonContains(['query_count' => 1, 'last_view_is_null' => true]);
+
+            $this->get('/query-count');
+            $this->assertJsonContains(['query_count' => 1, 'last_view_is_null' => true]);
+            $this->assertTrue($db->trans(), 'HTTP helper must preserve the surrounding test transaction');
+        } finally {
+            if ($db->trans()) {
+                $db->rollbackAll();
+            }
+            $db->resetRequestState();
+        }
+    }
+
+    public function testPostJsonFailureResetsFluentState(): void {
+        $stream = fopen('php://memory', 'r');
+        $this->assertNotFalse($stream);
+        if ($stream === false) {
+            return;
+        }
+
+        $error = null;
+        try {
+            $this->withHeaders(['X-Custom' => 'must-not-leak'])
+                ->withoutCsrf()
+                ->postJson('/json', ['stream' => $stream]);
+        } catch (\JsonException $e) {
+            $error = $e;
+        } finally {
+            fclose($stream);
+        }
+
+        $this->assertInstanceOf(\JsonException::class, $error);
+
+        $this->get('/inspect');
+        $this->assertJsonContains(['custom' => null, 'is_ajax' => false]);
+
+        $this->post('/submit', ['title' => 'state-reset']);
         $this->assertOk();
     }
 }
@@ -178,6 +232,29 @@ class HttpTestingJsonCtrl extends Controller {
             'is_ajax' => $this->request->isAjax(),
             'content_type' => $this->request->header('Content-Type'),
             'csrf_source' => $source,
+        ]);
+    }
+}
+
+class HttpTestingInspectCtrl extends Controller {
+    public function index(): Response {
+        return Response::json([
+            'custom' => $this->request->header('X-Custom'),
+            'is_ajax' => $this->request->isAjax(),
+        ]);
+    }
+}
+
+class HttpTestingQueryCtrl extends Controller {
+    public function index(): Response {
+        $app = App::instance();
+        $lastViewIsNull = $app->lastView() === null;
+        $db = $app->db();
+        $db->var('SELECT 1');
+
+        return Response::json([
+            'query_count' => $db->queryCount(),
+            'last_view_is_null' => $lastViewIsNull,
         ]);
     }
 }

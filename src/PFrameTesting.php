@@ -209,7 +209,11 @@ trait HttpTesting {
     protected function postJson(string $path, array $data = []): Response {
         $this->extraHeaders['Content-Type'] = 'application/json';
         $this->extraHeaders['X-Requested-With'] = 'XMLHttpRequest';
-        return $this->call('POST', $path, body: json_encode($data, JSON_THROW_ON_ERROR));
+        try {
+            return $this->call('POST', $path, body: json_encode($data, JSON_THROW_ON_ERROR));
+        } finally {
+            $this->resetHttpTestingState();
+        }
     }
 
     protected function withHeaders(array $headers): static {
@@ -234,33 +238,39 @@ trait HttpTesting {
         array $post = [],
         string $body = '',
     ): Response {
-        $method = strtoupper($method);
-
-        if ($this->withCsrf && in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE'], true)) {
-            if ($body !== '') {
-                $this->extraHeaders['X-Csrf-Token'] ??= Csrf::token();
-            } else {
-                $post[Csrf::FIELD_NAME] ??= Csrf::token();
-            }
-        }
-
-        $request = new Request(
-            method: $method,
-            path: $path,
-            query: $query,
-            post: $post,
-            headers: $this->extraHeaders,
-            body: $body,
-        );
-
         try {
+            $this->app->resetRequestState();
+            $this->app->dbIfInitialized()?->resetRequestState();
+            $method = strtoupper($method);
+
+            if ($this->withCsrf && in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE'], true)) {
+                if ($body !== '') {
+                    $this->extraHeaders['X-Csrf-Token'] ??= Csrf::token();
+                } else {
+                    $post[Csrf::FIELD_NAME] ??= Csrf::token();
+                }
+            }
+
+            $request = new Request(
+                method: $method,
+                path: $path,
+                query: $query,
+                post: $post,
+                headers: $this->extraHeaders,
+                body: $body,
+            );
+
             $this->response = $this->app->handle($request);
         } finally {
-            $this->withCsrf = true;
-            $this->extraHeaders = [];
+            $this->resetHttpTestingState();
         }
 
         return $this->response;
+    }
+
+    private function resetHttpTestingState(): void {
+        $this->withCsrf = true;
+        $this->extraHeaders = [];
     }
 }
 
@@ -340,23 +350,28 @@ trait SessionAssertions {
 
 /** @phpstan-ignore trait.unused */
 trait RefreshDatabase {
-    private static bool $migrated = false;
+    /** @var \WeakMap<\PDO, array<string, true>>|null */
+    private static ?\WeakMap $migrated = null;
 
     abstract protected function migrationPath(): string;
 
     protected function bootRefreshDatabase(): void {
-        if (self::$migrated) {
+        $db = Base::db();
+        $pdo = $db->pdo();
+        $path = $this->migrationPath();
+        $migrationKey = realpath($path) ?: rtrim($path, '/');
+        $migrations = self::$migrated ??= new \WeakMap();
+        $migratedPaths = $migrations[$pdo] ?? [];
+        if (isset($migratedPaths[$migrationKey])) {
             return;
         }
 
-        $path = $this->migrationPath();
         $files = glob($path . '/*.sql');
         if ($files === false || $files === []) {
             throw new \RuntimeException("No SQL files found in '$path'");
         }
         sort($files, SORT_NATURAL);
 
-        $db = Base::db();
         foreach ($files as $file) {
             $sql = file_get_contents($file);
             if ($sql === false) {
@@ -368,7 +383,8 @@ trait RefreshDatabase {
             $db->pdo()->exec($sql);
         }
 
-        self::$migrated = true;
+        $migratedPaths[$migrationKey] = true;
+        $migrations[$pdo] = $migratedPaths;
     }
 }
 

@@ -3,7 +3,7 @@
 /.phpunit.result.cache
 /coverage/
 /.claude/
-**/CLAUDE.md
+CLAUDE.md
 !/CLAUDE.md
 example/
 build/

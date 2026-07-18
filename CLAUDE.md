@@ -6,7 +6,7 @@ Single-file PHP 8.4+ micro-framework. Zero runtime dependencies, copy-paste depl
 
 ## Architektura
 
-- **Jeden plik:** `src/PFrame.php` — cały framework (~3300 LOC)
+- **Jeden plik:** `src/PFrame.php` — cały framework (~3700 LOC)
 - **Namespace:** `PFrame` (klasy) + globalne helpery w `namespace {}`
 - **Brak mail:** do maili używamy PHPMailer (zewnętrznie)
 - **Fasada:** `PFrame\Base` — projekty definiują `class P1 extends \PFrame\Base`
@@ -23,7 +23,8 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 
 ## DB
 
-- `db/sessions.sql` — schemat sesji (MySQL)
+- `db/sessions.sql` — schemat sesji (MySQL/MariaDB)
+- `db/sessions.sqlite.sql` — schemat sesji (SQLite)
 - Session handler wspiera SQLite (INSERT OR REPLACE) i MySQL (ON DUPLICATE KEY)
 - `Db::trans()` zwraca status aktywnej transakcji
 - `Db::count()` zwraca row count ostatniego zapytania (także dla SELECT)
@@ -48,27 +49,21 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 
 ## Worker Mode (FrankenPHP)
 
-`App::resetRequestState()` + `Db::resetRequestState()` — zachowują routes/config/db/PDO, czyszczą timery/log/rowCount.
+W klasycznym FPM najpierw wywołaj `$session->register()`, potem `session_start()`, a na końcu
+`$app->run()`. Domyślne `secure=true` wymaga HTTPS; wyłączenie jest dopuszczalne tylko jawnie
+dla lokalnego HTTP.
+
+W workerze zarejestruj handler sesji raz podczas bootstrapu. `runWorkerRequest()` zachowuje
+routes/config/db/PDO, a per request czyści stan, zabezpiecza transakcje oraz otwiera i zamyka sesję.
 
 Worker entrypoint pattern:
 
 ```php
+$session = new \PFrame\Session($app->db(), advisory: true, lockTimeout: 5);
+$session->register();
+
 $handler = static function () use ($app): void {
-    try {
-        $app->resetRequestState();
-        session_start();
-        $app->run();
-    } finally {
-        $dbConfig = $app->config('db');
-        if (is_array($dbConfig)) {
-            $db = $app->db();
-            if ($db->trans()) { $db->rollbackAll(); }
-            $db->resetRequestState();
-        }
-        if (session_status() === PHP_SESSION_ACTIVE) {
-            session_write_close();
-        }
-    }
+    $app->runWorkerRequest(startSession: true);
 };
 
 if (function_exists('frankenphp_handle_request')) {
@@ -79,18 +74,22 @@ if (function_exists('frankenphp_handle_request')) {
 ```
 
 Key rules:
-- `session_start()` musi być w per-request handlerze, nie podczas bootstrap
-- rollback transakcji w `finally` zapobiega tx leak
-- `Db::resetRequestState()` wywołuj zawsze (nie warunkuj `log_queries`)
+- `Session::register()` podczas bootstrapu, `session_start()` per request przez `runWorkerRequest()`
+- preflight i `finally` robią `rollbackAll()` oraz reset DB, więc tx/log/rowCount nie przeciekają
+- bez sesji użyj domyślnego `startSession: false`
 
 ## Testy
 
 bin/test profiles: `quick|full|ci|coverage|contracts|e2e|ui`
 - `bin/test quick` — składnia + Unit + Integration
 - `bin/test full` — quick + Contracts + PHPStan
+- `bin/test ci` — full + coverage z minimalnym pokryciem linii 85%; brak drivera kończy profil błędem
 - `composer test` = alias do `bin/test quick`
 
-PHPUnit 11.5 nie obsługuje `-v`; gdy potrzebny jest szczegółowy przebieg, użyj `--debug`.
+`src/PFrameTesting.php` zależy od PHPUnit i nie jest częścią runtime autoload. Konsument kopiuje
+ten plik osobno i wymaga go jawnie w `tests/bootstrap.php` po `vendor/autoload.php`.
+
+PHPUnit 13 nie obsługuje `-v`; gdy potrzebny jest szczegółowy przebieg, użyj `--debug`.
 
 ## Gotchas
 

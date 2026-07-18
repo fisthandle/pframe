@@ -1,8 +1,8 @@
 # PFrame
 
-Single-file PHP 8.4+ micro-framework. Zero dependencies, copy-paste deployment.
+Single-file PHP 8.4+ micro-framework. Zero runtime package dependencies, copy-paste deployment.
 
-One file. 19 classes. Single-file core in `src/PFrame.php` (~2800 LOC). Everything you need, nothing you don't.
+One file. 19 classes. Single-file core in `src/PFrame.php` (~3700 LOC). Everything you need, nothing you don't.
 
 ## Quick Start
 
@@ -29,6 +29,10 @@ class P1 extends \PFrame\Base {}
 $app = P1::app();
 $app->loadConfig(dirname(__DIR__) . '/config/app.php');
 
+$session = new \PFrame\Session($app->db(), advisory: true, lockTimeout: 5);
+$session->register();
+session_start();
+
 $app->get('/', HomeController::class, 'index');
 $app->get('/users/{id}', UserController::class, 'show', name: 'user.show');
 $app->post('/login', AuthController::class, 'login');
@@ -43,6 +47,10 @@ $app->group('/admin', function (\PFrame\App $app) use ($csrf): void {
 
 $app->run();
 ```
+
+This is the classic one-request-per-process lifecycle. Call `Session::register()` before
+`session_start()` and before any output. The secure-cookie default assumes HTTPS; for a local
+plain-HTTP development server, explicitly pass `['secure' => false]` to `register()`.
 
 ```php
 <?php
@@ -180,7 +188,8 @@ $count = P1::db()->count(); // last affected/returned row count
 $sqlLog = P1::db()->log();  // "(X.XXms) SQL" lines
 ```
 
-DB sessions require the `sessions` table -- see `db/sessions.sql`.
+DB sessions require the `sessions` table. Use `db/sessions.sql` for MySQL/MariaDB or
+`db/sessions.sqlite.sql` for SQLite.
 
 ### Session
 
@@ -188,7 +197,8 @@ Database-backed handler with advisory locks (MySQL), lazy-write optimization, an
 
 ```php
 $session = new \PFrame\Session($db, advisory: true, lockTimeout: 5);
-session_set_save_handler($session);
+$session->register();
+session_start();
 ```
 
 - **Lazy-write**: when session data is unchanged between `read()` and `write()`, only the timestamp is updated (lightweight `UPDATE` instead of full `INSERT OR REPLACE`)
@@ -206,7 +216,7 @@ Built-in:
 - Session hardening (strict mode, httponly, samesite)
 - Path traversal protection in template rendering
 - Open redirect prevention (blocks `//`, `\`, scheme-without-authority, non-http schemes)
-- Trusted proxy IP resolution (nearest untrusted IP from `X-Forwarded-For`)
+- Trusted proxy resolution from exact IPs or resolvable hostnames (nearest untrusted IP from `X-Forwarded-For`)
 
 ```php
 $app->addSecurityHeaders(); // CSP, XFO, XCTO, Referrer-Policy, Permissions-Policy, HSTS
@@ -249,25 +259,36 @@ Notes:
 
 ### Trusted Proxies
 
-`Request::fromGlobalsWithProxies()` trusts forwarded headers only for exact IPs from `trusted_proxies`.
+`Request::fromGlobalsWithProxies()` trusts forwarded headers only for exact IPs or resolvable
+hostnames from `trusted_proxies`.
 
 ```php
 return [
-    'trusted_proxies' => ['127.0.0.1', '172.20.0.5'],
+    'trusted_proxies' => ['127.0.0.1', '172.20.0.5', 'infra_caddy'],
 ];
 ```
 
-CIDR ranges are not supported. Use exact addresses.
+CIDR ranges are not supported. Hostnames are resolved to their current IPv4 addresses.
 
 ### Worker Mode (FrankenPHP)
 
-Use `runWorkerRequest()` when running long-lived workers. It resets request-scoped state,
-rolls back leaked DB transactions, resets DB debug counters/logs, and closes the session in `finally`.
+Register the session handler once during worker bootstrap, then use `runWorkerRequest()` for each
+request. It resets request-scoped state, rolls back leaked DB transactions, resets DB debug
+counters/logs, starts the session per request, and closes it in `finally`.
 
 ```php
+$session = new \PFrame\Session($app->db(), advisory: true, lockTimeout: 5);
+$session->register();
+
 $handler = static function () use ($app): void {
     $app->runWorkerRequest(startSession: true);
 };
+
+if (function_exists('frankenphp_handle_request')) {
+    frankenphp_handle_request($handler);
+} else {
+    $handler();
+}
 ```
 
 If your worker entrypoint does not use PHP sessions, call `$app->runWorkerRequest()` with
@@ -304,6 +325,15 @@ Failed tasks are retried on subsequent dispatches until `retries()` is exhausted
 
 `src/PFrameTesting.php` provides PHPUnit traits for integration testing:
 
+The testing helpers intentionally are not part of Composer runtime autoload because they depend on
+PHPUnit. Copy `src/PFrameTesting.php` with the core (or use the file from the installed package) and
+require it explicitly after PHPUnit's autoloader in `tests/bootstrap.php`:
+
+```php
+require dirname(__DIR__) . '/vendor/autoload.php';
+require dirname(__DIR__) . '/lib/PFrameTesting.php';
+```
+
 | Trait | Purpose |
 |-------|---------|
 | `DatabaseTransactions` | Wraps each test in a transaction, rolls back all levels (including savepoints) on teardown |
@@ -328,7 +358,9 @@ For F3-to-PFrame migration scenarios, the framework now includes:
 ## Requirements
 
 - PHP 8.4+
-- PDO (MySQL or SQLite)
+- `ext-mbstring`
+- `ext-pdo` plus `pdo_mysql` or `pdo_sqlite` for the selected database
+- APCu is optional; without it `Cache` uses its file backend
 
 ## Tests
 
@@ -342,8 +374,8 @@ Test standard v1 profiles:
 ```bash
 ./bin/test quick      # syntax + unit + integration
 ./bin/test full       # quick + contracts + phpstan
-./bin/test ci         # full + coverage report
-./bin/test coverage   # coverage artifacts only
+./bin/test ci         # full + coverage report, minimum 85% line coverage
+./bin/test coverage   # coverage artifacts, minimum 85% line coverage
 ./bin/test contracts  # governance/contracts suite
 ./bin/test e2e        # not applicable in framework repo (success)
 ./bin/test ui         # not applicable in framework repo (success)
@@ -363,9 +395,9 @@ composer test:coverage
 composer phpstan
 ```
 
-Coverage artifacts are generated in `build/coverage/` (`clover.xml`, `html/`). If no coverage
-driver is available (`xdebug`, `pcov`, `phpdbg`), `coverage`/`ci` print a clear fallback message
-and continue successfully.
+Coverage artifacts are generated in `build/coverage/` (`clover.xml`, `html/`). The `coverage` and
+`ci` profiles fail if no coverage driver (`xdebug`, `pcov`, `phpdbg`) is available or line coverage
+falls below 85%.
 
 ## License
 

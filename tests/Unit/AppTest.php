@@ -271,6 +271,18 @@ class AppTest extends TestCase {
         $this->assertSame('max-age=63072000; includeSubDomains; preload', $response->headers['Strict-Transport-Security'] ?? null);
     }
 
+    public function testSecurityHeadersAlsoApplyToErrorResponses(): void {
+        $app = new App();
+        $app->addSecurityHeaders();
+
+        $response = $app->handle(new Request(method: 'GET', path: '/missing', server: ['HTTPS' => 'on']));
+
+        $this->assertSame(404, $response->status);
+        $this->assertSame('DENY', $response->headers['X-Frame-Options'] ?? null);
+        $this->assertArrayHasKey('Content-Security-Policy', $response->headers);
+        $this->assertArrayHasKey('Strict-Transport-Security', $response->headers);
+    }
+
     public function testSecurityHeadersDoesNotTrustForwardedProtoFromUntrustedProxy(): void {
         $app = new App();
         $app->setConfig('trusted_proxies', ['10.0.0.1']);
@@ -309,6 +321,24 @@ class AppTest extends TestCase {
             headers: ['X-Forwarded-Proto' => 'https'],
         ));
         $this->assertSame('max-age=63072000; includeSubDomains; preload', $response->headers['Strict-Transport-Security'] ?? null);
+    }
+
+    public function testSecurityHeadersReuseTrustedProxiesResolvedForRequest(): void {
+        $app = new App();
+        $app->setConfig('trusted_proxies', ['203.0.113.99']);
+        $app->addSecurityHeaders();
+        $app->get('/', HelloStub::class, 'index');
+
+        $response = $app->handle(new Request(
+            method: 'GET',
+            path: '/',
+            server: ['REMOTE_ADDR' => '10.0.0.1'],
+            headers: ['X-Forwarded-Proto' => 'https'],
+            trustedProxies: ['10.0.0.1'],
+            trustedProxiesResolved: true,
+        ));
+
+        $this->assertArrayHasKey('Strict-Transport-Security', $response->headers);
     }
 
     public function testSecurityHeadersTrustForwardedProtoFromTrustedProxyHostname(): void {
@@ -431,6 +461,39 @@ class AppTest extends TestCase {
         $this->assertSame('hello world', $response->body);
     }
 
+    public function testHeadResponseSuppressesEntityBody(): void {
+        $app = new App();
+        $app->get('/hello', HelloStub::class, 'index');
+
+        $response = $app->handle(new Request(method: 'HEAD', path: '/hello'));
+
+        $this->assertSame(200, $response->status);
+        $this->assertSame('', $response->body);
+        $this->assertNull($response->filePath);
+    }
+
+    public function testUnreadableFileResponseBecomes500BeforeSend(): void {
+        $app = new App();
+        $app->get('/download', MissingFileCtrl::class, 'download');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/download'));
+
+        $this->assertSame(500, $response->status);
+        $this->assertStringContainsString('Internal Server Error', $response->body);
+    }
+
+    public function testOversizedRequestBodyIsMappedTo413BeforeDispatch(): void {
+        HelloStub::$runs = 0;
+        $app = new App();
+        $app->post('/submit', HelloStub::class, 'submit');
+
+        $response = $app->handle(new Request(method: 'POST', path: '/submit', bodyTooLarge: true));
+
+        $this->assertSame(413, $response->status);
+        $this->assertSame(0, HelloStub::$runs);
+        $this->assertStringContainsString('Payload Too Large', $response->body);
+    }
+
     public function testElapsedTime(): void {
         $app = new App();
         usleep(5000); // 5ms
@@ -520,6 +583,7 @@ class AppTest extends TestCase {
 }
 
 class HelloStub {
+    public static int $runs = 0;
     public Request $request;
 
     public function index(): Response {
@@ -531,6 +595,7 @@ class HelloStub {
     }
 
     public function submit(): Response {
+        self::$runs++;
         return new Response('submitted');
     }
 }
@@ -638,6 +703,12 @@ class WarningCtrl {
 class HeaderCtrl {
     public function customCsp(): Response {
         return new Response('ok', headers: ['content-security-policy' => "default-src 'none'"]);
+    }
+}
+
+class MissingFileCtrl {
+    public function download(): Response {
+        return Response::file('/definitely/missing/pframe-response-test');
     }
 }
 

@@ -4,37 +4,113 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   php-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      PFRAME_EXPECT_CACHE_BACKEND: file
+      PFRAME_MYSQL_DSN: mysql:host=127.0.0.1;port=3306;dbname=pframe_test;charset=utf8mb4
+      PFRAME_MYSQL_USER: pframe
+      PFRAME_MYSQL_PASS: pframe
+      PFRAME_REQUIRE_MYSQL: '1'
+
+    services:
+      mysql:
+        image: mysql@sha256:c592c15aaf4a1961e15d82eb31ea5987dda862d1c4b1e93424438c0e91dc1f8d # 8.4.10, official mysql:8.4
+        env:
+          MYSQL_DATABASE: pframe_test
+          MYSQL_USER: pframe
+          MYSQL_PASSWORD: pframe
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
           php-version: '8.4'
+          extensions: mbstring, pdo_mysql, pdo_sqlite, simplexml
           coverage: xdebug
+          tools: composer:2.10.2
 
       - name: Cache composer dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.composer/cache/files
-          key: composer-${{ runner.os }}-${{ hashFiles('composer.lock') }}
-          restore-keys: composer-${{ runner.os }}-
+          key: composer-${{ runner.os }}-php84-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-php84-
+
+      - name: Validate package
+        run: composer validate --strict
 
       - name: Install dependencies
         run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Audit dependencies and platform
+        run: |
+          composer audit --locked --no-interaction
+          composer check-platform-reqs --no-dev
 
       - name: Run test standard v1
         run: ./bin/test ci
 
       - name: Upload coverage artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage
           path: build/coverage
-          if-no-files-found: warn
+          if-no-files-found: error
+
+  cache-apcu:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Setup PHP with APCu
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.4'
+          extensions: apcu, mbstring, pdo_sqlite, simplexml
+          coverage: none
+          tools: composer:2.10.2
+
+      - name: Cache composer dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.composer/cache/files
+          key: composer-${{ runner.os }}-php84-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-php84-
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Run APCu cache and tick contracts
+        env:
+          PFRAME_EXPECT_CACHE_BACKEND: apcu
+        run: |
+          php -d apc.enable_cli=1 vendor/bin/phpunit \
+            tests/Integration/CacheBackendContractTest.php \
+            --do-not-cache-result
+          php -d apc.enable_cli=1 vendor/bin/phpunit \
+            tests/Unit/TickTest.php \
+            --filter testApcuMissUsesAndWarmsPersistedLastRunFile \
+            --do-not-cache-result

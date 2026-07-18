@@ -19,6 +19,19 @@ class RefreshDatabaseTest extends TestCase {
         return __DIR__ . '/../../fixtures/migrations';
     }
 
+    private function useDatabase(Db $db): void {
+        $app = new App();
+        $app->setDb($db);
+    }
+
+    private function restoreTestDatabase(): void {
+        if (self::$db === null) {
+            throw new \LogicException('Test database is not initialized.');
+        }
+        $this->useDatabase(self::$db);
+        $this->setUpDatabaseTransactions();
+    }
+
     protected function setUp(): void {
         if (self::$db === null) {
             self::$db = new Db(['dsn' => 'sqlite::memory:']);
@@ -48,9 +61,17 @@ class RefreshDatabaseTest extends TestCase {
         $this->assertSame('Joe', $row['name']);
     }
 
-    public function testTransactionRollbackKeepsSchemaButClearsData(): void {
+    public function testTransactionRollbackPreservesSchemaAndClearsData(): void {
         Base::exec('INSERT INTO users (name, email) VALUES (?, ?)', ['Ghost', 'ghost@x.com']);
         $this->assertSame(1, (int) Base::var('SELECT COUNT(*) FROM users WHERE name = ?', ['Ghost']));
+
+        $this->tearDownDatabaseTransactions();
+
+        $tables = Base::col("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'");
+        $this->assertContains('users', $tables);
+        $this->assertSame(0, (int) Base::var('SELECT COUNT(*) FROM users WHERE name = ?', ['Ghost']));
+
+        $this->setUpDatabaseTransactions();
     }
 
     public function testBootIsIdempotent(): void {
@@ -60,6 +81,7 @@ class RefreshDatabaseTest extends TestCase {
     }
 
     public function testBootThrowsWhenNoSqlFiles(): void {
+        $this->tearDownDatabaseTransactions();
         $app = new App();
         $app->setDb(new Db(['dsn' => 'sqlite::memory:']));
 
@@ -87,6 +109,71 @@ class RefreshDatabaseTest extends TestCase {
             $bootstrap->run();
         } finally {
             @rmdir($dir);
+            $this->restoreTestDatabase();
         }
+    }
+
+    public function testMigrationsRunForEachPdoInstance(): void {
+        $path = __DIR__ . '/../../fixtures/migrations';
+        $this->tearDownDatabaseTransactions();
+
+        try {
+            $firstDb = new Db(['dsn' => 'sqlite::memory:']);
+            $this->useDatabase($firstDb);
+            (new RefreshDatabaseHarness($path))->boot();
+            $this->assertContains('users', $firstDb->col("SELECT name FROM sqlite_master WHERE type='table'"));
+
+            $secondDb = new Db(['dsn' => 'sqlite::memory:']);
+            $this->useDatabase($secondDb);
+            (new RefreshDatabaseHarness($path))->boot();
+            $this->assertContains('users', $secondDb->col("SELECT name FROM sqlite_master WHERE type='table'"));
+        } finally {
+            $this->restoreTestDatabase();
+        }
+    }
+
+    public function testMigrationsRunForEachPathOnSamePdo(): void {
+        $root = sys_get_temp_dir() . '/pframe-migration-paths-' . bin2hex(random_bytes(6));
+        $firstPath = $root . '/first';
+        $secondPath = $root . '/second';
+        mkdir($firstPath, 0777, true);
+        mkdir($secondPath, 0777, true);
+        file_put_contents($firstPath . '/001-first.sql', 'CREATE TABLE first_path_table (id INTEGER PRIMARY KEY);');
+        file_put_contents($secondPath . '/001-second.sql', 'CREATE TABLE second_path_table (id INTEGER PRIMARY KEY);');
+        $this->tearDownDatabaseTransactions();
+
+        try {
+            $db = new Db(['dsn' => 'sqlite::memory:']);
+            $this->useDatabase($db);
+
+            (new RefreshDatabaseHarness($firstPath))->boot();
+            (new RefreshDatabaseHarness($secondPath))->boot();
+
+            $tables = $db->col("SELECT name FROM sqlite_master WHERE type='table'");
+            $this->assertContains('first_path_table', $tables);
+            $this->assertContains('second_path_table', $tables);
+        } finally {
+            @unlink($firstPath . '/001-first.sql');
+            @unlink($secondPath . '/001-second.sql');
+            @rmdir($firstPath);
+            @rmdir($secondPath);
+            @rmdir($root);
+            $this->restoreTestDatabase();
+        }
+    }
+}
+
+class RefreshDatabaseHarness {
+    use RefreshDatabase;
+
+    public function __construct(private readonly string $path) {
+    }
+
+    protected function migrationPath(): string {
+        return $this->path;
+    }
+
+    public function boot(): void {
+        $this->bootRefreshDatabase();
     }
 }

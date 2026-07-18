@@ -42,6 +42,8 @@ class RequestTest extends TestCase {
 
         $req = Request::fromGlobalsWithProxies(['10.0.0.1']);
         $this->assertSame('203.0.113.5', $req->ip);
+        $this->assertTrue($req->trustedProxiesResolved);
+        $this->assertSame(['10.0.0.1'], $req->trustedProxies);
     }
 
     public function testFromGlobalsTrustedProxyHostnameUsesForwardedFor(): void {
@@ -139,6 +141,45 @@ class RequestTest extends TestCase {
 
         $empty = new Request(method: 'POST', path: '/');
         $this->assertNull($empty->jsonBody());
+    }
+
+    public function testBodyStreamDetectsLimitPlusOneWithoutRetainingMultipart(): void {
+        $method = new \ReflectionMethod(Request::class, 'readBodyStream');
+        $stream = fopen('php://memory', 'w+b');
+        $this->assertIsResource($stream);
+        fwrite($stream, '123456');
+        rewind($stream);
+
+        $tooLarge = $method->invoke(null, $stream, 5, true);
+        $this->assertSame(['body' => '', 'too_large' => true], $tooLarge);
+        fclose($stream);
+
+        $multipart = fopen('php://memory', 'w+b');
+        $this->assertIsResource($multipart);
+        fwrite($multipart, '12345');
+        rewind($multipart);
+        $notCaptured = $method->invoke(null, $multipart, 5, false);
+        $this->assertSame(['body' => '', 'too_large' => false], $notCaptured);
+        fclose($multipart);
+
+        $disabled = fopen('php://memory', 'w+b');
+        $this->assertIsResource($disabled);
+        fwrite($disabled, 'x');
+        rewind($disabled);
+        $body = $method->invoke(null, $disabled, 0, true);
+        $this->assertSame(['body' => '', 'too_large' => true], $body);
+        fclose($disabled);
+
+        $requestMethod = new \ReflectionMethod(Request::class, 'readRequestBodyStream');
+        foreach ([[], ['Content-Length' => '2'], ['Content-Length' => 'invalid']] as $headers) {
+            $untrustedLength = fopen('php://memory', 'w+b');
+            $this->assertIsResource($untrustedLength);
+            fwrite($untrustedLength, '123456');
+            rewind($untrustedLength);
+            $result = $requestMethod->invoke(null, $untrustedLength, $headers, 5);
+            $this->assertSame(['body' => '', 'too_large' => true], $result);
+            fclose($untrustedLength);
+        }
     }
 
     public function testHeaderLookupCaseInsensitiveWithManualHeaders(): void {

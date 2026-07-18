@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace PFrame\Tests\Unit;
 
+use PFrame\App;
 use PFrame\Response;
 use PFrame\SseResponse;
 use PHPUnit\Framework\TestCase;
@@ -40,5 +41,32 @@ class SseResponseTest extends TestCase {
         $this->assertTrue($called);
         $this->assertStringContainsString('event: ping', $output);
         $this->assertStringContainsString('data: ok', $output);
+    }
+
+    public function testRunClosesFailedStreamWithoutHtmlFallback(): void {
+        $server = $_SERVER;
+        $_SERVER = ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/stream'];
+        $app = new App();
+        $app->get('/stream', FailedSseController::class, 'stream');
+
+        ob_start();
+        try {
+            $app->run();
+        } finally {
+            $output = (string) ob_get_clean();
+            $_SERVER = $server;
+        }
+
+        $this->assertSame("event: ready\n\n", $output);
+        $this->assertStringNotContainsString('<html', strtolower($output));
+    }
+}
+
+class FailedSseController {
+    public function stream(): SseResponse {
+        return new SseResponse(static function (): void {
+            echo "event: ready\n\n";
+            throw new \RuntimeException('stream failed');
+        });
     }
 }

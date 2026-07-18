@@ -49,6 +49,8 @@ namespace PFrame {
 
     /** @phpstan-consistent-constructor */
     class Request {
+        public const DEFAULT_MAX_BODY_BYTES = 8_388_608;
+
         /** @var array<string, mixed> */
         private array $params = [];
         /** @var array<string, string> */
@@ -64,6 +66,7 @@ namespace PFrame {
          * @param array<string, string> $headers
          * @param array<string, mixed> $cookies
          * @param array<string, mixed> $files
+         * @param list<string> $trustedProxies
          */
         public function __construct(
             public readonly string $method,
@@ -76,6 +79,9 @@ namespace PFrame {
             public readonly array $files = [],
             public readonly string $ip = '',
             public readonly string $body = '',
+            public readonly bool $bodyTooLarge = false,
+            public readonly array $trustedProxies = [],
+            public readonly bool $trustedProxiesResolved = false,
         ) {
             $normalized = [];
             foreach ($headers as $k => $v) {
@@ -84,15 +90,27 @@ namespace PFrame {
             $this->headers = $normalized;
         }
 
-        public static function fromGlobals(): static {
-            return self::buildFromGlobals((string) ($_SERVER['REMOTE_ADDR'] ?? ''));
+        public static function fromGlobals(int $maxBodyBytes = self::DEFAULT_MAX_BODY_BYTES): static {
+            return self::buildFromGlobals(
+                (string) ($_SERVER['REMOTE_ADDR'] ?? ''),
+                maxBodyBytes: $maxBodyBytes,
+            );
         }
 
         /** @param list<string> $trustedProxies */
-        public static function fromGlobalsWithProxies(array $trustedProxies = []): static {
+        public static function fromGlobalsWithProxies(
+            array $trustedProxies = [],
+            int $maxBodyBytes = self::DEFAULT_MAX_BODY_BYTES,
+        ): static {
             $headers = self::parseServerHeaders($_SERVER);
             $trustedProxies = self::resolveTrustedProxies($trustedProxies);
-            return self::buildFromGlobals(self::resolveIp($_SERVER, $headers, $trustedProxies), $headers);
+            return self::buildFromGlobals(
+                self::resolveIp($_SERVER, $headers, $trustedProxies),
+                $headers,
+                $maxBodyBytes,
+                $trustedProxies,
+                true,
+            );
         }
 
         /**
@@ -134,11 +152,21 @@ namespace PFrame {
             return array_values(array_filter($addresses, static fn(string $ip): bool => filter_var($ip, FILTER_VALIDATE_IP) !== false));
         }
 
-        /** @param array<string, string>|null $headers */
-        private static function buildFromGlobals(string $ip, ?array $headers = null): static {
+        /**
+         * @param array<string, string>|null $headers
+         * @param list<string> $trustedProxies
+         */
+        private static function buildFromGlobals(
+            string $ip,
+            ?array $headers = null,
+            int $maxBodyBytes = self::DEFAULT_MAX_BODY_BYTES,
+            array $trustedProxies = [],
+            bool $trustedProxiesResolved = false,
+        ): static {
             $uri = $_SERVER['REQUEST_URI'] ?? '/';
             $path = parse_url($uri, PHP_URL_PATH) ?: '/';
             $headers ??= self::parseServerHeaders($_SERVER);
+            $body = self::readRequestBody($headers, max(0, $maxBodyBytes));
 
             return new static(
                 method: strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')),
@@ -150,8 +178,73 @@ namespace PFrame {
                 cookies: $_COOKIE,
                 files: $_FILES,
                 ip: $ip,
-                body: (string) (file_get_contents('php://input') ?: ''),
+                body: $body['body'],
+                bodyTooLarge: $body['too_large'],
+                trustedProxies: $trustedProxies,
+                trustedProxiesResolved: $trustedProxiesResolved,
             );
+        }
+
+        /**
+         * @param array<string, string> $headers
+         * @return array{body: string, too_large: bool}
+         */
+        private static function readRequestBody(array $headers, int $maxBodyBytes): array {
+            $stream = @fopen('php://input', 'rb');
+            if ($stream === false) {
+                return ['body' => '', 'too_large' => false];
+            }
+
+            try {
+                return self::readRequestBodyStream($stream, $headers, $maxBodyBytes);
+            } finally {
+                fclose($stream);
+            }
+        }
+
+        /**
+         * @param resource $stream
+         * @param array<string, string> $headers
+         * @return array{body: string, too_large: bool}
+         */
+        private static function readRequestBodyStream($stream, array $headers, int $maxBodyBytes): array {
+            $contentLength = trim((string) ($headers['Content-Length'] ?? ''));
+            if (ctype_digit($contentLength) && (int) $contentLength > $maxBodyBytes) {
+                return ['body' => '', 'too_large' => true];
+            }
+
+            $contentType = strtolower(trim(explode(';', (string) ($headers['Content-Type'] ?? ''), 2)[0]));
+            return self::readBodyStream($stream, $maxBodyBytes, $contentType !== 'multipart/form-data');
+        }
+
+        /**
+         * @param resource $stream
+         * @return array{body: string, too_large: bool}
+         */
+        private static function readBodyStream($stream, int $maxBodyBytes, bool $capture): array {
+            if ($maxBodyBytes === 0) {
+                $byte = fread($stream, 1);
+                return ['body' => '', 'too_large' => is_string($byte) && $byte !== ''];
+            }
+
+            $body = '';
+            $read = 0;
+            while (!feof($stream) && $read <= $maxBodyBytes) {
+                $length = max(1, min(8192, ($maxBodyBytes + 1) - $read));
+                $chunk = fread($stream, $length);
+                if ($chunk === false || $chunk === '') {
+                    break;
+                }
+                $read += strlen($chunk);
+                if ($capture) {
+                    $body .= $chunk;
+                }
+            }
+
+            if ($read > $maxBodyBytes) {
+                return ['body' => '', 'too_large' => true];
+            }
+            return ['body' => $capture ? $body : '', 'too_large' => false];
         }
 
         /**
@@ -348,12 +441,18 @@ namespace PFrame {
         }
 
         public function send(): void {
+            if ($this->filePath !== null && (!is_file($this->filePath) || !is_readable($this->filePath))) {
+                throw new \RuntimeException('Response file is not readable: ' . $this->filePath);
+            }
+
             http_response_code($this->status);
             foreach ($this->headers as $name => $value) {
                 header($name . ': ' . $value);
             }
             if ($this->filePath !== null) {
-                readfile($this->filePath);
+                if (@readfile($this->filePath) === false) {
+                    throw new \RuntimeException('Failed to send response file: ' . $this->filePath);
+                }
                 return;
             }
             echo $this->body;
@@ -439,6 +538,9 @@ namespace PFrame {
         /** @var array<callable> */
         private array $middleware = [];
 
+        /** @var array<string, string|null>|null */
+        private ?array $securityHeaders = null;
+
         private const HTTP_STATUS_TEXT = [
             400 => 'Bad Request',
             401 => 'Unauthorized',
@@ -446,6 +548,7 @@ namespace PFrame {
             404 => 'Not Found',
             405 => 'Method Not Allowed',
             408 => 'Request Timeout',
+            413 => 'Payload Too Large',
             422 => 'Unprocessable Entity',
             429 => 'Too Many Requests',
             500 => 'Internal Server Error',
@@ -721,15 +824,24 @@ namespace PFrame {
         public function handle(Request $request): Response {
             return $this->withErrorHandler(function () use ($request): Response {
                 try {
-                    return $this->applyMiddleware(
+                    if ($request->bodyTooLarge) {
+                        throw new HttpException(413, 'Payload Too Large');
+                    }
+                    $response = $this->applyMiddleware(
                         $request,
                         fn (Request $req): Response => $this->dispatch($req),
                         $this->middleware,
                     );
                 } catch (HttpException $e) {
-                    return $this->handleHttpException($e, $request);
+                    $response = $this->handleHttpException($e, $request);
                 } catch (\Throwable $e) {
-                    return $this->handleException($e, $request);
+                    $response = $this->handleException($e, $request);
+                }
+
+                try {
+                    return $this->finalizeResponse($response, $request);
+                } catch (\Throwable $e) {
+                    return $this->finalizeResponse($this->handleException($e, $request), $request);
                 }
             });
         }
@@ -1031,27 +1143,41 @@ namespace PFrame {
                 $headers[$name] = $value;
             }
 
-            $this->addMiddleware(function (Request $req, callable $next) use ($headers): Response {
-                $response = $next($req);
-                $finalHeaders = $headers;
-                if (!$this->hasHeader($finalHeaders, 'Content-Security-Policy')) {
-                    $finalHeaders['Content-Security-Policy'] = $this->defaultContentSecurityPolicy();
-                }
-                if (!$this->hasHeader($finalHeaders, 'Strict-Transport-Security') && $this->isHttps($req)) {
-                    $finalHeaders['Strict-Transport-Security'] = 'max-age=63072000; includeSubDomains; preload';
-                }
+            $this->securityHeaders = $headers;
+        }
 
-                foreach ($finalHeaders as $name => $value) {
-                    if ($value === null) {
-                        continue;
-                    }
-                    if (!$this->hasHeader($response->headers, $name)) {
-                        $response->headers[$name] = $value;
-                    }
-                }
+        private function finalizeResponse(Response $response, Request $request): Response {
+            if ($response->filePath !== null && (!is_file($response->filePath) || !is_readable($response->filePath))) {
+                throw new \RuntimeException('Response file is not readable: ' . $response->filePath);
+            }
 
+            if ($request->method === 'HEAD') {
+                $response->body = '';
+                $response->filePath = null;
+            }
+
+            if ($this->securityHeaders === null) {
                 return $response;
-            });
+            }
+
+            $finalHeaders = $this->securityHeaders;
+            if (!$this->hasHeader($finalHeaders, 'Content-Security-Policy')) {
+                $finalHeaders['Content-Security-Policy'] = $this->defaultContentSecurityPolicy();
+            }
+            if (!$this->hasHeader($finalHeaders, 'Strict-Transport-Security') && $this->isHttps($request)) {
+                $finalHeaders['Strict-Transport-Security'] = 'max-age=63072000; includeSubDomains; preload';
+            }
+
+            foreach ($finalHeaders as $name => $value) {
+                if ($value === null) {
+                    continue;
+                }
+                if (!$this->hasHeader($response->headers, $name)) {
+                    $response->headers[$name] = $value;
+                }
+            }
+
+            return $response;
         }
 
         /** @param array<string, string|null> $headers */
@@ -1115,12 +1241,16 @@ namespace PFrame {
         }
 
         private function isFromTrustedProxy(Request $request): bool {
-            $trusted = $this->config('trusted_proxies', []);
-            if (!is_array($trusted) || $trusted === []) {
-                return false;
+            if ($request->trustedProxiesResolved) {
+                $trusted = $request->trustedProxies;
+            } else {
+                $trusted = $this->config('trusted_proxies', []);
+                if (!is_array($trusted) || $trusted === []) {
+                    return false;
+                }
+                $trusted = array_values(array_filter($trusted, static fn(mixed $ip): bool => is_string($ip) && $ip !== ''));
+                $trusted = Request::resolveTrustedProxies($trusted);
             }
-            $trusted = array_values(array_filter($trusted, static fn(mixed $ip): bool => is_string($ip) && $ip !== ''));
-            $trusted = Request::resolveTrustedProxies($trusted);
             $remote = (string) ($request->server['REMOTE_ADDR'] ?? '');
             return $remote !== '' && in_array($remote, $trusted, true);
         }
@@ -1185,9 +1315,25 @@ namespace PFrame {
                 $trusted = [];
             }
             $trusted = array_values(array_filter($trusted, static fn(mixed $ip): bool => is_string($ip) && $ip !== ''));
-            $request = Request::fromGlobalsWithProxies($trusted);
+            $maxBodyBytes = max(0, (int) $this->config('max_request_body_bytes', Request::DEFAULT_MAX_BODY_BYTES));
+            $request = Request::fromGlobalsWithProxies($trusted, $maxBodyBytes);
             $response = $this->handle($request);
-            $response->send();
+            try {
+                $response->send();
+            } catch (\Throwable $e) {
+                Log::error('Response send failed', [
+                    'message' => $e->getMessage(),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine(),
+                ]);
+
+                if ($response instanceof SseResponse || headers_sent()) {
+                    return;
+                }
+
+                $fallback = $this->finalizeResponse($this->handleException($e, $request), $request);
+                $fallback->send();
+            }
         }
 
         public function runWorkerRequest(bool $startSession = false): void {
@@ -1195,7 +1341,9 @@ namespace PFrame {
 
             try {
                 if ($startSession && session_status() !== PHP_SESSION_ACTIVE) {
-                    session_start();
+                    if (!session_start()) {
+                        throw new \RuntimeException('Failed to start worker session.');
+                    }
                 }
 
                 $this->run();
@@ -1206,7 +1354,9 @@ namespace PFrame {
 
         private function prepareWorkerRequest(): void {
             if (session_status() === PHP_SESSION_ACTIVE) {
-                session_write_close();
+                if (!session_write_close()) {
+                    throw new \RuntimeException('Failed to close stale worker session.');
+                }
             }
 
             $db = $this->dbIfInitialized();
@@ -1221,16 +1371,39 @@ namespace PFrame {
         }
 
         private function finishWorkerRequest(): void {
+            $cleanupError = null;
             $db = $this->dbIfInitialized();
             if ($db !== null) {
-                if ($db->trans()) {
-                    $db->rollbackAll();
+                try {
+                    if ($db->trans()) {
+                        $db->rollbackAll();
+                    }
+                } catch (\Throwable $e) {
+                    $cleanupError = $e;
                 }
-                $db->resetRequestState();
+                try {
+                    $db->resetRequestState();
+                } catch (\Throwable $e) {
+                    $cleanupError ??= $e;
+                }
             }
 
             if (session_status() === PHP_SESSION_ACTIVE) {
-                session_write_close();
+                try {
+                    if (!session_write_close()) {
+                        throw new \RuntimeException('Failed to close worker session.');
+                    }
+                } catch (\Throwable $e) {
+                    if ($cleanupError === null) {
+                        $cleanupError = $e;
+                    } else {
+                        error_log('[PFrame] Worker session cleanup also failed: ' . $e->getMessage());
+                    }
+                }
+            }
+
+            if ($cleanupError !== null) {
+                throw $cleanupError;
             }
         }
     }
@@ -1349,7 +1522,8 @@ namespace PFrame {
         /** @param array<int|string, mixed>|string|null $params */
         public function var(string $sql, array|string|null $params = null): mixed {
             $row = $this->run($sql, $params)->fetch(\PDO::FETCH_NUM);
-            return $row ? $row[0] : null;
+            $this->lastRowCount = $row === false ? 0 : 1;
+            return $row === false ? null : $row[0];
         }
 
         /**
@@ -1358,7 +1532,8 @@ namespace PFrame {
          */
         public function row(string $sql, array|string|null $params = null): ?array {
             $row = $this->run($sql, $params)->fetch();
-            return $row ?: null;
+            $this->lastRowCount = $row === false ? 0 : 1;
+            return $row === false ? null : $row;
         }
 
         /**
@@ -1366,7 +1541,9 @@ namespace PFrame {
          * @return list<array<string, mixed>>
          */
         public function results(string $sql, array|string|null $params = null): array {
-            return array_values($this->run($sql, $params)->fetchAll());
+            $rows = array_values($this->run($sql, $params)->fetchAll());
+            $this->lastRowCount = count($rows);
+            return $rows;
         }
 
         /**
@@ -1374,7 +1551,9 @@ namespace PFrame {
          * @return list<mixed>
          */
         public function col(string $sql, array|string|null $params = null): array {
-            return array_values($this->run($sql, $params)->fetchAll(\PDO::FETCH_COLUMN));
+            $values = array_values($this->run($sql, $params)->fetchAll(\PDO::FETCH_COLUMN));
+            $this->lastRowCount = count($values);
+            return $values;
         }
 
         /** @param array<int|string, mixed>|string|null $params */
@@ -1706,8 +1885,13 @@ namespace PFrame {
     class Session implements \SessionHandlerInterface {
         public const INTENDED_URL_KEY = '_intended_url';
         private ?string $lockName = null;
+        private ?string $lockedSessionId = null;
         private bool $lockAcquired = false;
         private readonly bool $useAdvisoryLock;
+        private readonly bool $useFileLock;
+        private readonly ?string $fileLockDir;
+        /** @var resource|null */
+        private $fileLockHandle = null;
         private string $initialData = '';
         private bool $initialDataLoaded = false;
 
@@ -1715,9 +1899,12 @@ namespace PFrame {
             private readonly Db $db,
             private readonly bool $advisory = true,
             private readonly int $lockTimeout = 5,
+            ?string $lockDir = null,
         ) {
             $this->useAdvisoryLock = $this->advisory && $this->db->driver() === 'mysql';
-            $this->lockAcquired = !$this->useAdvisoryLock;
+            $this->useFileLock = $this->advisory && !$this->useAdvisoryLock;
+            $this->fileLockDir = $this->useFileLock ? $this->resolveFileLockDir($lockDir) : null;
+            $this->lockAcquired = !$this->advisory;
         }
 
         /** @param array<string, mixed> $cookieParams */
@@ -1756,14 +1943,15 @@ namespace PFrame {
         }
 
         public function open(string $path, string $name): bool {
+            $this->releaseLock();
             $this->initialData = '';
             $this->initialDataLoaded = false;
             return true;
         }
 
         public function read(string $id): string|false {
-            if ($this->useAdvisoryLock) {
-                $this->acquireLock($id);
+            if (!$this->ensureLock($id)) {
+                return false;
             }
 
             try {
@@ -1779,9 +1967,9 @@ namespace PFrame {
         }
 
         public function write(string $id, string $data): bool {
-            if (!$this->lockAcquired) {
-                error_log('[SESSION] Skipping write without advisory lock for ' . $id);
-                return true;
+            if (!$this->ensureLock($id)) {
+                error_log('[SESSION] Refusing write without session lock for ' . $id);
+                return false;
             }
 
             try {
@@ -1822,6 +2010,11 @@ namespace PFrame {
         }
 
         public function destroy(string $id): bool {
+            if (!$this->ensureLock($id)) {
+                error_log('[SESSION] Refusing destroy without session lock for ' . $id);
+                return false;
+            }
+
             try {
                 $this->db->exec('DELETE FROM sessions WHERE session_id = ?', [$id]);
             } finally {
@@ -1848,21 +2041,35 @@ namespace PFrame {
             return $url;
         }
 
-        private function acquireLock(string $id): void {
-            if (!$this->useAdvisoryLock) {
+        private function ensureLock(string $id): bool {
+            if (!$this->advisory) {
                 $this->lockAcquired = true;
-                return;
+                return true;
+            }
+            if ($this->lockAcquired && $this->lockedSessionId === $id) {
+                return true;
+            }
+            if ($this->lockAcquired) {
+                $this->releaseLock();
             }
 
+            return $this->useAdvisoryLock
+                ? $this->acquireAdvisoryLock($id)
+                : $this->acquireFileLock($id);
+        }
+
+        private function acquireAdvisoryLock(string $id): bool {
             $this->lockName = 'sess_' . substr($id, 0, 32);
             $this->lockAcquired = false;
+            $this->lockedSessionId = null;
 
             try {
                 $timeout = max(0, $this->lockTimeout);
                 $result = $this->db->var('SELECT GET_LOCK(?, ?)', [$this->lockName, $timeout]);
                 if ((int) $result === 1) {
                     $this->lockAcquired = true;
-                    return;
+                    $this->lockedSessionId = $id;
+                    return true;
                 }
 
                 error_log('[SESSION] Advisory lock timeout for ' . $this->lockName);
@@ -1871,22 +2078,100 @@ namespace PFrame {
                 error_log('[SESSION] Advisory lock error for ' . ($this->lockName ?? 'unknown') . ': ' . $e->getMessage());
                 $this->lockName = null;
             }
+
+            return false;
+        }
+
+        private function acquireFileLock(string $id): bool {
+            if ($this->fileLockDir === null) {
+                return false;
+            }
+
+            $path = $this->fileLockPath($id);
+            $handle = @fopen($path, 'c');
+            if ($handle === false) {
+                error_log('[SESSION] Cannot open file lock: ' . $path);
+                return false;
+            }
+            @chmod($path, 0600);
+
+            $timeout = max(0, $this->lockTimeout);
+            $deadline = microtime(true) + $timeout;
+            do {
+                if (@flock($handle, LOCK_EX | LOCK_NB)) {
+                    $this->fileLockHandle = $handle;
+                    $this->lockAcquired = true;
+                    $this->lockedSessionId = $id;
+                    return true;
+                }
+                if ($timeout === 0 || microtime(true) >= $deadline) {
+                    break;
+                }
+                usleep(10_000);
+            } while (true);
+
+            fclose($handle);
+            error_log('[SESSION] File lock timeout for session ' . hash('sha256', $id));
+            return false;
+        }
+
+        private function fileLockPath(string $id): string {
+            if ($this->fileLockDir === null) {
+                throw new \LogicException('Session file lock directory is not configured.');
+            }
+
+            return $this->fileLockDir . '/' . substr(hash('sha256', $id), 0, 3) . '.lock';
         }
 
         private function releaseLock(): void {
-            if ($this->lockName === null) {
-                $this->lockAcquired = !$this->useAdvisoryLock;
-                return;
+            if (is_resource($this->fileLockHandle)) {
+                @flock($this->fileLockHandle, LOCK_UN);
+                fclose($this->fileLockHandle);
+                $this->fileLockHandle = null;
             }
 
-            try {
-                $this->db->var('SELECT RELEASE_LOCK(?)', [$this->lockName]);
-            } catch (\Throwable $e) {
-                error_log("[SESSION] Lock release failed ({$this->lockName}): " . $e->getMessage());
+            if ($this->lockName !== null) {
+                try {
+                    $this->db->var('SELECT RELEASE_LOCK(?)', [$this->lockName]);
+                } catch (\Throwable $e) {
+                    error_log("[SESSION] Lock release failed ({$this->lockName}): " . $e->getMessage());
+                }
             }
 
             $this->lockName = null;
-            $this->lockAcquired = !$this->useAdvisoryLock;
+            $this->lockedSessionId = null;
+            $this->lockAcquired = !$this->advisory;
+        }
+
+        private function resolveFileLockDir(?string $lockDir): string {
+            $isDefault = $lockDir === null;
+            if ($lockDir === null) {
+                $uid = function_exists('posix_geteuid') ? posix_geteuid() : getmyuid();
+                $lockDir = sys_get_temp_dir() . '/pframe-session-locks-' . (string) $uid;
+            }
+
+            if (is_link($lockDir)) {
+                throw new \RuntimeException('Session lock directory cannot be a symlink: ' . $lockDir);
+            }
+            if (!is_dir($lockDir) && !@mkdir($lockDir, 0700, true) && !is_dir($lockDir)) {
+                throw new \RuntimeException('Cannot create session lock directory: ' . $lockDir);
+            }
+
+            $resolved = realpath($lockDir);
+            if ($resolved === false || !is_dir($resolved) || !is_writable($resolved)) {
+                throw new \RuntimeException('Session lock directory is not writable: ' . $lockDir);
+            }
+
+            if ($isDefault) {
+                @chmod($resolved, 0700);
+                $owner = fileowner($resolved);
+                $uid = function_exists('posix_geteuid') ? posix_geteuid() : getmyuid();
+                if ($owner !== false && $uid !== false && $owner !== $uid) {
+                    throw new \RuntimeException('Session lock directory has unexpected owner: ' . $resolved);
+                }
+            }
+
+            return $resolved;
         }
     }
 
@@ -2346,17 +2631,14 @@ namespace PFrame {
             try {
                 $data = @unserialize($serialized, ['allowed_classes' => false]);
             } catch (\Throwable) {
-                @unlink($path);
                 return $default;
             }
 
             if (!is_array($data) || !array_key_exists('value', $data) || !isset($data['ttl'], $data['time'])) {
-                @unlink($path);
                 return $default;
             }
 
             if ($data['ttl'] > 0 && ((int) $data['time'] + (int) $data['ttl']) < time()) {
-                @unlink($path);
                 return $default;
             }
 
@@ -2365,15 +2647,33 @@ namespace PFrame {
 
         public function set(string $key, mixed $value, int $ttl = 0): void {
             if ($this->hasApcu) {
-                apcu_store($this->apcuKey($key), $value, max(0, $ttl));
+                if (!apcu_store($this->apcuKey($key), $value, max(0, $ttl))) {
+                    throw new \RuntimeException('Failed to persist APCu cache entry.');
+                }
                 return;
             }
 
-            file_put_contents(
-                $this->path($key),
-                serialize(['value' => $value, 'ttl' => $ttl, 'time' => time()]),
-                LOCK_EX,
-            );
+            $dir = $this->requireDir();
+            $tempPath = @tempnam($dir, '.pframe-cache-');
+            if ($tempPath === false) {
+                throw new \RuntimeException('Failed to create temporary cache file in: ' . $dir);
+            }
+
+            try {
+                $serialized = serialize(['value' => $value, 'ttl' => $ttl, 'time' => time()]);
+                $written = @file_put_contents($tempPath, $serialized, LOCK_EX);
+                if ($written !== strlen($serialized)) {
+                    throw new \RuntimeException('Failed to write complete cache entry: ' . $this->path($key));
+                }
+                if (!@rename($tempPath, $this->path($key))) {
+                    throw new \RuntimeException('Failed to publish cache entry: ' . $this->path($key));
+                }
+                $tempPath = '';
+            } finally {
+                if ($tempPath !== '' && is_file($tempPath)) {
+                    @unlink($tempPath);
+                }
+            }
         }
 
         public function delete(string $key): void {
@@ -2407,27 +2707,32 @@ namespace PFrame {
 
         public function rateCheck(string $scope, string $id, int $max, int $window): ?int {
             $key = 'rl:' . $scope . ':' . $id;
-            return $this->withRateLock($key, function () use ($key, $max, $window): ?int {
-                $data = $this->get($key);
-                if (!is_array($data)) {
-                    $this->set($key, ['count' => 1, 'start' => time()], $window);
+            try {
+                return $this->withRateLock($key, function () use ($key, $max, $window): ?int {
+                    $data = $this->get($key);
+                    if (!is_array($data)) {
+                        $this->set($key, ['count' => 1, 'start' => time()], $window);
+                        return null;
+                    }
+
+                    $elapsed = time() - (int) ($data['start'] ?? 0);
+                    if ($elapsed >= $window) {
+                        $this->set($key, ['count' => 1, 'start' => time()], $window);
+                        return null;
+                    }
+
+                    if ((int) ($data['count'] ?? 0) >= $max) {
+                        return $window - $elapsed;
+                    }
+
+                    $data['count'] = (int) ($data['count'] ?? 0) + 1;
+                    $this->set($key, $data, $window);
                     return null;
-                }
-
-                $elapsed = time() - (int) ($data['start'] ?? 0);
-                if ($elapsed >= $window) {
-                    $this->set($key, ['count' => 1, 'start' => time()], $window);
-                    return null;
-                }
-
-                if ((int) ($data['count'] ?? 0) >= $max) {
-                    return $window - $elapsed;
-                }
-
-                $data['count'] = (int) ($data['count'] ?? 0) + 1;
-                $this->set($key, $data, $window);
-                return null;
-            });
+                });
+            } catch (\Throwable $e) {
+                error_log('[PFrame] Rate limiter persistence failed: ' . $e->getMessage());
+                return 1;
+            }
         }
 
         private function path(string $key): string {
@@ -2509,6 +2814,9 @@ namespace PFrame {
     }
 
     class TickTask {
+        private const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
+        private const OUTPUT_TRUNCATED_MARKER = "\n[output truncated]";
+
         private int $interval = 60;
         private ?string $windowFrom = null;
         private ?string $windowTo = null;
@@ -2607,7 +2915,8 @@ namespace PFrame {
                 return ['success' => false, 'error' => 'No command configured'];
             }
 
-            $process = proc_open($command, $descriptors, $pipes);
+            $processCommand = $this->processCommand($command);
+            $process = proc_open($processCommand, $descriptors, $pipes);
             if (!is_resource($process)) {
                 return ['success' => false, 'error' => 'Failed to start process'];
             }
@@ -2615,43 +2924,100 @@ namespace PFrame {
             stream_set_blocking($pipes[1], false);
             stream_set_blocking($pipes[2], false);
 
-            $deadline = time() + $this->cmdTimeout;
+            $deadline = hrtime(true) + (max(0, $this->cmdTimeout) * 1_000_000_000);
             $stdout = '';
             $stderr = '';
+            $stdoutTruncated = false;
+            $stderrTruncated = false;
 
             while (true) {
                 $status = proc_get_status($process);
+                $this->appendCommandOutput($stdout, stream_get_contents($pipes[1]) ?: '', $stdoutTruncated);
+                $this->appendCommandOutput($stderr, stream_get_contents($pipes[2]) ?: '', $stderrTruncated);
                 if (!$status['running']) {
                     break;
                 }
-                if (time() >= $deadline) {
-                    // Kill process GROUP (negative PID) to include children
-                    $pid = $status['pid'];
-                    if (function_exists('posix_kill')) {
-                        @posix_kill(-$pid, 9);
-                    }
-                    @proc_terminate($process, 9);
+                if (hrtime(true) >= $deadline) {
+                    $this->terminateProcess($process, $status, is_array($processCommand));
+                    $this->appendCommandOutput($stdout, stream_get_contents($pipes[1]) ?: '', $stdoutTruncated);
+                    $this->appendCommandOutput($stderr, stream_get_contents($pipes[2]) ?: '', $stderrTruncated);
                     fclose($pipes[1]);
                     fclose($pipes[2]);
                     proc_close($process);
                     return ['success' => false, 'error' => "Timeout after {$this->cmdTimeout}s"];
                 }
-                $stdout .= stream_get_contents($pipes[1]) ?: '';
-                $stderr .= stream_get_contents($pipes[2]) ?: '';
                 usleep(50_000); // 50ms poll
             }
 
-            $stdout .= stream_get_contents($pipes[1]) ?: '';
-            $stderr .= stream_get_contents($pipes[2]) ?: '';
+            $this->appendCommandOutput($stdout, stream_get_contents($pipes[1]) ?: '', $stdoutTruncated);
+            $this->appendCommandOutput($stderr, stream_get_contents($pipes[2]) ?: '', $stderrTruncated);
             fclose($pipes[1]);
             fclose($pipes[2]);
 
             $exitCode = proc_close($process);
 
             if ($exitCode !== 0) {
-                return ['success' => false, 'error' => "Exit code {$exitCode}: " . trim($stderr ?: $stdout)];
+                $diagnostic = $stderr !== ''
+                    ? $this->formatCommandOutput($stderr, $stderrTruncated)
+                    : $this->formatCommandOutput($stdout, $stdoutTruncated);
+                return ['success' => false, 'error' => "Exit code {$exitCode}: " . trim($diagnostic)];
             }
-            return ['success' => true, 'output' => trim($stdout)];
+            return ['success' => true, 'output' => trim($this->formatCommandOutput($stdout, $stdoutTruncated))];
+        }
+
+        /** @return string|list<string> */
+        private function processCommand(string $command): array|string {
+            if (PHP_OS_FAMILY !== 'Linux') {
+                return $command;
+            }
+
+            foreach (['/usr/bin/setsid', '/bin/setsid'] as $setsid) {
+                if (is_executable($setsid)) {
+                    return [$setsid, '--wait', '/bin/sh', '-c', $command];
+                }
+            }
+
+            return $command;
+        }
+
+        /** @param array{pid: int} $status */
+        private function terminateProcess(mixed $process, array $status, bool $isolatedGroup): void {
+            $pid = $status['pid'];
+            if ($isolatedGroup && function_exists('posix_getpgid') && function_exists('posix_kill')) {
+                $groupId = @posix_getpgid($pid);
+                $ownGroupId = function_exists('posix_getpgrp') ? posix_getpgrp() : false;
+                if (is_int($groupId) && $groupId > 0 && $groupId !== $ownGroupId) {
+                    @posix_kill(-$groupId, 9);
+                }
+            }
+            @proc_terminate($process, 9);
+        }
+
+        private function appendCommandOutput(string &$buffer, string $chunk, bool &$truncated): void {
+            if ($chunk === '') {
+                return;
+            }
+
+            $remaining = self::MAX_COMMAND_OUTPUT_BYTES - strlen($buffer);
+            if ($remaining <= 0) {
+                $truncated = true;
+                return;
+            }
+            if (strlen($chunk) > $remaining) {
+                $buffer .= substr($chunk, 0, $remaining);
+                $truncated = true;
+                return;
+            }
+            $buffer .= $chunk;
+        }
+
+        private function formatCommandOutput(string $buffer, bool $truncated): string {
+            if (!$truncated) {
+                return $buffer;
+            }
+
+            $keep = self::MAX_COMMAND_OUTPUT_BYTES - strlen(self::OUTPUT_TRUNCATED_MARKER);
+            return substr($buffer, 0, max(0, $keep)) . self::OUTPUT_TRUNCATED_MARKER;
         }
     }
 
@@ -2777,14 +3143,26 @@ namespace PFrame {
             $key = $this->keyPrefix . $name . ':last';
             if ($this->hasApcu) {
                 $val = apcu_fetch($key, $success);
-                return $success ? (int)$val : null;
+                if ($success) {
+                    return (int)$val;
+                }
             }
-            $path = $this->tickDir . '/' . md5($key) . '.last';
+
+            $path = $this->lastRunPath($key);
             if (!is_file($path)) {
                 return null;
             }
             $content = @file_get_contents($path);
-            return $content !== false ? (int)$content : null;
+            if ($content === false) {
+                return null;
+            }
+
+            $timestamp = (int)$content;
+            if ($this->hasApcu) {
+                apcu_store($key, $timestamp, 0);
+            }
+
+            return $timestamp;
         }
 
         private function setLastRun(string $name, int $timestamp): void {
@@ -2793,11 +3171,15 @@ namespace PFrame {
                 apcu_store($key, $timestamp, 0);
             }
             // Always write file (persistent across APCu clears/restarts)
-            $path = $this->tickDir . '/' . md5($key) . '.last';
+            $path = $this->lastRunPath($key);
             $written = @file_put_contents($path, (string)$timestamp, LOCK_EX);
             if ($written === false) {
                 $this->logIoError("cannot write last-run for '{$name}': {$path}");
             }
+        }
+
+        private function lastRunPath(string $key): string {
+            return $this->tickDir . '/' . md5($key) . '.last';
         }
 
         private function getFailCount(string $name): int {

@@ -117,6 +117,40 @@ class TickTest extends TestCase {
         self::assertSame(1, $counter);
     }
 
+    public function testApcuMissUsesAndWarmsPersistedLastRunFile(): void {
+        if (!function_exists('apcu_enabled') || !apcu_enabled()) {
+            self::markTestSkipped('APCu CLI is required for the persistent last-run regression.');
+        }
+
+        $prefix = 'persisted-' . bin2hex(random_bytes(6));
+        $taskName = 'durable-task';
+        $key = 'tick:' . $prefix . ':' . $taskName . ':last';
+        $timestamp = time();
+        $path = $this->cacheDir . '/tick/' . md5($key) . '.last';
+        $runs = 0;
+
+        $tick = new Tick($this->cacheDir, 0, $prefix);
+        self::assertNotFalse(file_put_contents($path, (string)$timestamp, LOCK_EX));
+        apcu_delete($key);
+
+        try {
+            $tick->task($taskName)
+                ->every(86400)
+                ->run(static function() use (&$runs): void {
+                    $runs++;
+                });
+
+            self::assertSame([], $tick->dispatch(forceRun: true));
+            self::assertSame(0, $runs);
+
+            $cached = apcu_fetch($key, $success);
+            self::assertTrue($success);
+            self::assertSame($timestamp, $cached);
+        } finally {
+            apcu_delete($key);
+        }
+    }
+
     public function testMidnightCrossingTimeWindowDeterministic(): void {
         $task = (new TickTask('night_window'))
             ->between('23:00', '02:00');
@@ -175,6 +209,36 @@ class TickTest extends TestCase {
 
         self::assertFalse($result['success']);
         self::assertStringContainsString('timeout', strtolower($result['error'] ?? ''));
+    }
+
+    public function testCommandTimeoutKillsIsolatedChildProcessGroup(): void {
+        if (PHP_OS_FAMILY !== 'Linux' || (!is_executable('/usr/bin/setsid') && !is_executable('/bin/setsid'))) {
+            self::markTestSkipped('Linux setsid is required for process-group regression.');
+        }
+
+        $marker = $this->cacheDir . '/child-survived.txt';
+        $command = '(sleep 2; printf survived > ' . escapeshellarg($marker) . ') & wait';
+        $task = (new TickTask('process_group_timeout'))->command($command, 1);
+
+        $result = $task->execute();
+        usleep(1_300_000);
+
+        self::assertFalse($result['success']);
+        self::assertFileDoesNotExist($marker, 'Timed-out child must not outlive its isolated process group');
+    }
+
+    public function testCommandOutputIsDrainedButBounded(): void {
+        $script = 'fwrite(STDOUT, str_repeat("o", 2 * 1024 * 1024));'
+            . 'fwrite(STDERR, str_repeat("e", 2 * 1024 * 1024)); exit(7);';
+        $task = (new TickTask('bounded_output'))
+            ->command(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($script), 10);
+
+        $result = $task->execute();
+        $error = $result['error'] ?? '';
+
+        self::assertFalse($result['success']);
+        self::assertStringContainsString('[output truncated]', $error);
+        self::assertLessThanOrEqual(1_048_600, strlen($error));
     }
 
     public function testTaskErrorHandling(): void {

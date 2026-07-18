@@ -13,8 +13,8 @@ Usage: ./bin/test [quick|full|ci|coverage|contracts|e2e|ui]
 Profiles:
   quick      syntax + unit + integration (no coverage)
   full       quick + contracts + phpstan
-  ci         full + coverage report
-  coverage   phpunit with coverage artifacts
+  ci         full + coverage report (minimum 85% line coverage)
+  coverage   phpunit with coverage artifacts (minimum 85% line coverage)
   contracts  contract/governance tests
   e2e        not applicable for pframe (returns success)
   ui         not applicable for pframe (returns success)
@@ -84,22 +84,58 @@ run_full() {
     run_step "Static analysis (phpstan)" composer phpstan
 }
 
+coverage_driver_available() {
+    if [[ "${PFRAME_FORCE_NO_COVERAGE:-0}" == "1" ]]; then
+        return 1
+    fi
+
+    php -r 'exit((extension_loaded("xdebug") || extension_loaded("pcov")) ? 0 : 1);'
+}
+
+check_coverage_threshold() {
+    local report="build/coverage/clover.xml"
+    local minimum="85"
+
+    php -r '
+        $report = $argv[1];
+        $minimum = (float) $argv[2];
+        $xml = is_file($report) ? simplexml_load_file($report) : false;
+        if ($xml === false || !isset($xml->project->metrics)) {
+            fwrite(STDERR, "Coverage report missing or invalid: {$report}\n");
+            exit(1);
+        }
+        $metrics = $xml->project->metrics;
+        $total = (int) $metrics["statements"];
+        $covered = (int) $metrics["coveredstatements"];
+        if ($total <= 0) {
+            fwrite(STDERR, "Coverage report contains no executable lines.\n");
+            exit(1);
+        }
+        $percent = ($covered / $total) * 100;
+        printf("Line coverage: %.2f%% (%d/%d), required: %.2f%%\n", $percent, $covered, $total, $minimum);
+        exit($percent + 0.00001 >= $minimum ? 0 : 1);
+    ' "$report" "$minimum"
+}
+
 run_coverage() {
     mkdir -p build/coverage
 
-    if php -r 'exit((extension_loaded("xdebug") || extension_loaded("pcov")) ? 0 : 1);'; then
+    if coverage_driver_available; then
         run_step "Coverage report" env XDEBUG_MODE=coverage vendor/bin/phpunit --testsuite Unit,Integration,Contracts --coverage-text --coverage-clover build/coverage/clover.xml --coverage-html build/coverage/html
-        return 0
+        run_step "Coverage threshold" check_coverage_threshold
+        return
     fi
 
-    if command -v phpdbg >/dev/null 2>&1; then
+    if [[ "${PFRAME_FORCE_NO_COVERAGE:-0}" != "1" ]] && command -v phpdbg >/dev/null 2>&1; then
         run_step "Coverage report" phpdbg -qrr vendor/bin/phpunit --testsuite Unit,Integration,Contracts --coverage-text --coverage-clover build/coverage/clover.xml --coverage-html build/coverage/html
-        return 0
+        run_step "Coverage threshold" check_coverage_threshold
+        return
     fi
 
     step "Coverage report"
-    echo "Coverage driver unavailable (xdebug/pcov/phpdbg). Skipping coverage artifacts."
-    echo "status=ok duration=0s step=Coverage report"
+    echo "Coverage driver unavailable (xdebug/pcov/phpdbg)."
+    echo "status=fail duration=0s step=Coverage report"
+    return 1
 }
 
 run_not_applicable() {

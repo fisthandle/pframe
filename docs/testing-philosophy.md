@@ -2,7 +2,7 @@
 
 ## Zasady
 
-1. **Szybkość** — SQLite :memory: dla unit/smoke, MySQL/MariaDB dla integration
+1. **Szybkość** — SQLite `:memory:` dla unit/smoke; realne SQLite i MySQL dla kontraktów schematu
 2. **Izolacja** — transaction rollback (begin w setUp, rollback w tearDown)
 3. **Czytelność** — assertions czytają stan DB, nie testują implementacji
 4. **Composable** — traity zamiast monolitycznej base class
@@ -16,16 +16,16 @@ Jedyny runner: `./bin/test <profile>`.
 |-------|--------|
 | `quick` | syntax + `Unit` + `Integration` |
 | `full` | `quick` + `Contracts` + `phpstan` |
-| `ci` | `full` + coverage report |
-| `coverage` | phpunit z coverage artifacts (`build/coverage`) |
+| `ci` | `full` + coverage report, minimum 85% pokrycia linii |
+| `coverage` | phpunit z coverage artifacts (`build/coverage`), minimum 85% pokrycia linii |
 | `contracts` | governance runnera i testy kontraktowe |
 | `e2e`/`ui` | w repo frameworka N/A (czytelny komunikat + exit 0) |
 
 Komendy `composer test*` są aliasami do tego kontraktu (`composer test` = `./bin/test quick`).
 CI uruchamia dokładnie `./bin/test ci`, bez duplikowania kroków w workflow.
 
-Gdy środowisko nie ma drivera coverage (`xdebug`, `pcov` lub `phpdbg`), profile `coverage` i `ci`
-wypisują komunikat o fallbacku i kończą się sukcesem, zamiast przerywać cały pipeline.
+Profile `coverage` i `ci` wymagają drivera (`xdebug`, `pcov` lub `phpdbg`) i kończą się błędem,
+gdy raport nie powstał albo pokrycie linii spadło poniżej 85%.
 
 ## Struktura testów
 
@@ -34,12 +34,16 @@ wypisują komunikat o fallbacku i kończą się sukcesem, zamiast przerywać ca�
     ├── TestCase.php         ← extends PFrame\Testing\TestCase + project factories
     ├── Unit/                ← pure logic, no HTTP
     ├── Integration/         ← full request cycle
+    ├── Contracts/           ← wykonywalne kontrakty runnera i narzędzi repo
     └── fixtures/            ← config, templates, SQL
 
 ## PFrame\Testing\TestCase
 
 Łączy 6 traitów: DatabaseTransactions, DatabaseAssertions, ActingAs, ResponseAssertions, FlashAssertions, SessionAssertions.
 **Wymaga** DB skonfigurowane w bootstrap.
+
+`PFrameTesting.php` zależy od PHPUnit, dlatego konsument wymaga go jawnie po `vendor/autoload.php`;
+nie jest ładowany przez runtime Composer.
 
 Projekty bez DB używają poszczególnych traitów na PHPUnit\TestCase.
 
@@ -178,7 +182,8 @@ PFrame NIE dostarcza factory methods — dane są domenowe. Projekt definiuje je
 |-----------|------|-------|
 | Unit | SQLite :memory: | Szybkość, zero setup |
 | Smoke | SQLite :memory: | Szybkość, zero setup |
-| Integration | MySQL/MariaDB | Zgodność z produkcją |
+| Integration HTTP/worker | SQLite `:memory:` | Izolowany pełny lifecycle requestu |
+| Schema contract | SQLite + MySQL 8.4 w CI | Wykonanie dostarczonych DDL i realny lifecycle sesji |
 
 ## Parallel testing (opcjonalne)
 

@@ -25,6 +25,10 @@ class SessionTest extends TestCase {
     }
 
     protected function tearDown(): void {
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+        session_set_save_handler(new \SessionHandler(), true);
         $_SERVER = $this->serverSnapshot;
     }
 
@@ -88,22 +92,6 @@ class SessionTest extends TestCase {
         $data = $session->read($id);
 
         $this->assertStringContainsString('test', $data);
-    }
-
-    public function testWriteSkipsWhenLockNotAcquired(): void {
-        $session = new Session($this->db, advisory: false);
-        $id = bin2hex(random_bytes(16));
-
-        $ref = new \ReflectionClass($session);
-        $lockProp = $ref->getProperty('lockAcquired');
-        $lockProp->setAccessible(true);
-        $lockProp->setValue($session, false);
-
-        $this->assertSame('', $session->read($id));
-        $this->assertTrue($session->write($id, 'should-not-persist'));
-
-        $data = $this->db->var('SELECT data FROM sessions WHERE session_id = ?', [$id]);
-        $this->assertNull($data, 'Data must not be written without advisory lock');
     }
 
     public function testWriteUsesMysqlUpsertQueryWhenDriverIsMysql(): void {
@@ -193,10 +181,7 @@ class SessionTest extends TestCase {
     public function testAdvisoryMysqlLockUsesConfiguredTimeout(): void {
         $pdo = new \PDO('sqlite::memory:');
         $queries = [];
-        $db = $this->getMockBuilder(Db::class)
-            ->disableOriginalConstructor()
-            ->onlyMethods(['driver', 'pdo', 'var'])
-            ->getMock();
+        $db = $this->createStub(Db::class);
         $db->method('driver')->willReturn('mysql');
         $db->method('pdo')->willReturn($pdo);
         $db->method('var')->willReturnCallback(
@@ -228,7 +213,7 @@ class SessionTest extends TestCase {
         $this->assertSame(['sess_sid-lock', 5], $first[1]);
     }
 
-    public function testAdvisoryMysqlLockTimeoutDegradesToReadOnly(): void {
+    public function testAdvisoryMysqlLockTimeoutFailsClosed(): void {
         $pdo = new \PDO('sqlite::memory:');
         $calls = [];
         $db = $this->getMockBuilder(Db::class)
@@ -254,11 +239,8 @@ class SessionTest extends TestCase {
         $session = new Session($db, advisory: true, lockTimeout: 1);
         $session->open('', '');
 
-        // read succeeds despite lock timeout
-        $this->assertSame('existing-data', $session->read('sid-timeout'));
-
-        // write silently skips (no exception)
-        $this->assertTrue($session->write('sid-timeout', 'new-data'));
+        $this->assertFalse($session->read('sid-timeout'));
+        $this->assertFalse($session->write('sid-timeout', 'new-data'));
 
         // close completes cleanly
         $this->assertTrue($session->close());
@@ -272,10 +254,7 @@ class SessionTest extends TestCase {
         $pdo = new \PDO('sqlite::memory:');
         $this->assertTrue($pdo->beginTransaction());
 
-        $db = $this->getMockBuilder(Db::class)
-            ->disableOriginalConstructor()
-            ->onlyMethods(['driver', 'pdo', 'var'])
-            ->getMock();
+        $db = $this->createStub(Db::class);
         $db->method('driver')->willReturn('mysql');
         $db->method('pdo')->willReturn($pdo);
         $db->method('var')->willReturnCallback(
@@ -358,7 +337,7 @@ class SessionTest extends TestCase {
         $this->assertArrayNotHasKey(Session::INTENDED_URL_KEY, $_SESSION);
     }
 
-    public function testAdvisoryLockDbErrorDegradesToReadOnly(): void {
+    public function testAdvisoryLockDbErrorFailsClosed(): void {
         $pdo = new \PDO('sqlite::memory:');
         $db = $this->getMockBuilder(Db::class)
             ->disableOriginalConstructor()
@@ -381,8 +360,8 @@ class SessionTest extends TestCase {
 
         $session = new Session($db, advisory: true, lockTimeout: 1);
         $session->open('', '');
-        $this->assertSame('data-after-error', $session->read('sid-error'));
-        $this->assertTrue($session->write('sid-error', 'new'));
+        $this->assertFalse($session->read('sid-error'));
+        $this->assertFalse($session->write('sid-error', 'new'));
         $this->assertTrue($session->close());
     }
 
@@ -430,7 +409,7 @@ class SessionTest extends TestCase {
         $this->assertCount(1, $releaseCalls, 'RELEASE_LOCK must be called exactly once (by write, not again by close)');
     }
 
-    public function testDestroyExecutesWithoutAdvisoryLock(): void {
+    public function testDestroyFailsWhenAdvisoryLockCannotBeAcquired(): void {
         $pdo = new \PDO('sqlite::memory:');
         $db = $this->getMockBuilder(Db::class)
             ->disableOriginalConstructor()
@@ -449,18 +428,98 @@ class SessionTest extends TestCase {
                 return null;
             }
         );
-        $db->expects($this->once())
-            ->method('exec')
-            ->with(
-                'DELETE FROM sessions WHERE session_id = ?',
-                ['sid-destroy'],
-            )
-            ->willReturn(1);
+        $db->expects($this->never())->method('exec');
 
         $session = new Session($db, advisory: true, lockTimeout: 1);
         $session->open('', '');
-        $session->read('sid-destroy');
-        $this->assertTrue($session->destroy('sid-destroy'));
+        $this->assertFalse($session->read('sid-destroy'));
+        $this->assertFalse($session->destroy('sid-destroy'));
+    }
+
+    public function testSqliteAdvisoryModePreventsLostUpdateAcrossProcesses(): void {
+        $dir = sys_get_temp_dir() . '/pframe_session_process_' . bin2hex(random_bytes(8));
+        $lockDir = $dir . '/locks';
+        mkdir($lockDir, 0700, true);
+        $dbPath = $dir . '/sessions.sqlite';
+        $db = new Db(['dsn' => 'sqlite:' . $dbPath]);
+        $db->exec('CREATE TABLE sessions (
+            session_id TEXT PRIMARY KEY,
+            data TEXT NOT NULL DEFAULT "",
+            ip TEXT NOT NULL DEFAULT "",
+            agent TEXT NOT NULL DEFAULT "",
+            stamp INTEGER NOT NULL DEFAULT 0
+        )');
+
+        $workerPath = $dir . '/worker.php';
+        file_put_contents($workerPath, $this->sqliteSessionWorkerScript());
+        $processes = [];
+
+        try {
+            $processes[] = $first = $this->startSessionWorker($workerPath, 'a', $dbPath, $lockDir, $dir);
+            $this->waitForMarker($dir . '/a-read');
+
+            $processes[] = $second = $this->startSessionWorker($workerPath, 'b', $dbPath, $lockDir, $dir);
+            $outcome = $this->waitForEitherMarker($dir . '/b-blocked', $dir . '/b-read');
+            touch($dir . '/allow-a');
+
+            $this->waitForMarker($dir . '/a-done');
+            $this->waitForMarker($dir . '/b-done');
+            $this->assertSame(0, $this->finishSessionWorker($first));
+            $this->assertSame(0, $this->finishSessionWorker($second));
+            $processes = [];
+
+            $this->assertSame('blocked', $outcome, 'Second process must not read stale session data while the first holds the lock');
+            $this->assertSame('AB', $db->var('SELECT data FROM sessions WHERE session_id = ?', ['shared-sid']));
+        } finally {
+            foreach ($processes as $process) {
+                foreach ($process['pipes'] as $pipe) {
+                    if (is_resource($pipe)) {
+                        fclose($pipe);
+                    }
+                }
+                if (is_resource($process['process'])) {
+                    proc_terminate($process['process'], 9);
+                    proc_close($process['process']);
+                }
+            }
+            foreach (glob($lockDir . '/*.lock') ?: [] as $file) {
+                unlink($file);
+            }
+            foreach (glob($dir . '/*') ?: [] as $file) {
+                if (is_file($file)) {
+                    unlink($file);
+                }
+            }
+            if (is_dir($lockDir)) {
+                rmdir($lockDir);
+            }
+            if (is_dir($dir)) {
+                rmdir($dir);
+            }
+        }
+    }
+
+    public function testSqliteFileLocksUseBoundedStriping(): void {
+        $lockDir = sys_get_temp_dir() . '/pframe_session_stripes_' . bin2hex(random_bytes(8));
+        $session = new Session($this->db, advisory: true, lockDir: $lockDir);
+        $pathMethod = new \ReflectionMethod($session, 'fileLockPath');
+        $paths = [];
+
+        try {
+            for ($i = 0; $i < 8192; $i++) {
+                $path = (string) $pathMethod->invoke($session, 'sid-' . $i);
+                $paths[basename($path)] = true;
+            }
+
+            $this->assertLessThanOrEqual(4096, count($paths));
+            $invalid = array_filter(
+                array_keys($paths),
+                static fn(string $filename): bool => preg_match('/^[0-9a-f]{3}\.lock$/', $filename) !== 1,
+            );
+            $this->assertSame([], array_values($invalid));
+        } finally {
+            rmdir($lockDir);
+        }
     }
 
     public function testConstructorDefaultLockTimeoutIsFive(): void {
@@ -470,5 +529,114 @@ class SessionTest extends TestCase {
         $prop = $ref->getProperty('lockTimeout');
         $prop->setAccessible(true);
         $this->assertSame(5, $prop->getValue($session));
+    }
+
+    /** @return array{process: resource, pipes: array<int, resource>} */
+    private function startSessionWorker(
+        string $workerPath,
+        string $role,
+        string $dbPath,
+        string $lockDir,
+        string $stateDir,
+    ): array {
+        $pipes = [];
+        $process = proc_open(
+            [PHP_BINARY, $workerPath, $role, $dbPath, $lockDir, $stateDir],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+        );
+        $this->assertIsResource($process);
+
+        return ['process' => $process, 'pipes' => $pipes];
+    }
+
+    /** @param array{process: resource, pipes: array<int, resource>} $worker */
+    private function finishSessionWorker(array $worker): int {
+        $output = stream_get_contents($worker['pipes'][1]) ?: '';
+        $errors = stream_get_contents($worker['pipes'][2]) ?: '';
+        fclose($worker['pipes'][1]);
+        fclose($worker['pipes'][2]);
+        $exitCode = proc_close($worker['process']);
+        $this->assertSame('', $errors, $errors . $output);
+
+        return $exitCode;
+    }
+
+    private function waitForMarker(string $path): void {
+        $deadline = microtime(true) + 5;
+        while (!is_file($path) && microtime(true) < $deadline) {
+            usleep(10_000);
+        }
+        $this->assertFileExists($path, 'Timed out waiting for marker: ' . basename($path));
+    }
+
+    private function waitForEitherMarker(string $blockedPath, string $readPath): string {
+        $deadline = microtime(true) + 5;
+        while (!is_file($blockedPath) && !is_file($readPath) && microtime(true) < $deadline) {
+            usleep(10_000);
+        }
+        $this->assertTrue(
+            is_file($blockedPath) || is_file($readPath),
+            'Timed out waiting for the second session worker',
+        );
+
+        return is_file($blockedPath) ? 'blocked' : 'read';
+    }
+
+    private function sqliteSessionWorkerScript(): string {
+        $source = var_export(dirname(__DIR__, 2) . '/src/PFrame.php', true);
+
+        return <<<PHP
+<?php
+declare(strict_types=1);
+
+require {$source};
+
+use PFrame\\Db;
+use PFrame\\Session;
+
+[, \$role, \$dbPath, \$lockDir, \$stateDir] = \$argv;
+ini_set('log_errors', '1');
+ini_set('error_log', \$stateDir . '/worker-' . \$role . '.log');
+\$db = new Db(['dsn' => 'sqlite:' . \$dbPath]);
+\$session = new Session(\$db, advisory: true, lockTimeout: 0, lockDir: \$lockDir);
+
+if (\$role === 'a') {
+    \$data = \$session->read('shared-sid');
+    if (!is_string(\$data)) {
+        throw new RuntimeException('First worker could not read the session');
+    }
+    touch(\$stateDir . '/a-read');
+    while (!is_file(\$stateDir . '/allow-a')) {
+        usleep(10_000);
+    }
+    if (!\$session->write('shared-sid', \$data . 'A')) {
+        throw new RuntimeException('First worker could not write the session');
+    }
+    touch(\$stateDir . '/a-done');
+    exit(0);
+}
+
+\$data = \$session->read('shared-sid');
+if (\$data === false) {
+    touch(\$stateDir . '/b-blocked');
+    while (!is_file(\$stateDir . '/a-done')) {
+        usleep(10_000);
+    }
+    \$data = \$session->read('shared-sid');
+    if (!is_string(\$data)) {
+        throw new RuntimeException('Second worker could not retry the session read');
+    }
+} else {
+    touch(\$stateDir . '/b-read');
+    while (!is_file(\$stateDir . '/a-done')) {
+        usleep(10_000);
+    }
+}
+if (!\$session->write('shared-sid', \$data . 'B')) {
+    throw new RuntimeException('Second worker could not write the session');
+}
+touch(\$stateDir . '/b-done');
+PHP;
     }
 }

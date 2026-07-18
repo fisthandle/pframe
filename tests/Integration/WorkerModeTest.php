@@ -5,7 +5,7 @@ namespace PFrame\Tests\Integration;
 
 use PFrame\App;
 use PFrame\Controller;
-use PFrame\Request;
+use PFrame\Db;
 use PFrame\Response;
 use PHPUnit\Framework\TestCase;
 
@@ -73,82 +73,7 @@ class WorkerModeTest extends TestCase {
         $_FILES = [];
     }
 
-    public function testQueryLogResetsPerRequest(): void {
-        $app = new App();
-        $app->setConfig('db', ['dsn' => 'sqlite::memory:', 'log_queries' => true]);
-        $db = $app->db();
-        $db->exec('CREATE TABLE hits (id INTEGER PRIMARY KEY, ts TEXT)');
-        $db->resetRequestState();
-
-        $app->get('/count', CounterCtrl::class, 'index');
-
-        for ($i = 1; $i <= 3; $i++) {
-            $app->resetRequestState();
-            $response = $app->handle(new Request(method: 'GET', path: '/count'));
-            $this->assertSame(200, $response->status);
-            $this->assertSame(1, $db->queryCount(), "Request $i: query log leaked from previous request");
-            $db->resetRequestState();
-        }
-
-        $this->assertSame(3, (int) $db->var('SELECT COUNT(*) FROM hits'));
-    }
-
-    public function testTransactionDoesNotLeakBetweenRequests(): void {
-        $app = new App();
-        $app->setConfig('db', ['dsn' => 'sqlite::memory:']);
-        $db = $app->db();
-        $db->exec('CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)');
-
-        $app->resetRequestState();
-        $db->begin();
-        $db->exec('INSERT INTO items (name) VALUES (?)', ['leaked']);
-        if ($db->trans()) {
-            $db->rollbackAll();
-        }
-        $db->resetRequestState();
-
-        $app->resetRequestState();
-        $this->assertSame(0, (int) $db->var('SELECT COUNT(*) FROM items'));
-        $db->resetRequestState();
-    }
-
-    public function testNestedTransactionDoesNotLeakBetweenRequests(): void {
-        $app = new App();
-        $app->setConfig('db', ['dsn' => 'sqlite::memory:']);
-        $db = $app->db();
-        $db->exec('CREATE TABLE nested_items (id INTEGER PRIMARY KEY, name TEXT)');
-
-        $app->resetRequestState();
-        $db->begin();
-        $db->begin();
-        $db->exec('INSERT INTO nested_items (name) VALUES (?)', ['leaked']);
-        $db->begin();
-        $db->exec('INSERT INTO nested_items (name) VALUES (?)', ['also_leaked']);
-        if ($db->trans()) {
-            $db->rollbackAll();
-        }
-        $db->resetRequestState();
-
-        $app->resetRequestState();
-        $this->assertFalse($db->trans(), 'Transaction leaked to next request');
-        $this->assertSame(0, (int) $db->var('SELECT COUNT(*) FROM nested_items'));
-        $db->resetRequestState();
-    }
-
-    public function testElapsedResetsPerRequest(): void {
-        $app = new App();
-
-        usleep(10000);
-        $elapsed1 = $app->elapsed();
-
-        $app->resetRequestState();
-        $elapsed2 = $app->elapsed();
-
-        $this->assertGreaterThan(0.009, $elapsed1);
-        $this->assertLessThan(0.01, $elapsed2);
-    }
-
-    public function testRunWorkerRequestRollsBackLeakedTransactionAndResetsDbState(): void {
+    public function testRunWorkerRequestRollsBackNestedTransactionsAndResetsDbState(): void {
         $app = new App();
         $app->setConfig('db', ['dsn' => 'sqlite::memory:', 'log_queries' => true]);
         $db = $app->db();
@@ -165,7 +90,7 @@ class WorkerModeTest extends TestCase {
             $output = (string) ob_get_clean();
         }
 
-        $this->assertSame('leaked', $output);
+        $this->assertSame('nested-leak', $output);
         $this->assertFalse($db->trans(), 'runWorkerRequest() must not leak transactions');
         $this->assertSame(0, $db->queryCount(), 'runWorkerRequest() must reset per-request query log');
         $this->assertSame(0, $db->count(), 'runWorkerRequest() must reset per-request row count');
@@ -194,6 +119,64 @@ class WorkerModeTest extends TestCase {
         $this->assertSame('0', $output, 'runWorkerRequest() must clear leaked transactions before request handling');
         $this->assertFalse($db->trans());
         $this->assertSame(0, (int) $db->var('SELECT COUNT(*) FROM worker_counts'));
+    }
+
+    public function testRunWorkerRequestDoesNotDispatchWhenSessionStartFails(): void {
+        $app = new App();
+        $app->get('/must-not-run', WorkerMustNotRunCtrl::class, 'index');
+        $this->primeGlobals('GET', '/must-not-run');
+        WorkerMustNotRunCtrl::$runs = 0;
+        ini_set('session.save_path', '/proc/pframe-session-start-failure-' . bin2hex(random_bytes(6)));
+
+        set_error_handler(static fn(): bool => true);
+        $error = null;
+        ob_start();
+        try {
+            $app->runWorkerRequest(startSession: true);
+        } catch (\RuntimeException $e) {
+            $error = $e;
+        } finally {
+            $output = (string) ob_get_clean();
+            restore_error_handler();
+        }
+
+        $this->assertInstanceOf(\RuntimeException::class, $error);
+        $this->assertSame('Failed to start worker session.', $error->getMessage());
+        $this->assertSame(0, WorkerMustNotRunCtrl::$runs, 'Controller must not run without an active session');
+        $this->assertSame('', $output);
+        $this->assertSame(PHP_SESSION_NONE, session_status());
+    }
+
+    public function testRunWorkerRequestClosesSessionWhenRollbackCleanupThrows(): void {
+        $db = $this->getMockBuilder(Db::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['trans', 'rollbackAll', 'resetRequestState'])
+            ->getMock();
+        $db->method('trans')->willReturnOnConsecutiveCalls(false, true);
+        $db->expects($this->once())
+            ->method('rollbackAll')
+            ->willThrowException(new \RuntimeException('cleanup rollback failed'));
+
+        $app = new App();
+        $app->setDb($db);
+        $app->get('/cleanup-error', WorkerNoopCtrl::class, 'index');
+        $this->primeGlobals('GET', '/cleanup-error');
+        session_id(bin2hex(random_bytes(8)));
+
+        $error = null;
+        ob_start();
+        try {
+            $app->runWorkerRequest(startSession: true);
+        } catch (\RuntimeException $e) {
+            $error = $e;
+        } finally {
+            $output = (string) ob_get_clean();
+        }
+
+        $this->assertSame('cleanup-ok', $output);
+        $this->assertInstanceOf(\RuntimeException::class, $error);
+        $this->assertSame('cleanup rollback failed', $error->getMessage());
+        $this->assertSame(PHP_SESSION_NONE, session_status(), 'Session must close even when database cleanup fails');
     }
 
     public function testRunWorkerRequestCanManageSessionLifecycle(): void {
@@ -279,21 +262,32 @@ class WorkerModeTest extends TestCase {
     }
 }
 
-class CounterCtrl extends Controller {
-    public function index(): Response {
-        $db = App::instance()->db();
-        $db->exec('INSERT INTO hits (ts) VALUES (?)', [date('c')]);
-        return new Response(body: 'ok');
-    }
-}
-
 class WorkerLeakCtrl extends Controller {
     public function index(): Response {
         $db = App::instance()->db();
         $db->begin();
-        $db->exec('INSERT INTO worker_items (name) VALUES (?)', ['leaked']);
+        $db->exec('INSERT INTO worker_items (name) VALUES (?)', ['outer']);
+        $db->begin();
+        $db->exec('INSERT INTO worker_items (name) VALUES (?)', ['nested']);
+        $db->begin();
+        $db->exec('INSERT INTO worker_items (name) VALUES (?)', ['deeply-nested']);
 
-        return new Response(body: 'leaked');
+        return new Response(body: 'nested-leak');
+    }
+}
+
+class WorkerMustNotRunCtrl extends Controller {
+    public static int $runs = 0;
+
+    public function index(): Response {
+        self::$runs++;
+        return new Response(body: 'unexpected');
+    }
+}
+
+class WorkerNoopCtrl extends Controller {
+    public function index(): Response {
+        return new Response(body: 'cleanup-ok');
     }
 }
 

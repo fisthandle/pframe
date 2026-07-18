@@ -157,6 +157,14 @@ class ResponseTest extends TestCase {
         unlink($tmpFile);
     }
 
+    public function testFileSendRejectsUnreadablePathBeforeReturningSuccess(): void {
+        $response = Response::file('/definitely/missing/pframe-response-test');
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Response file is not readable');
+        $response->send();
+    }
+
     public function testSendOutputsBodyAndSetsStatusWithHeaders(): void {
         $response = new Response('hello body', 201, ['X-Test' => 'yes']);
 
