@@ -3,7 +3,7 @@
 ## Zasady
 
 1. **Szybkość** — SQLite `:memory:` dla unit/smoke; realne SQLite i MySQL dla kontraktów schematu
-2. **Izolacja** — transaction rollback (begin w setUp, rollback w tearDown)
+2. **Izolacja** — `PFrame\Testing\TestCase` robi transaction rollback (begin w setUp, rollback w tearDown); zwykły `PHPUnit\TestCase` nie ma automatycznego rollbacku
 3. **Czytelność** — assertions czytają stan DB, nie testują implementacji
 4. **Composable** — traity zamiast monolitycznej base class
 5. **Zero boilerplate** — PFrame dostarcza TestCase, projekt dodaje factory methods
@@ -27,7 +27,7 @@ CI uruchamia dokładnie `./bin/test ci`, bez duplikowania kroków w workflow.
 Profile `coverage` i `ci` wymagają drivera (`xdebug`, `pcov` lub `phpdbg`) i kończą się błędem,
 gdy raport nie powstał albo pokrycie linii spadło poniżej 85%.
 
-## Struktura testów
+## Struktura testów u konsumenta
 
     tests/
     ├── bootstrap.php       ← App, DB, schema setup + require PFrameTesting.php
@@ -45,11 +45,15 @@ gdy raport nie powstał albo pokrycie linii spadło poniżej 85%.
 `PFrameTesting.php` zależy od PHPUnit, dlatego konsument wymaga go jawnie po `vendor/autoload.php`;
 nie jest ładowany przez runtime Composer.
 
+Automatyczny rollback transakcji dotyczy wyłącznie klas dziedziczących po `PFrame\Testing\TestCase`.
+Testy oparte bezpośrednio na `PHPUnit\TestCase` muszą zapewnić własną izolację.
+
 Projekty bez DB używają poszczególnych traitów na PHPUnit\TestCase.
 
 ## Transaction rollback
 
-Każdy test działa w transakcji. tearDown robi rollback — dane z testu nie przenikają do następnego.
+Test dziedziczący po `PFrame\Testing\TestCase` działa w transakcji. `tearDown()` robi rollback —
+dane z testu nie przenikają do następnego. Zwykły `PHPUnit\TestCase` nie dostaje tego mechanizmu.
 
     class MyTest extends TestCase {
         public function testCreateUser(): void {
@@ -134,7 +138,8 @@ Opt-out: `$this->withoutCsrf()->post(...)`.
 
 ## RefreshDatabase
 
-Trait do automatycznego ładowania migracji z katalogu SQL. Raz per proces (nie per test).
+Trait do automatycznego ładowania migracji z katalogu SQL. Migracje są wykonywane raz na parę
+`PDO` + ścieżka migracji (nie per test).
 
     class TestCase extends \PFrame\Testing\TestCase {
         use \PFrame\Testing\RefreshDatabase;

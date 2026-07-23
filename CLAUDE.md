@@ -43,6 +43,7 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 - Router zwraca `405 Method Not Allowed` z nagłówkiem `Allow`
 - `App::addSecurityHeaders()` — CSP, HSTS, XFO, XCTO, Referrer-Policy, Permissions-Policy
 - `Request::fromGlobalsWithProxies()` + `trusted_proxies` — bezpieczne IP za proxy
+- `max_request_body_bytes` domyślnie wynosi `8_388_608` (8 MiB); przekroczenie kończy się `413` przed middleware i dispatchem trasy
 - `Session::regenerate()` — po logowaniu
 - `Response::redirect()` blokuje external URL gdy HTTP_HOST ustawiony
 - `View::renderFile()` chroni przed path traversal
@@ -106,7 +107,7 @@ PHPUnit 13 nie obsługuje `-v`; gdy potrzebny jest szczegółowy przebieg, użyj
 - CSP: `style-src 'unsafe-inline'` wymagane (error pages, DebugBar); scripts bez `unsafe-inline`
 - `trusted_proxies` = exact IPs lub resolvable hostnames (np. `infra_caddy`), nie CIDR
 - Cache: jeden backend per request (APCu-only gdy dostępny, file-only bez APCu)
-- OPcache preload: `require` nie `opcache_compile_file`
+- OPcache preload: `require_once`, nie `opcache_compile_file`
 - `Tick`: `tryLock()` = flock only; `between()` wspiera okna przez północ; `inTimeWindow(?string $now)` testowalny
 
 ## Konwencje i zakres
@@ -114,6 +115,7 @@ PHPUnit 13 nie obsługuje `-v`; gdy potrzebny jest szczegółowy przebieg, użyj
 - Zachowuj 1TBS/K&R (otwierający nawias w tej samej linii) oraz polskie komunikaty użytkowe.
 - Null-safe wrappery na funkcje PHP mają sufiks `S` (`trimS`, `countS`, `strtotimeS`). Nie twórz równoległej konwencji.
 - `src/PFrame.php` jest źródłem prawdy. Przy zmianie SQL zaktualizuj testy, które celowo asertują literalne zapytania; po nieudanym patchu najpierw przeczytaj świeży diff i bieżący fragment pliku.
+- Producentami kopii konsumenckich są `src/PFrame.php` i `src/PFrameTesting.php`; checker obejmuje `*/lib/` oraz `*/app/lib/`, bez ręcznych list, hashy ani statusów synchronizacji.
 - `example/` jest ignorowane przez Git. Jeśli świadomie zmieniasz demo, waliduj je osobno i nie zakładaj, że pojawi się w `git status`.
 
 ## Wiedza i stan pracy

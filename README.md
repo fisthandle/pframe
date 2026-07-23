@@ -66,6 +66,7 @@ return [
         'user' => 'root',
         'pass' => '',
     ],
+    'max_request_body_bytes' => 8_388_608, // 8 MiB; przekroczenie zwraca 413 przed dispatchem trasy
 ];
 ```
 
@@ -202,8 +203,8 @@ session_start();
 ```
 
 - **Lazy-write**: when session data is unchanged between `read()` and `write()`, only the timestamp is updated (lightweight `UPDATE` instead of full `INSERT OR REPLACE`)
-- **Advisory locks** (MySQL only): single `GET_LOCK` with configurable timeout prevents concurrent writes
-- **Graceful degradation on lock timeout**: if the advisory lock cannot be acquired within `lockTimeout` seconds (default 5), the session degrades to read-only — reads succeed, writes are silently skipped. This prevents 500 cascades under contention while preserving page rendering.
+- **Locking**: with the MySQL driver, advisory locking uses one `GET_LOCK` call; other drivers use `flock` file locks. The optional `lockDir` constructor argument selects the directory for file locks.
+- **Fail-closed lock failure**: if the lock cannot be acquired (timeout or lock error), `read()`, `write()` and `destroy()` return `false`; the caller must handle the failed operation instead of treating it as successful.
 - **Intended URL**: `Session::pullIntendedUrl(string $default = '/')` retrieves and clears the URL stored by `Middleware::auth()`
 
 ## Security
