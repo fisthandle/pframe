@@ -92,6 +92,14 @@ ten plik osobno i wymaga go jawnie w `tests/bootstrap.php` po `vendor/autoload.p
 
 PHPUnit 13 nie obsługuje `-v`; gdy potrzebny jest szczegółowy przebieg, użyj `--debug`.
 
+## Build
+
+- `composer install` — odtwarza zależności i autoloader do lokalnej walidacji biblioteki.
+
+## Lint / static analysis
+
+- `composer phpstan` — uruchamia PHPStan dla kodu frameworka w `src/`.
+
 ## Konsumenci
 
 Kopie `PFrame.php` i `PFrameTesting.php` w projektach pod `/home/pawel/dev` sprawdza:
