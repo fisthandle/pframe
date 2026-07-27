@@ -47,6 +47,7 @@ SH);
         file_put_contents($this->commandLog, '');
         $full = $this->runRunner('full');
         $this->assertSame(0, $full['exit'], $full['output']);
+        $this->assertStringContainsString('step=Consumer copies', $full['output']);
         $this->assertSame(
             ['test:unit', 'test:integration', 'test:contracts', 'phpstan'],
             $this->loggedCommands(),
@@ -73,11 +74,11 @@ SH);
         );
     }
 
-    public function testNotApplicableAndUnknownProfilesHaveStableExitCodes(): void {
+    public function testUnsupportedAndUnknownProfilesHaveStableExitCodes(): void {
         foreach (['e2e', 'ui'] as $profile) {
             $result = $this->runRunner($profile);
-            $this->assertSame(0, $result['exit'], $result['output']);
-            $this->assertStringContainsString('not applicable', $result['output']);
+            $this->assertSame(2, $result['exit'], $result['output']);
+            $this->assertStringContainsString('unsupported', $result['output']);
         }
 
         $unknown = $this->runRunner('unknown');

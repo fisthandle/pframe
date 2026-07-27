@@ -83,7 +83,7 @@ Key rules:
 
 bin/test profiles: `quick|full|ci|coverage|contracts|e2e|ui`
 - `bin/test quick` — składnia + Unit + Integration
-- `bin/test full` — quick + Contracts + PHPStan
+- `bin/test full` — quick + Contracts + Consumer copies + PHPStan
 - `bin/test ci` — full + coverage z minimalnym pokryciem linii 85%; brak drivera kończy profil błędem
 - `composer test` = alias do `bin/test quick`
 
@@ -91,6 +91,16 @@ bin/test profiles: `quick|full|ci|coverage|contracts|e2e|ui`
 ten plik osobno i wymaga go jawnie w `tests/bootstrap.php` po `vendor/autoload.php`.
 
 PHPUnit 13 nie obsługuje `-v`; gdy potrzebny jest szczegółowy przebieg, użyj `--debug`.
+
+## Konsumenci
+
+Kopie `PFrame.php` i `PFrameTesting.php` w projektach pod `/home/pawel/dev` sprawdza:
+
+```bash
+./bin/check-consumers.sh /home/pawel/dev
+```
+
+Skrypt jest tylko do odczytu: porównuje kopie z `src/`, raportuje rozjazdy i nie synchronizuje plików.
 
 ## Gotchas
 

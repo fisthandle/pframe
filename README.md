@@ -378,8 +378,8 @@ Test standard v1 profiles:
 ./bin/test ci         # full + coverage report, minimum 85% line coverage
 ./bin/test coverage   # coverage artifacts, minimum 85% line coverage
 ./bin/test contracts  # governance/contracts suite
-./bin/test e2e        # not applicable in framework repo (success)
-./bin/test ui         # not applicable in framework repo (success)
+./bin/test e2e        # unsupported in framework repo (exit 2)
+./bin/test ui         # unsupported in framework repo (exit 2)
 ```
 
 Composer aliases:

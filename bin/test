@@ -16,8 +16,8 @@ Profiles:
   ci         full + coverage report (minimum 85% line coverage)
   coverage   phpunit with coverage artifacts (minimum 85% line coverage)
   contracts  contract/governance tests
-  e2e        not applicable for pframe (returns success)
-  ui         not applicable for pframe (returns success)
+  e2e        unsupported for pframe (returns exit code 2)
+  ui         unsupported for pframe (returns exit code 2)
 USAGE
 }
 
@@ -74,8 +74,36 @@ run_quick() {
     run_step "Integration tests" composer test:integration
 }
 
+consumer_copy_present() {
+    local consumer_root="$1"
+
+    find "$consumer_root" \
+        -mindepth 3 \
+        -maxdepth 4 \
+        -type f \
+        \( -path '*/lib/PFrame.php' -o -path '*/app/lib/PFrame.php' \) \
+        -print -quit | grep -q .
+}
+
+run_consumer_check() {
+    local consumer_root="${PFRAME_CONSUMER_ROOT:-$(dirname "$ROOT_DIR")}"
+
+    if [[ ! -d "$consumer_root" ]]; then
+        echo "Consumer root does not exist: $consumer_root" >&2
+        return 1
+    fi
+
+    if ! consumer_copy_present "$consumer_root"; then
+        echo "No external consumer copies found under $consumer_root; fixture contract runs in Contracts."
+        return 0
+    fi
+
+    "$ROOT_DIR/bin/check-consumers.sh" "$consumer_root"
+}
+
 run_contracts() {
     run_step "Contracts tests" composer test:contracts
+    run_step "Consumer copies" run_consumer_check
 }
 
 run_full() {
@@ -138,11 +166,12 @@ run_coverage() {
     return 1
 }
 
-run_not_applicable() {
+run_unsupported() {
     local label="$1"
     step "$label"
-    echo "Profile is not applicable for pframe (framework-level repository)."
-    echo "status=ok duration=0s step=$label"
+    echo "Profile is unsupported for pframe (framework-level repository)." >&2
+    echo "status=unsupported duration=0s step=$label" >&2
+    return 2
 }
 
 case "$PROFILE" in
@@ -163,10 +192,10 @@ case "$PROFILE" in
         run_contracts
         ;;
     e2e)
-        run_not_applicable "E2E tests (N/A)"
+        run_unsupported "E2E tests (unsupported)"
         ;;
     ui)
-        run_not_applicable "UI tests (N/A)"
+        run_unsupported "UI tests (unsupported)"
         ;;
     *)
         usage
