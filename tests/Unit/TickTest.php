@@ -228,17 +228,20 @@ class TickTest extends TestCase {
     }
 
     public function testCommandOutputIsDrainedButBounded(): void {
-        $script = 'fwrite(STDOUT, str_repeat("o", 2 * 1024 * 1024));'
-            . 'fwrite(STDERR, str_repeat("e", 2 * 1024 * 1024)); exit(7);';
+        $outputLimit = 1_048_576;
+        $payloadBytes = 2 * $outputLimit;
+        $script = 'fwrite(STDOUT, str_repeat("o", ' . $payloadBytes . '));'
+            . 'fwrite(STDERR, str_repeat("e", ' . $payloadBytes . ')); exit(7);';
         $task = (new TickTask('bounded_output'))
-            ->command(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($script), 10);
+            ->command(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($script), 60);
 
         $result = $task->execute();
         $error = $result['error'] ?? '';
 
         self::assertFalse($result['success']);
+        self::assertStringStartsWith('Exit code 7: ', $error);
         self::assertStringContainsString('[output truncated]', $error);
-        self::assertLessThanOrEqual(1_048_600, strlen($error));
+        self::assertLessThanOrEqual($outputLimit + strlen('Exit code 7: '), strlen($error));
     }
 
     public function testTaskErrorHandling(): void {
