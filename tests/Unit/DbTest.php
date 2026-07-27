@@ -242,6 +242,54 @@ class DbTest extends TestCase {
         $this->assertStringContainsString('SELECT COUNT', $log[2]['sql']);
     }
 
+    public function testQueryLogCanBeEnabledForOneRequestAndReset(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:']);
+
+        $db->var('SELECT 0');
+        $this->assertSame(0, $db->queryCount());
+
+        $db->startQueryLog();
+        $db->var('SELECT ?', [1]);
+        $this->assertSame(1, $db->queryCount());
+        $db->stopQueryLog();
+        $db->var('SELECT 2');
+        $this->assertSame(1, $db->queryCount());
+
+        $db->resetRequestState();
+        $db->var('SELECT 3');
+        $this->assertSame(0, $db->queryCount());
+    }
+
+    public function testQueryDiagnosticsMasksBinaryValuesAndFindsDuplicates(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:']);
+        $db->exec('CREATE TABLE sample (value BLOB NOT NULL)');
+
+        $db->startQueryLog();
+        $db->exec('INSERT INTO sample (value) VALUES (?)', ["abc\0def"]);
+        $db->var('SELECT ?', [1]);
+        $db->var('SELECT ?', [2]);
+
+        $diagnostics = $db->queryDiagnostics();
+
+        $this->assertSame(3, $diagnostics['count']);
+        $this->assertGreaterThanOrEqual(0.0, $diagnostics['total_ms']);
+        $this->assertStringContainsString('[binary 7 bytes]', $diagnostics['queries'][0]['sql']);
+        $this->assertCount(1, $diagnostics['duplicates']);
+        $this->assertSame(2, $diagnostics['duplicates'][0]['count']);
+        $this->assertCount(3, $diagnostics['slowest']);
+    }
+
+    public function testQueryDiagnosticsTruncatesLongValues(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:']);
+        $db->startQueryLog();
+        $db->var('SELECT ?', [str_repeat('x', 241)]);
+
+        $sql = $db->queryDiagnostics()['queries'][0]['sql'];
+
+        $this->assertStringContainsString("'" . str_repeat('x', 240) . "…'", $sql);
+        $this->assertStringNotContainsString(str_repeat('x', 241), $sql);
+    }
+
     public function testFormattedLogReturnsEmptyStringWhenNoQueries(): void {
         $db = new Db(['dsn' => 'sqlite::memory:', 'log_queries' => true]);
         $this->assertSame('', $db->log());

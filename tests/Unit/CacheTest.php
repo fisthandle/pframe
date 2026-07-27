@@ -76,6 +76,45 @@ class CacheTest extends TestCase {
         $this->assertGreaterThan(0, $retry);
     }
 
+    public function testIncrementStartsAtOneAndIncrementsAtomically(): void {
+        $key = 'increment-' . bin2hex(random_bytes(6));
+
+        $this->assertSame(1, $this->cache->increment($key, 60));
+        $this->assertSame(2, $this->cache->increment($key, 60));
+        $this->assertSame(2, $this->cache->get($key));
+    }
+
+    public function testIncrementTreatsExpiredFileAsZero(): void {
+        if ($this->hasApcu) {
+            $this->markTestSkipped('This regression exercises the file backend.');
+        }
+
+        $key = 'expired-increment-' . bin2hex(random_bytes(6));
+        file_put_contents(
+            $this->dir . '/' . md5($key) . '.cache',
+            serialize(['value' => 17, 'ttl' => 1, 'time' => time() - 5]),
+        );
+
+        $this->assertSame(1, $this->cache->increment($key, 60));
+        $this->assertSame(1, $this->cache->get($key));
+    }
+
+    public function testIncrementRejectsNonIntegerFileState(): void {
+        if ($this->hasApcu) {
+            $this->markTestSkipped('This regression exercises the file backend.');
+        }
+
+        $key = 'invalid-increment-' . bin2hex(random_bytes(6));
+        file_put_contents(
+            $this->dir . '/' . md5($key) . '.cache',
+            serialize(['value' => 'not-an-integer', 'ttl' => 60, 'time' => time()]),
+        );
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Cache entry is not an integer');
+        $this->cache->increment($key);
+    }
+
     public function testRateCheckFailsClosedWhenLockCannotBeCreated(): void {
         $readOnlyDir = sys_get_temp_dir() . '/p1_cache_test_ro_' . uniqid('', true);
         mkdir($readOnlyDir, 0755, true);

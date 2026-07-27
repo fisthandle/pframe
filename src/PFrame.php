@@ -1415,6 +1415,7 @@ namespace PFrame {
         /** @var array<int, array{sql: string, time: float}> */
         private array $log = [];
         private int $savepointLevel = 0;
+        private readonly bool $configuredLogQueries;
         private bool $logQueries;
         private int $lastRowCount = 0;
 
@@ -1438,7 +1439,8 @@ namespace PFrame {
                 ],
             );
             $this->driver = (string) $this->pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
-            $this->logQueries = (bool) ($config['log_queries'] ?? false);
+            $this->configuredLogQueries = (bool) ($config['log_queries'] ?? false);
+            $this->logQueries = $this->configuredLogQueries;
         }
 
         public function pdo(): \PDO {
@@ -1487,9 +1489,30 @@ namespace PFrame {
                 if (is_int($v) || is_float($v)) {
                     return (string) $v;
                 }
-                return "'" . addslashes((string) $v) . "'";
+                return $this->formatLogValue((string) $v);
             }, $sql);
             return $replaced ?? $sql;
+        }
+
+        private function formatLogValue(string $value): string {
+            if (preg_match('//u', $value) !== 1 || preg_match('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', $value) === 1) {
+                return "'[binary " . strlen($value) . " bytes]'";
+            }
+
+            if (mb_strlen($value) > 240) {
+                $value = mb_substr($value, 0, 240) . '…';
+            }
+
+            return "'" . addslashes($value) . "'";
+        }
+
+        public function startQueryLog(): void {
+            $this->log = [];
+            $this->logQueries = true;
+        }
+
+        public function stopQueryLog(): void {
+            $this->logQueries = $this->configuredLogQueries;
         }
 
         /** @return array<int, array{sql: string, time: float}> */
@@ -1503,6 +1526,50 @@ namespace PFrame {
 
         public function queryTime(): float {
             return array_sum(array_column($this->log, 'time'));
+        }
+
+        /** @return array{count: int, total_ms: float, queries: list<array{sql: string, ms: float}>, duplicates: list<array{pattern: string, count: int, total_ms: float}>, slowest: list<array{sql: string, ms: float}>} */
+        public function queryDiagnostics(): array {
+            $queries = [];
+            foreach ($this->log as $entry) {
+                $queries[] = [
+                    'sql' => $entry['sql'],
+                    'ms' => round($entry['time'] * 1000, 2),
+                ];
+            }
+
+            $patterns = [];
+            foreach ($queries as $query) {
+                $pattern = (string) preg_replace(
+                    ['/\'[^\']*\'/', '/\b\d+\b/', '/\s+/'],
+                    ['?', '?', ' '],
+                    $query['sql'],
+                );
+                $patterns[$pattern] ??= ['pattern' => $pattern, 'count' => 0, 'total_ms' => 0.0];
+                $patterns[$pattern]['count']++;
+                $patterns[$pattern]['total_ms'] += $query['ms'];
+            }
+
+            $duplicates = array_values(array_filter(
+                $patterns,
+                static fn(array $pattern): bool => $pattern['count'] > 1,
+            ));
+            usort($duplicates, static fn(array $a, array $b): int => $b['count'] <=> $a['count']);
+            foreach ($duplicates as &$duplicate) {
+                $duplicate['total_ms'] = round($duplicate['total_ms'], 2);
+            }
+            unset($duplicate);
+
+            $slowest = $queries;
+            usort($slowest, static fn(array $a, array $b): int => $b['ms'] <=> $a['ms']);
+
+            return [
+                'count' => count($queries),
+                'total_ms' => round(array_sum(array_column($queries, 'ms')), 2),
+                'queries' => $queries,
+                'duplicates' => $duplicates,
+                'slowest' => array_slice($slowest, 0, 3),
+            ];
         }
 
         /**
@@ -1668,6 +1735,7 @@ namespace PFrame {
 
         public function resetRequestState(): void {
             $this->log = [];
+            $this->logQueries = $this->configuredLogQueries;
             $this->lastRowCount = 0;
             $this->savepointLevel = 0;
         }
@@ -2676,6 +2744,40 @@ namespace PFrame {
             }
         }
 
+        public function increment(string $key, int $ttl = 0): int {
+            $ttl = max(0, $ttl);
+            if ($this->hasApcu) {
+                return $this->incrementApcu($key, $ttl);
+            }
+
+            $lockPath = $this->path($key) . '.lock';
+            $handle = @fopen($lockPath, 'c');
+            if ($handle === false) {
+                throw new \RuntimeException('Failed to open cache increment lock: ' . $lockPath);
+            }
+
+            try {
+                if (!@flock($handle, LOCK_EX)) {
+                    throw new \RuntimeException('Failed to acquire cache increment lock: ' . $lockPath);
+                }
+
+                try {
+                    $current = $this->readFileInteger($key);
+                    if ($current === PHP_INT_MAX) {
+                        throw new \RuntimeException('Cache increment overflow: ' . $this->path($key));
+                    }
+
+                    $next = $current + 1;
+                    $this->set($key, $next, $ttl);
+                    return $next;
+                } finally {
+                    @flock($handle, LOCK_UN);
+                }
+            } finally {
+                fclose($handle);
+            }
+        }
+
         public function delete(string $key): void {
             if ($this->hasApcu) {
                 apcu_delete($this->apcuKey($key));
@@ -2741,6 +2843,54 @@ namespace PFrame {
 
         private function apcuKey(string $key): string {
             return $this->apcuPrefix . md5($key);
+        }
+
+        private function incrementApcu(string $key, int $ttl): int {
+            $apcuKey = $this->apcuKey($key);
+            for ($attempt = 0; $attempt < 2; $attempt++) {
+                if (apcu_add($apcuKey, 1, $ttl)) {
+                    return 1;
+                }
+
+                $success = false;
+                $value = apcu_inc($apcuKey, 1, $success);
+                if ($success && is_int($value)) {
+                    return $value;
+                }
+            }
+
+            throw new \RuntimeException('Failed to increment APCu cache entry.');
+        }
+
+        private function readFileInteger(string $key): int {
+            $path = $this->path($key);
+            if (!is_file($path)) {
+                return 0;
+            }
+
+            $serialized = @file_get_contents($path);
+            if ($serialized === false) {
+                throw new \RuntimeException('Failed to read cache entry: ' . $path);
+            }
+
+            try {
+                $data = @unserialize($serialized, ['allowed_classes' => false]);
+            } catch (\Throwable $e) {
+                throw new \RuntimeException('Failed to decode cache entry: ' . $path, 0, $e);
+            }
+
+            if (!is_array($data) || !array_key_exists('value', $data) || !isset($data['ttl'], $data['time'])) {
+                throw new \RuntimeException('Invalid cache entry: ' . $path);
+            }
+
+            if ($data['ttl'] > 0 && ((int) $data['time'] + (int) $data['ttl']) < time()) {
+                return 0;
+            }
+            if (!is_int($data['value'])) {
+                throw new \RuntimeException('Cache entry is not an integer: ' . $path);
+            }
+
+            return $data['value'];
         }
 
         private function clearApcu(): void {
@@ -3425,36 +3575,14 @@ namespace PFrame {
 
         /** @return array{gen_ms: float, db_ms: float, db_count: int, view_ms: float, views: list<array{template: string, ms: float}>, mem_mb: float, peak_mb: float, included_files: list<string>, queries: list<array{sql: string, ms: float}>, duplicates: list<array{pattern: string|null, count: int, total_ms: float}>, slowest: list<array{sql: string, ms: float}>} */
         public function toArray(): array {
-            $queries = [];
             $db = $this->app->dbIfInitialized();
-            if ($db !== null) {
-                foreach ($db->queryLog() as $entry) {
-                    $queries[] = [
-                        'sql' => $entry['sql'],
-                        'ms' => round($entry['time'] * 1000, 2),
-                    ];
-                }
-            }
-
-            // Detect duplicate query patterns (N+1)
-            $patterns = [];
-            foreach ($queries as $q) {
-                $pattern = preg_replace(['/\'[^\']*\'/', '/\b\d+\b/', '/\s+/'], ['?', '?', ' '], $q['sql']);
-                $patterns[$pattern] ??= ['pattern' => $pattern, 'count' => 0, 'total_ms' => 0.0];
-                $patterns[$pattern]['count']++;
-                $patterns[$pattern]['total_ms'] += $q['ms'];
-            }
-            $duplicates = array_values(array_filter($patterns, static fn(array $p): bool => $p['count'] > 1));
-            usort($duplicates, static fn(array $a, array $b): int => $b['count'] <=> $a['count']);
-            foreach ($duplicates as &$dup) {
-                $dup['total_ms'] = round($dup['total_ms'], 2);
-            }
-            unset($dup);
-
-            // Top 3 slowest queries
-            $slowest = $queries;
-            usort($slowest, static fn(array $a, array $b): int => $b['ms'] <=> $a['ms']);
-            $slowest = array_slice($slowest, 0, 3);
+            $diagnostics = $db?->queryDiagnostics() ?? [
+                'count' => 0,
+                'total_ms' => 0.0,
+                'queries' => [],
+                'duplicates' => [],
+                'slowest' => [],
+            ];
 
             // View render log
             $views = [];
@@ -3465,16 +3593,16 @@ namespace PFrame {
 
             return [
                 'gen_ms' => round($this->app->elapsed() * 1000, 1),
-                'db_ms' => round(array_sum(array_column($queries, 'ms')), 1),
-                'db_count' => count($queries),
+                'db_ms' => round($diagnostics['total_ms'], 1),
+                'db_count' => $diagnostics['count'],
                 'view_ms' => round(array_sum(array_column($views, 'ms')), 1),
                 'views' => $views,
                 'mem_mb' => round(memory_get_usage(true) / 1048576, 1),
                 'peak_mb' => round(memory_get_peak_usage(true) / 1048576, 1),
                 'included_files' => get_included_files(),
-                'queries' => $queries,
-                'duplicates' => $duplicates,
-                'slowest' => $slowest,
+                'queries' => $diagnostics['queries'],
+                'duplicates' => $diagnostics['duplicates'],
+                'slowest' => $diagnostics['slowest'],
             ];
         }
 
