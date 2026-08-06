@@ -19,7 +19,7 @@ Jedyny runner: `./bin/test <profile>`.
 | `ci` | `full` + coverage report, minimum 85% pokrycia linii |
 | `coverage` | phpunit z coverage artifacts (`build/coverage`), minimum 85% pokrycia linii |
 | `contracts` | governance runnera i testy kontraktowe |
-| `e2e`/`ui` | w repo frameworka N/A (czytelny komunikat + exit 0) |
+| `e2e`/`ui` | w repo frameworka N/A (czytelny komunikat + exit 2) |
 
 Komendy `composer test*` są aliasami do tego kontraktu (`composer test` = `./bin/test quick`).
 CI uruchamia dokładnie `./bin/test ci`, bez duplikowania kroków w workflow.
