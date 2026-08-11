@@ -2,7 +2,7 @@
 
 Single-file PHP 8.4+ micro-framework. Zero runtime package dependencies, copy-paste deployment.
 
-One file. 19 classes. Single-file core in `src/PFrame.php` (~4000 LOC). Everything you need, nothing you don't.
+One file. 20 classes. Single-file core in `src/PFrame.php` (~4300 LOC). Everything you need, nothing you don't.
 
 ## Quick Start
 
@@ -31,7 +31,7 @@ $app->loadConfig(dirname(__DIR__) . '/config/app.php');
 
 $session = new \PFrame\Session($app->db(), advisory: true, lockTimeout: 5);
 $session->register();
-session_start();
+$app->startSession();
 
 $app->get('/', HomeController::class, 'index');
 $app->get('/users/{id}', UserController::class, 'show', name: 'user.show');
@@ -49,7 +49,7 @@ $app->run();
 ```
 
 This is the classic one-request-per-process lifecycle. Call `Session::register()` before
-`session_start()` and before any output. The secure-cookie default assumes HTTPS; for a local
+`App::startSession()` and before any output. The secure-cookie default assumes HTTPS; for a local
 plain-HTTP development server, explicitly pass `['secure' => false]` to `register()`.
 
 ```php
@@ -67,6 +67,10 @@ return [
         'pass' => '',
     ],
     'max_request_body_bytes' => 8_388_608, // 8 MiB; przekroczenie zwraca 413 przed dispatchem trasy
+    'performance' => [
+        'server_timing' => false, // true lokalnie: metryki w DevTools/HTTP
+        'slow_ms' => 70,          // 0 wyłącza log wolnych requestów
+    ],
 ];
 ```
 
@@ -146,6 +150,7 @@ Layout:
 | `Request` | HTTP request with proxy support |
 | `Response` | HTTP response (html, json, redirect, send-and-exit helper) |
 | `SseResponse` | Streaming HTTP response for Server-Sent Events |
+| `Performance` | Bounded request profiler with wall, CPU/wait, memory and named spans |
 | `Db` | PDO wrapper with prepared statements, tx state and formatted query log |
 | `View` | Template engine with layouts and partials |
 | `Controller` | Base controller with auth, CSRF, pagination and view data bag helpers |
@@ -158,12 +163,42 @@ Layout:
 | `Cache` | Single-backend cache: APCu when available, file otherwise. Rate limiting included |
 | `TickTask` | Task definition for periodic background work (interval, time window, callback/command) |
 | `Tick` | Scheduler that runs registered `TickTask` instances with global throttle and file-lock dedup |
-| `DebugBar` | Request timing + SQL query debug overlay renderer |
+| `DebugBar` | Request/resource timing + SQL execution/fetch debug overlay renderer |
 | `Base` | Static facade for app/db/config access |
 | `HttpException` | HTTP error responses (401, 403, 404, 405) |
 
 `Cache` constructor: `new \PFrame\Cache(?string $dir = null)`.  
 When APCu is available, `dir` is optional. Without APCu, provide an existing cache directory (constructor fails fast if missing).
+
+## Performance diagnostics
+
+PFrame collects bounded, request-scoped metrics without storing SQL text by default. Built-in spans
+cover request parsing, dispatch, route matching, controller execution, response finalization,
+database connect/execute/fetch, template rendering, session start and session-lock acquisition.
+Database totals include fetching and hydrating results, not only `PDOStatement::execute()`.
+
+```php
+$result = $app->measure('forum.prepare_posts', function () use ($posts) {
+    return preparePosts($posts);
+});
+
+$metrics = $app->performance()->snapshot();
+// php_ms, app_ms, cpu_ms, wait_ms, mem_mb, peak_mb, spans
+```
+
+Set `performance.server_timing=true` in trusted development environments to expose the metrics in
+the standard `Server-Timing` response header. Set `performance.slow_ms` to a positive threshold in
+production to write one structured `WARN Slow request` entry with route, status, spans and aggregate
+database statistics. Both outputs are disabled by default.
+
+Aggregate query count, total time and fetched rows are always available through
+`Db::totalQueryCount()`, `Db::totalQueryTime()` and `Db::totalFetchedRows()`. SQL text, duplicate-query
+analysis and slowest-query details remain opt-in through `db.log_queries=true`; this avoids retaining
+parameters and growing a per-request SQL log in production.
+
+`cpu_ms` and derived `wait_ms` are reported only on non-thread-safe PHP builds. On ZTS runtimes such
+as FrankenPHP they are `null`, because PHP's `getrusage()` reports process-wide CPU and cannot safely
+attribute concurrent worker requests. Wall-clock timings and all named spans remain available.
 
 ### Global Helpers
 
@@ -203,7 +238,7 @@ Database-backed handler with advisory locks (MySQL), lazy-write optimization, an
 ```php
 $session = new \PFrame\Session($db, advisory: true, lockTimeout: 5);
 $session->register();
-session_start();
+$app->startSession();
 ```
 
 - **Lazy-write**: when session data is unchanged between `read()` and `write()`, only the timestamp is updated (lightweight `UPDATE` instead of full `INSERT OR REPLACE`)

@@ -253,8 +253,53 @@ class DbTest extends TestCase {
         $this->assertCount(3, $log);
         $this->assertStringContainsString('CREATE TABLE', $log[0]['sql']);
         $this->assertIsFloat($log[0]['time']);
+        $this->assertIsFloat($log[0]['execute_time']);
+        $this->assertSame(0.0, $log[0]['fetch_time']);
+        $this->assertSame(0, $log[0]['rows']);
         $this->assertSame("INSERT INTO t (id, name) VALUES (1, 'Joe')", $log[1]['sql']);
         $this->assertStringContainsString('SELECT COUNT', $log[2]['sql']);
+        $this->assertSame(1, $log[2]['rows']);
+        $this->assertGreaterThan(0.0, $log[2]['fetch_time']);
+        $this->assertEqualsWithDelta(
+            $log[2]['execute_time'] + $log[2]['fetch_time'],
+            $log[2]['time'],
+            0.000000001,
+        );
+    }
+
+    public function testAggregateQueryStatsWorkWhenDetailedLoggingIsDisabled(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:']);
+
+        $rows = $db->results(
+            'WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 1000) SELECT x FROM n',
+        );
+        $diagnostics = $db->queryDiagnostics();
+
+        $this->assertCount(1000, $rows);
+        $this->assertSame(0, $db->queryCount(), 'Detailed SQL logging remains opt-in');
+        $this->assertSame(1, $db->totalQueryCount());
+        $this->assertGreaterThan(0.0, $db->totalQueryTime());
+        $this->assertSame(1000, $db->totalFetchedRows());
+        $this->assertSame(1, $diagnostics['count']);
+        $this->assertSame(0, $diagnostics['logged_count']);
+        $this->assertSame(1000, $diagnostics['rows']);
+        $this->assertSame([], $diagnostics['queries']);
+    }
+
+    public function testFailedQueryIsIncludedInPerformanceStats(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:', 'log_queries' => true]);
+
+        try {
+            $db->var('SELECT missing FROM nonexistent_table');
+            $this->fail('Expected PDOException');
+        } catch (\PDOException) {
+        }
+
+        $this->assertSame(1, $db->totalQueryCount());
+        $this->assertGreaterThan(0.0, $db->totalQueryTime());
+        $this->assertSame(1, $db->queryCount());
+        $this->assertStringContainsString('nonexistent_table', $db->queryLog()[0]['sql']);
+        $this->assertSame(0, $db->queryLog()[0]['rows']);
     }
 
     public function testQueryLogCanBeEnabledForOneRequestAndReset(): void {
@@ -286,7 +331,9 @@ class DbTest extends TestCase {
 
         $diagnostics = $db->queryDiagnostics();
 
-        $this->assertSame(3, $diagnostics['count']);
+        $this->assertSame(4, $diagnostics['count']);
+        $this->assertSame(3, $diagnostics['logged_count']);
+        $this->assertSame(2, $diagnostics['rows']);
         $this->assertGreaterThanOrEqual(0.0, $diagnostics['total_ms']);
         $this->assertStringContainsString('[binary 7 bytes]', $diagnostics['queries'][0]['sql']);
         $this->assertCount(1, $diagnostics['duplicates']);
@@ -333,6 +380,9 @@ class DbTest extends TestCase {
         $this->assertSame(0, $db->queryCount());
         $this->assertSame([], $db->queryLog());
         $this->assertSame(0.0, $db->queryTime());
+        $this->assertSame(0, $db->totalQueryCount());
+        $this->assertSame(0.0, $db->totalQueryTime());
+        $this->assertSame(0, $db->totalFetchedRows());
         $this->assertSame(0, $db->count());
         $this->assertSame('', $db->log());
     }

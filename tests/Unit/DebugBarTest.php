@@ -14,8 +14,15 @@ class DebugBarTest extends TestCase {
         $data = $bar->toArray();
 
         $this->assertArrayHasKey('gen_ms', $data);
+        $this->assertArrayHasKey('php_ms', $data);
+        $this->assertArrayHasKey('cpu_ms', $data);
+        $this->assertArrayHasKey('wait_ms', $data);
+        $this->assertArrayHasKey('spans', $data);
         $this->assertArrayHasKey('db_ms', $data);
+        $this->assertArrayHasKey('db_execute_ms', $data);
+        $this->assertArrayHasKey('db_fetch_ms', $data);
         $this->assertArrayHasKey('db_count', $data);
+        $this->assertArrayHasKey('db_rows', $data);
         $this->assertArrayHasKey('mem_mb', $data);
         $this->assertArrayHasKey('peak_mb', $data);
         $this->assertArrayHasKey('queries', $data);
@@ -24,6 +31,7 @@ class DebugBarTest extends TestCase {
         $this->assertArrayHasKey('included_files', $data);
         $this->assertSame(0.0, $data['db_ms']);
         $this->assertSame(0, $data['db_count']);
+        $this->assertSame(0, $data['db_rows']);
         $this->assertSame([], $data['queries']);
         $this->assertSame([], $data['duplicates']);
         $this->assertSame([], $data['slowest']);
@@ -55,6 +63,7 @@ class DebugBarTest extends TestCase {
         $data = $bar->toArray();
 
         $this->assertSame(3, $data['db_count']);
+        $this->assertSame(1, $data['db_rows']);
         $this->assertGreaterThan(0, $data['db_ms']);
         $this->assertCount(3, $data['queries']);
         $this->assertStringContainsString('CREATE TABLE', $data['queries'][0]['sql']);
@@ -81,14 +90,17 @@ class DebugBarTest extends TestCase {
         $bar = new DebugBar($app);
         $html = $bar->render();
 
-        $this->assertStringContainsString('Gen:', $html);
+        $this->assertStringContainsString('PHP:', $html);
+        $this->assertStringContainsString('App:', $html);
         $this->assertStringContainsString('DB:', $html);
+        $this->assertStringContainsString('exec:', $html);
+        $this->assertStringContainsString('fetch:', $html);
         $this->assertStringContainsString('Mem:', $html);
         $this->assertStringContainsString('toggle', $html);
         $this->assertStringNotContainsString('<script>', $html);
         $this->assertStringContainsString('<details', $html);
         $this->assertStringContainsString('CREATE TABLE', $html);
-        $this->assertStringContainsString('(2)', $html);
+        $this->assertStringContainsString('(2, rows: 1)', $html);
     }
 
     public function testRenderNoQueries(): void {
@@ -98,6 +110,18 @@ class DebugBarTest extends TestCase {
 
         $this->assertStringContainsString('Brak zapytań.', $html);
         $this->assertStringContainsString('(0)', $html);
+    }
+
+    public function testRenderShowsAggregateStatsWithoutDetailedSqlLogging(): void {
+        $app = new App();
+        $app->setConfig('db', ['dsn' => 'sqlite::memory:']);
+        $app->db()->var('SELECT 1');
+
+        $html = (new DebugBar($app))->render();
+
+        $this->assertStringContainsString('Szczegóły SQL są wyłączone.', $html);
+        $this->assertStringContainsString('(1, rows: 1)', $html);
+        $this->assertStringNotContainsString('SELECT 1', $html);
     }
 
     public function testRenderTruncatesLongSql(): void {

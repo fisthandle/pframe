@@ -6,6 +6,7 @@ namespace PFrame\Tests\Unit;
 use PFrame\App;
 use PFrame\Csrf;
 use PFrame\HttpException;
+use PFrame\Log;
 use PFrame\Request;
 use PFrame\Response;
 use PHPUnit\Framework\TestCase;
@@ -501,6 +502,85 @@ class AppTest extends TestCase {
         $this->assertLessThan(1.0, $app->elapsed());
     }
 
+    public function testPerformanceMeasureAddsCustomSpan(): void {
+        $app = new App();
+
+        $result = $app->measure('domain.prepare', static fn(): string => 'ok');
+
+        $this->assertSame('ok', $result);
+        $this->assertSame(1, $app->performance()->snapshot()['spans']['domain_prepare']['count']);
+    }
+
+    public function testServerTimingIsDisabledByDefault(): void {
+        $app = new App();
+        $app->get('/hello', HelloStub::class, 'index');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/hello'));
+
+        $this->assertArrayNotHasKey('Server-Timing', $response->headers);
+    }
+
+    public function testServerTimingContainsRequestLifecycleSpans(): void {
+        $app = new App();
+        $app->setConfig('performance.server_timing', true);
+        $app->get('/hello', HelloStub::class, 'index');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/hello'));
+        $header = $response->headers['Server-Timing'] ?? '';
+
+        $this->assertStringContainsString('php;dur=', $header);
+        $this->assertStringContainsString('app;dur=', $header);
+        $this->assertStringContainsString('dispatch;dur=', $header);
+        $this->assertStringContainsString('route;dur=', $header);
+        $this->assertStringContainsString('controller;dur=', $header);
+        $this->assertStringContainsString('finalize;dur=', $header);
+    }
+
+    public function testServerTimingAppendsToExistingHeaderCaseInsensitively(): void {
+        $app = new App();
+        $app->setConfig('performance.server_timing', true);
+        $app->get('/timing', HeaderCtrl::class, 'serverTiming');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/timing'));
+
+        $this->assertArrayHasKey('server-timing', $response->headers);
+        $this->assertArrayNotHasKey('Server-Timing', $response->headers);
+        $this->assertStringStartsWith('upstream;dur=1.00, php;dur=', $response->headers['server-timing']);
+    }
+
+    public function testSlowRequestWritesStructuredPerformanceLog(): void {
+        $tmpDir = sys_get_temp_dir() . '/pframe_slow_log_' . bin2hex(random_bytes(6));
+        mkdir($tmpDir);
+        $basePath = new \ReflectionProperty(Log::class, 'basePath');
+        $minLevel = new \ReflectionProperty(Log::class, 'minLevel');
+        $previousBasePath = $basePath->getValue();
+        $previousMinLevel = $minLevel->getValue();
+
+        try {
+            Log::init($tmpDir, 1);
+            $app = new App();
+            $app->setConfig('performance.slow_ms', 0.01);
+            $app->get('/slow', SlowCtrl::class, 'run');
+
+            $app->handle(new Request(method: 'GET', path: '/slow'));
+
+            $files = glob($tmpDir . '/*app.log') ?: [];
+            $this->assertCount(1, $files);
+            $content = (string) file_get_contents($files[0]);
+            $this->assertStringContainsString('WARN Slow request', $content);
+            $this->assertStringContainsString('"path":"\\/slow"', $content);
+            $this->assertStringContainsString('"performance":', $content);
+            $this->assertStringContainsString('"db_count":0', $content);
+        } finally {
+            foreach (glob($tmpDir . '/*') ?: [] as $file) {
+                @unlink($file);
+            }
+            @rmdir($tmpDir);
+            $basePath->setValue(null, $previousBasePath);
+            $minLevel->setValue(null, $previousMinLevel);
+        }
+    }
+
     public function testResetRequestStateResetsElapsed(): void {
         $app = new App();
         usleep(10000); // 10ms
@@ -700,9 +780,20 @@ class WarningCtrl {
     }
 }
 
+class SlowCtrl {
+    public function run(): Response {
+        usleep(1000);
+        return new Response('ok');
+    }
+}
+
 class HeaderCtrl {
     public function customCsp(): Response {
         return new Response('ok', headers: ['content-security-policy' => "default-src 'none'"]);
+    }
+
+    public function serverTiming(): Response {
+        return new Response('ok', headers: ['server-timing' => 'upstream;dur=1.00']);
     }
 }
 

@@ -183,6 +183,7 @@ class WorkerModeTest extends TestCase {
         $app = new App();
         $app->get('/worker-session', WorkerSessionCtrl::class, 'index');
         $this->primeGlobals('GET', '/worker-session');
+        $app->performance()->record('stale', 1.0);
 
         $sessionId = bin2hex(random_bytes(8));
         session_id($sessionId);
@@ -196,6 +197,10 @@ class WorkerModeTest extends TestCase {
 
         $this->assertSame('session-ok', $output);
         $this->assertSame(PHP_SESSION_NONE, session_status(), 'runWorkerRequest() must close the session after the request');
+        $spans = $app->performance()->snapshot()['spans'];
+        $this->assertArrayHasKey('session_start', $spans);
+        $this->assertSame(1, $spans['session_start']['count']);
+        $this->assertArrayNotHasKey('stale', $spans, 'Worker request must reset profiler state before dispatch');
 
         session_id($sessionId);
         $this->assertTrue(session_start());

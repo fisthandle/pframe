@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace PFrame\Tests\Unit;
 
+use PFrame\Performance;
 use PFrame\View;
 use PHPUnit\Framework\TestCase;
 
@@ -23,6 +24,17 @@ class ViewTest extends TestCase {
         $this->assertStringContainsString('<html>', $html);
         $this->assertStringContainsString('<title>Test</title>', $html);
         $this->assertStringContainsString('Content here', $html);
+    }
+
+    public function testRenderRecordsEveryTemplateInPerformanceProfiler(): void {
+        $performance = new Performance();
+        $this->view->setPerformance($performance);
+
+        $this->view->render('with_layout.php', ['title' => 'Test']);
+
+        $span = $performance->snapshot()['spans']['view'];
+        $this->assertSame(2, $span['count']);
+        $this->assertGreaterThanOrEqual(0.0, $span['ms']);
     }
 
     public function testVariablesEscaped(): void {

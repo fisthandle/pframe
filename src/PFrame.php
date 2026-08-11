@@ -512,6 +512,137 @@ namespace PFrame {
         }
     }
 
+    class Performance {
+        private const MAX_SPANS = 64;
+        private const MAX_SERVER_TIMING_SPANS = 20;
+
+        private int $appStartNs;
+        private float $phpStartWall;
+        private ?float $cpuStartMs;
+
+        /** @var array<string, array{ms: float, count: int}> */
+        private array $spans = [];
+
+        public function __construct() {
+            $this->resetRequestState();
+        }
+
+        public function resetRequestState(): void {
+            $this->appStartNs = hrtime(true);
+            $this->phpStartWall = $this->resolvePhpStartWall();
+            $this->cpuStartMs = $this->cpuMilliseconds();
+            $this->spans = [];
+        }
+
+        /**
+         * @template T
+         * @param callable(): T $callback
+         * @return T
+         */
+        public function measure(string $name, callable $callback): mixed {
+            $start = hrtime(true);
+            try {
+                return $callback();
+            } finally {
+                $this->record($name, (hrtime(true) - $start) / 1_000_000);
+            }
+        }
+
+        public function record(string $name, float $milliseconds): void {
+            if ($milliseconds < 0 || !is_finite($milliseconds)) {
+                return;
+            }
+
+            $name = $this->normalizeName($name);
+            if (!isset($this->spans[$name]) && count($this->spans) >= self::MAX_SPANS - 1) {
+                $name = 'other';
+            }
+
+            $this->spans[$name] ??= ['ms' => 0.0, 'count' => 0];
+            $this->spans[$name]['ms'] += $milliseconds;
+            $this->spans[$name]['count']++;
+        }
+
+        public function appMilliseconds(): float {
+            return (hrtime(true) - $this->appStartNs) / 1_000_000;
+        }
+
+        /** @return array{php_ms: float, app_ms: float, cpu_ms: ?float, wait_ms: ?float, mem_mb: float, peak_mb: float, spans: array<string, array{ms: float, count: int}>} */
+        public function snapshot(): array {
+            $appMs = $this->appMilliseconds();
+            $cpuNow = $this->cpuMilliseconds();
+            $cpuMs = $cpuNow !== null && $this->cpuStartMs !== null
+                ? max(0.0, $cpuNow - $this->cpuStartMs)
+                : null;
+
+            return [
+                'php_ms' => round(max(0.0, (microtime(true) - $this->phpStartWall) * 1000), 2),
+                'app_ms' => round($appMs, 2),
+                'cpu_ms' => $cpuMs === null ? null : round($cpuMs, 2),
+                'wait_ms' => $cpuMs === null ? null : round(max(0.0, $appMs - $cpuMs), 2),
+                'mem_mb' => round(memory_get_usage(true) / 1048576, 2),
+                'peak_mb' => round(memory_get_peak_usage(true) / 1048576, 2),
+                'spans' => $this->roundedSpans(),
+            ];
+        }
+
+        public function serverTiming(): string {
+            $snapshot = $this->snapshot();
+            $metrics = [
+                $this->formatMetric('php', $snapshot['php_ms']),
+                $this->formatMetric('app', $snapshot['app_ms']),
+            ];
+            if ($snapshot['cpu_ms'] !== null && $snapshot['wait_ms'] !== null) {
+                $metrics[] = $this->formatMetric('cpu', $snapshot['cpu_ms']);
+                $metrics[] = $this->formatMetric('wait', $snapshot['wait_ms']);
+            }
+
+            foreach (array_slice($snapshot['spans'], 0, self::MAX_SERVER_TIMING_SPANS, true) as $name => $span) {
+                $metrics[] = $this->formatMetric($name, $span['ms']);
+            }
+            return implode(', ', $metrics);
+        }
+
+        /** @return array<string, array{ms: float, count: int}> */
+        private function roundedSpans(): array {
+            $spans = [];
+            foreach ($this->spans as $name => $span) {
+                $spans[$name] = ['ms' => round($span['ms'], 2), 'count' => $span['count']];
+            }
+            return $spans;
+        }
+
+        private function resolvePhpStartWall(): float {
+            $now = microtime(true);
+            $requestStart = (float) ($_SERVER['REQUEST_TIME_FLOAT'] ?? 0.0);
+            if (PHP_SAPI !== 'cli' && $requestStart > 0.0 && $requestStart <= $now) {
+                return $requestStart;
+            }
+            return $now;
+        }
+
+        private function cpuMilliseconds(): ?float {
+            if (PHP_ZTS !== 0 || !function_exists('getrusage')) {
+                return null;
+            }
+            $usage = getrusage();
+            if (!is_array($usage)) {
+                return null;
+            }
+            return (($usage['ru_utime.tv_sec'] ?? 0) + ($usage['ru_stime.tv_sec'] ?? 0)) * 1000
+                + (($usage['ru_utime.tv_usec'] ?? 0) + ($usage['ru_stime.tv_usec'] ?? 0)) / 1000;
+        }
+
+        private function normalizeName(string $name): string {
+            $name = (string) preg_replace('/[^A-Za-z0-9_-]/', '_', trim($name));
+            return substr($name === '' ? 'custom' : $name, 0, 48);
+        }
+
+        private function formatMetric(string $name, float $milliseconds): string {
+            return sprintf('%s;dur=%.2f', $this->normalizeName($name), $milliseconds);
+        }
+    }
+
     /** @phpstan-consistent-constructor */
     class App {
         private static ?self $instance = null;
@@ -565,16 +696,29 @@ namespace PFrame {
         private ?Db $db = null;
         private ?View $lastView = null;
 
-        private float $startTime;
+        private Performance $performance;
 
         public function __construct() {
-            $this->startTime = microtime(true);
+            $this->performance = new Performance();
             self::$instance = $this;
             $this->registerErrorHandlers();
         }
 
         public function elapsed(): float {
-            return microtime(true) - $this->startTime;
+            return $this->performance->appMilliseconds() / 1000;
+        }
+
+        public function performance(): Performance {
+            return $this->performance;
+        }
+
+        /**
+         * @template T
+         * @param callable(): T $callback
+         * @return T
+         */
+        public function measure(string $name, callable $callback): mixed {
+            return $this->performance->measure($name, $callback);
         }
 
         public static function instance(): static {
@@ -590,7 +734,7 @@ namespace PFrame {
         }
 
         public function resetRequestState(): void {
-            $this->startTime = microtime(true);
+            $this->performance->resetRequestState();
             $this->lastView = null;
         }
 
@@ -651,7 +795,7 @@ namespace PFrame {
                 if (!is_array($config)) {
                     throw new \RuntimeException('Database not configured.');
                 }
-                $this->db = new Db($config);
+                $this->db = new Db($config, $this->performance);
             }
             return $this->db;
         }
@@ -662,6 +806,7 @@ namespace PFrame {
 
         public function setDb(Db $db): void {
             $this->db = $db;
+            $this->db->setPerformance($this->performance);
         }
 
         public function lastView(): ?View {
@@ -670,6 +815,7 @@ namespace PFrame {
 
         public function setLastView(View $view): void {
             $this->lastView = $view;
+            $view->setPerformance($this->performance);
         }
 
         /** @param callable(HttpException, Request, self): ?Response $handler */
@@ -821,33 +967,56 @@ namespace PFrame {
             $this->middleware[] = $middleware;
         }
 
+        /** @param array<string, mixed> $options */
+        public function startSession(array $options = []): bool {
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                return true;
+            }
+            return $this->performance->measure(
+                'session.start',
+                static fn(): bool => session_start($options),
+            );
+        }
+
         public function handle(Request $request): Response {
             return $this->withErrorHandler(function () use ($request): Response {
-                try {
-                    if ($request->bodyTooLarge) {
-                        throw new HttpException(413, 'Payload Too Large');
+                $response = $this->performance->measure('dispatch', function () use ($request): Response {
+                    try {
+                        if ($request->bodyTooLarge) {
+                            throw new HttpException(413, 'Payload Too Large');
+                        }
+                        return $this->applyMiddleware(
+                            $request,
+                            fn (Request $req): Response => $this->dispatch($req),
+                            $this->middleware,
+                        );
+                    } catch (HttpException $e) {
+                        return $this->handleHttpException($e, $request);
+                    } catch (\Throwable $e) {
+                        return $this->handleException($e, $request);
                     }
-                    $response = $this->applyMiddleware(
-                        $request,
-                        fn (Request $req): Response => $this->dispatch($req),
-                        $this->middleware,
-                    );
-                } catch (HttpException $e) {
-                    $response = $this->handleHttpException($e, $request);
-                } catch (\Throwable $e) {
-                    $response = $this->handleException($e, $request);
-                }
+                });
 
                 try {
-                    return $this->finalizeResponse($response, $request);
+                    $response = $this->performance->measure(
+                        'finalize',
+                        fn(): Response => $this->finalizeResponse($response, $request),
+                    );
                 } catch (\Throwable $e) {
-                    return $this->finalizeResponse($this->handleException($e, $request), $request);
+                    $response = $this->performance->measure(
+                        'finalize',
+                        fn(): Response => $this->finalizeResponse($this->handleException($e, $request), $request),
+                    );
                 }
+                return $this->addPerformanceDiagnostics($response, $request);
             });
         }
 
         private function dispatch(Request $request): Response {
-            $match = $this->matchRoute($request->method, $request->path, $request->isAjax());
+            $match = $this->performance->measure(
+                'route',
+                fn(): ?array => $this->matchRoute($request->method, $request->path, $request->isAjax()),
+            );
             if ($match === null) {
                 throw HttpException::notFound();
             }
@@ -856,10 +1025,13 @@ namespace PFrame {
 
             return $this->applyMiddleware(
                 $request,
-                fn (Request $req): Response => $this->invokeController(
-                    $req,
-                    $match['controller'],
-                    $match['action'],
+                fn (Request $req): Response => $this->performance->measure(
+                    'controller',
+                    fn(): Response => $this->invokeController(
+                        $req,
+                        $match['controller'],
+                        $match['action'],
+                    ),
                 ),
                 $match['middleware'],
             );
@@ -1180,6 +1352,50 @@ namespace PFrame {
             return $response;
         }
 
+        private function addPerformanceDiagnostics(Response $response, Request $request): Response {
+            if ($response instanceof SseResponse) {
+                return $response;
+            }
+
+            if ((bool) $this->config('performance.server_timing', false)) {
+                $timing = $this->performance->serverTiming();
+                $this->appendHeader($response, 'Server-Timing', $timing);
+            }
+
+            $slowMs = max(0.0, (float) $this->config('performance.slow_ms', 0.0));
+            if ($slowMs > 0.0) {
+                $snapshot = $this->performance->snapshot();
+                if ($snapshot['php_ms'] >= $slowMs) {
+                    $this->logSlowRequest($request, $response, $snapshot);
+                }
+            }
+            return $response;
+        }
+
+        /** @param array{php_ms: float, app_ms: float, cpu_ms: ?float, wait_ms: ?float, mem_mb: float, peak_mb: float, spans: array<string, array{ms: float, count: int}>} $snapshot */
+        private function logSlowRequest(Request $request, Response $response, array $snapshot): void {
+            $db = $this->dbIfInitialized();
+            Log::warn('Slow request', [
+                'method' => $request->method,
+                'path' => $request->path,
+                'status' => $response->status,
+                'performance' => $snapshot,
+                'db_count' => $db?->totalQueryCount() ?? 0,
+                'db_ms' => round(($db?->totalQueryTime() ?? 0.0) * 1000, 2),
+                'db_rows' => $db?->totalFetchedRows() ?? 0,
+            ]);
+        }
+
+        private function appendHeader(Response $response, string $name, string $value): void {
+            foreach ($response->headers as $key => $existing) {
+                if (strcasecmp($key, $name) === 0) {
+                    $response->headers[$key] = $existing . ', ' . $value;
+                    return;
+                }
+            }
+            $response->headers[$name] = $value;
+        }
+
         /** @param array<string, string|null> $headers */
         private function hasHeader(array $headers, string $name): bool {
             foreach ($headers as $key => $_) {
@@ -1316,7 +1532,10 @@ namespace PFrame {
             }
             $trusted = array_values(array_filter($trusted, static fn(mixed $ip): bool => is_string($ip) && $ip !== ''));
             $maxBodyBytes = max(0, (int) $this->config('max_request_body_bytes', Request::DEFAULT_MAX_BODY_BYTES));
-            $request = Request::fromGlobalsWithProxies($trusted, $maxBodyBytes);
+            $request = $this->performance->measure(
+                'request',
+                fn(): Request => Request::fromGlobalsWithProxies($trusted, $maxBodyBytes),
+            );
             $response = $this->handle($request);
             try {
                 $response->send();
@@ -1341,7 +1560,7 @@ namespace PFrame {
 
             try {
                 if ($startSession && session_status() !== PHP_SESSION_ACTIVE) {
-                    if (!session_start()) {
+                    if (!$this->startSession()) {
                         throw new \RuntimeException('Failed to start worker session.');
                     }
                 }
@@ -1411,16 +1630,21 @@ namespace PFrame {
     class Db {
         private \PDO $pdo;
         private readonly string $driver;
+        private ?Performance $performance = null;
 
-        /** @var array<int, array{sql: string, time: float}> */
+        /** @var array<int, array{sql: string, time: float, execute_time: float, fetch_time: float, rows: int}> */
         private array $log = [];
         private int $savepointLevel = 0;
         private readonly bool $configuredLogQueries;
         private bool $logQueries;
         private int $lastRowCount = 0;
+        private int $totalQueryCount = 0;
+        private float $totalQueryTime = 0.0;
+        private int $totalFetchedRows = 0;
 
         /** @param array<string, mixed> $config */
-        public function __construct(array $config) {
+        public function __construct(array $config, ?Performance $performance = null) {
+            $this->performance = $performance;
             $dsn = $config['dsn'] ?? sprintf(
                 'mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4',
                 $config['host'] ?? 'localhost',
@@ -1428,16 +1652,21 @@ namespace PFrame {
                 $config['name'] ?? '',
             );
 
-            $this->pdo = new \PDO(
-                $dsn,
-                $config['user'] ?? null,
-                $config['pass'] ?? null,
-                [
-                    \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-                    \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-                    \PDO::ATTR_EMULATE_PREPARES => false,
-                ],
-            );
+            $connectStart = hrtime(true);
+            try {
+                $this->pdo = new \PDO(
+                    $dsn,
+                    $config['user'] ?? null,
+                    $config['pass'] ?? null,
+                    [
+                        \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+                        \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+                        \PDO::ATTR_EMULATE_PREPARES => false,
+                    ],
+                );
+            } finally {
+                $this->performance?->record('db.connect', (hrtime(true) - $connectStart) / 1_000_000);
+            }
             $this->driver = (string) $this->pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
             $this->configuredLogQueries = (bool) ($config['log_queries'] ?? false);
             $this->logQueries = $this->configuredLogQueries;
@@ -1451,6 +1680,14 @@ namespace PFrame {
             return $this->driver;
         }
 
+        public function setPerformance(?Performance $performance): void {
+            $this->performance = $performance;
+        }
+
+        public function performance(): ?Performance {
+            return $this->performance;
+        }
+
         /**
          * @param array<int|string, mixed>|string|null $params
          * @return array<int|string, mixed>|null
@@ -1462,17 +1699,53 @@ namespace PFrame {
             return $params;
         }
 
-        /** @param array<int|string, mixed>|string|null $params */
-        private function run(string $sql, array|string|null $params): \PDOStatement {
-            $t = microtime(true);
+        /**
+         * @template T
+         * @param array<int|string, mixed>|string|null $params
+         * @param callable(\PDOStatement): T $consume
+         * @return T
+         */
+        private function executeQuery(string $sql, array|string|null $params, bool $fetchesRows, callable $consume): mixed {
+            $start = hrtime(true);
             $norm = $this->norm($params);
-            $stmt = $this->pdo->prepare($sql);
-            $stmt->execute($norm);
-            $this->lastRowCount = $stmt->rowCount();
-            if ($this->logQueries) {
-                $this->log[] = ['sql' => $this->interpolate($sql, $norm), 'time' => microtime(true) - $t];
+            $executeEnd = null;
+            $executed = false;
+            $this->lastRowCount = 0;
+            try {
+                $stmt = $this->pdo->prepare($sql);
+                $stmt->execute($norm);
+                $executeEnd = hrtime(true);
+                $executed = true;
+                return $consume($stmt);
+            } finally {
+                $end = hrtime(true);
+                $this->recordQuery($sql, $norm, $start, $executeEnd ?? $end, $end, $fetchesRows && $executed);
             }
-            return $stmt;
+        }
+
+        /** @param array<int|string, mixed>|null $params */
+        private function recordQuery(string $sql, ?array $params, int $start, int $executeEnd, int $end, bool $fetchesRows): void {
+            $executeSeconds = ($executeEnd - $start) / 1_000_000_000;
+            $fetchSeconds = $fetchesRows ? ($end - $executeEnd) / 1_000_000_000 : 0.0;
+            $totalSeconds = ($end - $start) / 1_000_000_000;
+            $this->totalQueryCount++;
+            $this->totalQueryTime += $totalSeconds;
+            $this->totalFetchedRows += $fetchesRows ? $this->lastRowCount : 0;
+            $this->performance?->record('db.execute', $executeSeconds * 1000);
+            if ($fetchesRows) {
+                $this->performance?->record('db.fetch', $fetchSeconds * 1000);
+            }
+            $this->performance?->record('db', $totalSeconds * 1000);
+
+            if ($this->logQueries) {
+                $this->log[] = [
+                    'sql' => $this->interpolate($sql, $params),
+                    'time' => $totalSeconds,
+                    'execute_time' => $executeSeconds,
+                    'fetch_time' => $fetchSeconds,
+                    'rows' => $this->lastRowCount,
+                ];
+            }
         }
 
         /** @param array<int|string, mixed>|null $params */
@@ -1515,7 +1788,7 @@ namespace PFrame {
             $this->logQueries = $this->configuredLogQueries;
         }
 
-        /** @return array<int, array{sql: string, time: float}> */
+        /** @return array<int, array{sql: string, time: float, execute_time: float, fetch_time: float, rows: int}> */
         public function queryLog(): array {
             return $this->log;
         }
@@ -1528,13 +1801,28 @@ namespace PFrame {
             return array_sum(array_column($this->log, 'time'));
         }
 
-        /** @return array{count: int, total_ms: float, queries: list<array{sql: string, ms: float}>, duplicates: list<array{pattern: string, count: int, total_ms: float}>, slowest: list<array{sql: string, ms: float}>} */
+        public function totalQueryCount(): int {
+            return $this->totalQueryCount;
+        }
+
+        public function totalQueryTime(): float {
+            return $this->totalQueryTime;
+        }
+
+        public function totalFetchedRows(): int {
+            return $this->totalFetchedRows;
+        }
+
+        /** @return array{count: int, logged_count: int, total_ms: float, rows: int, queries: list<array{sql: string, ms: float, execute_ms: float, fetch_ms: float, rows: int}>, duplicates: list<array{pattern: string, count: int, total_ms: float}>, slowest: list<array{sql: string, ms: float, execute_ms: float, fetch_ms: float, rows: int}>} */
         public function queryDiagnostics(): array {
             $queries = [];
             foreach ($this->log as $entry) {
                 $queries[] = [
                     'sql' => $entry['sql'],
                     'ms' => round($entry['time'] * 1000, 2),
+                    'execute_ms' => round($entry['execute_time'] * 1000, 2),
+                    'fetch_ms' => round($entry['fetch_time'] * 1000, 2),
+                    'rows' => $entry['rows'],
                 ];
             }
 
@@ -1564,8 +1852,10 @@ namespace PFrame {
             usort($slowest, static fn(array $a, array $b): int => $b['ms'] <=> $a['ms']);
 
             return [
-                'count' => count($queries),
-                'total_ms' => round(array_sum(array_column($queries, 'ms')), 2),
+                'count' => $this->totalQueryCount,
+                'logged_count' => count($queries),
+                'total_ms' => round($this->totalQueryTime * 1000, 2),
+                'rows' => $this->totalFetchedRows,
                 'queries' => $queries,
                 'duplicates' => $duplicates,
                 'slowest' => array_slice($slowest, 0, 3),
@@ -1577,20 +1867,26 @@ namespace PFrame {
          * @return int|list<array<string, mixed>>
          */
         public function exec(string $sql, array|string|null $params = null): int|array {
-            $stmt = $this->run($sql, $params);
             if ($this->isSelectQuery($sql)) {
-                $rows = $stmt->fetchAll();
-                $this->lastRowCount = count($rows);
-                return array_values($rows);
+                return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): array {
+                    $rows = array_values($stmt->fetchAll());
+                    $this->lastRowCount = count($rows);
+                    return $rows;
+                });
             }
-            return $stmt->rowCount();
+            return $this->executeQuery($sql, $params, false, function (\PDOStatement $stmt): int {
+                $this->lastRowCount = $stmt->rowCount();
+                return $this->lastRowCount;
+            });
         }
 
         /** @param array<int|string, mixed>|string|null $params */
         public function var(string $sql, array|string|null $params = null): mixed {
-            $row = $this->run($sql, $params)->fetch(\PDO::FETCH_NUM);
-            $this->lastRowCount = $row === false ? 0 : 1;
-            return $row === false ? null : $row[0];
+            return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): mixed {
+                $row = $stmt->fetch(\PDO::FETCH_NUM);
+                $this->lastRowCount = $row === false ? 0 : 1;
+                return $row === false ? null : $row[0];
+            });
         }
 
         /**
@@ -1598,9 +1894,11 @@ namespace PFrame {
          * @return array<string, mixed>|null
          */
         public function row(string $sql, array|string|null $params = null): ?array {
-            $row = $this->run($sql, $params)->fetch();
-            $this->lastRowCount = $row === false ? 0 : 1;
-            return $row === false ? null : $row;
+            return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): ?array {
+                $row = $stmt->fetch();
+                $this->lastRowCount = $row === false ? 0 : 1;
+                return $row === false ? null : $row;
+            });
         }
 
         /**
@@ -1608,9 +1906,11 @@ namespace PFrame {
          * @return list<array<string, mixed>>
          */
         public function results(string $sql, array|string|null $params = null): array {
-            $rows = array_values($this->run($sql, $params)->fetchAll());
-            $this->lastRowCount = count($rows);
-            return $rows;
+            return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): array {
+                $rows = array_values($stmt->fetchAll());
+                $this->lastRowCount = count($rows);
+                return $rows;
+            });
         }
 
         /**
@@ -1618,14 +1918,18 @@ namespace PFrame {
          * @return list<mixed>
          */
         public function col(string $sql, array|string|null $params = null): array {
-            $values = array_values($this->run($sql, $params)->fetchAll(\PDO::FETCH_COLUMN));
-            $this->lastRowCount = count($values);
-            return $values;
+            return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): array {
+                $values = array_values($stmt->fetchAll(\PDO::FETCH_COLUMN));
+                $this->lastRowCount = count($values);
+                return $values;
+            });
         }
 
         /** @param array<int|string, mixed>|string|null $params */
         public function insertGetId(string $sql, array|string|null $params = null): int {
-            $this->run($sql, $params);
+            $this->executeQuery($sql, $params, false, function (\PDOStatement $stmt): void {
+                $this->lastRowCount = $stmt->rowCount();
+            });
             return (int) $this->pdo->lastInsertId();
         }
 
@@ -1738,6 +2042,9 @@ namespace PFrame {
             $this->log = [];
             $this->logQueries = $this->configuredLogQueries;
             $this->lastRowCount = 0;
+            $this->totalQueryCount = 0;
+            $this->totalQueryTime = 0.0;
+            $this->totalFetchedRows = 0;
             $this->savepointLevel = 0;
         }
 
@@ -1874,6 +2181,7 @@ namespace PFrame {
     class View {
         private ?string $layoutFile = null;
         private readonly string $realBasePath;
+        private ?Performance $performance = null;
 
         /** @var array<string, mixed> */
         private array $layoutData = [];
@@ -1896,6 +2204,10 @@ namespace PFrame {
 
         public function renderTime(): float {
             return array_sum(array_column($this->renderLog, 'ms'));
+        }
+
+        public function setPerformance(?Performance $performance): void {
+            $this->performance = $performance;
         }
 
         /** @param array<string, mixed> $data */
@@ -1937,7 +2249,7 @@ namespace PFrame {
             $view = $this;
             extract($data, EXTR_SKIP);
 
-            $t = microtime(true);
+            $start = hrtime(true);
             $initialBufferLevel = ob_get_level();
             ob_start();
             try {
@@ -1973,7 +2285,9 @@ namespace PFrame {
                 }
                 $result = $chunk . $result;
             }
-            $this->renderLog[] = ['template' => $template, 'ms' => round((microtime(true) - $t) * 1000, 2)];
+            $milliseconds = (hrtime(true) - $start) / 1_000_000;
+            $this->renderLog[] = ['template' => $template, 'ms' => round($milliseconds, 2)];
+            $this->performance?->record('view', $milliseconds);
             return $result;
         }
     }
@@ -1990,6 +2304,7 @@ namespace PFrame {
         private $fileLockHandle = null;
         private string $initialData = '';
         private bool $initialDataLoaded = false;
+        private readonly ?Performance $performance;
 
         public function __construct(
             private readonly Db $db,
@@ -1997,6 +2312,7 @@ namespace PFrame {
             private readonly int $lockTimeout = 5,
             ?string $lockDir = null,
         ) {
+            $this->performance = $this->db->performance();
             $this->useAdvisoryLock = $this->advisory && $this->db->driver() === 'mysql';
             $this->useFileLock = $this->advisory && !$this->useAdvisoryLock;
             $this->fileLockDir = $this->useFileLock ? $this->resolveFileLockDir($lockDir) : null;
@@ -2152,9 +2468,13 @@ namespace PFrame {
                 $this->releaseLock();
             }
 
-            return $this->useAdvisoryLock
+            $acquire = fn(): bool => $this->useAdvisoryLock
                 ? $this->acquireAdvisoryLock($id)
                 : $this->acquireFileLock($id);
+            if ($this->performance === null) {
+                return $acquire();
+            }
+            return $this->performance->measure('session.lock', $acquire);
         }
 
         private function acquireAdvisoryLock(string $id): bool {
@@ -3665,10 +3985,15 @@ namespace PFrame {
             return ['list' => $list, 'count' => count($files)];
         }
 
-        /** @param array{gen_ms: float, db_ms: float, db_count: int, view_ms: float, views: list<array{template: string, ms: float}>, mem_mb: float, peak_mb: float} $d */
+        /** @param array{php_ms: float, gen_ms: float, cpu_ms: ?float, wait_ms: ?float, db_ms: float, db_execute_ms: float, db_fetch_ms: float, db_count: int, db_rows: int, view_ms: float, views: list<array{template: string, ms: float}>, mem_mb: float, peak_mb: float} $d */
         private function renderSummary(array $d, int $fileCount): string {
-            return 'Gen: <b>' . $d['gen_ms'] . 'ms</b>'
-                . ' | DB: <b>' . $d['db_ms'] . 'ms</b> (' . $d['db_count'] . ')'
+            $cpu = $d['cpu_ms'] === null || $d['wait_ms'] === null
+                ? ''
+                : ' | CPU: <b>' . $d['cpu_ms'] . 'ms</b> | Wait: <b>' . $d['wait_ms'] . 'ms</b>';
+            return 'PHP: <b>' . $d['php_ms'] . 'ms</b> | App: <b>' . $d['gen_ms'] . 'ms</b>'
+                . $cpu
+                . ' | DB: <b>' . $d['db_ms'] . 'ms</b> (' . $d['db_count'] . ', rows: ' . $d['db_rows'] . ')'
+                . ' [exec: ' . $d['db_execute_ms'] . 'ms, fetch: ' . $d['db_fetch_ms'] . 'ms]'
                 . ' | View: <b>' . $d['view_ms'] . 'ms</b> (' . count($d['views']) . ')'
                 . ' | Mem: <b>' . $d['mem_mb'] . 'MB</b> (peak: ' . $d['peak_mb'] . 'MB)'
                 . ' | Files: <b>' . $fileCount . '</b>';
@@ -3728,16 +4053,20 @@ namespace PFrame {
                 . '</div>';
         }
 
-        /** @return array{gen_ms: float, db_ms: float, db_count: int, view_ms: float, views: list<array{template: string, ms: float}>, mem_mb: float, peak_mb: float, included_files: list<string>, queries: list<array{sql: string, ms: float}>, duplicates: list<array{pattern: string|null, count: int, total_ms: float}>, slowest: list<array{sql: string, ms: float}>} */
+        /** @return array{php_ms: float, gen_ms: float, cpu_ms: ?float, wait_ms: ?float, spans: array<string, array{ms: float, count: int}>, db_ms: float, db_execute_ms: float, db_fetch_ms: float, db_count: int, db_rows: int, view_ms: float, views: list<array{template: string, ms: float}>, mem_mb: float, peak_mb: float, included_files: list<string>, queries: list<array{sql: string, ms: float, execute_ms: float, fetch_ms: float, rows: int}>, duplicates: list<array{pattern: string, count: int, total_ms: float}>, slowest: list<array{sql: string, ms: float, execute_ms: float, fetch_ms: float, rows: int}>} */
         public function toArray(): array {
             $db = $this->app->dbIfInitialized();
             $diagnostics = $db?->queryDiagnostics() ?? [
                 'count' => 0,
+                'logged_count' => 0,
                 'total_ms' => 0.0,
+                'rows' => 0,
                 'queries' => [],
                 'duplicates' => [],
                 'slowest' => [],
             ];
+            $performance = $this->app->performance()->snapshot();
+            $spans = $performance['spans'];
 
             // View render log
             $views = [];
@@ -3747,13 +4076,20 @@ namespace PFrame {
             }
 
             return [
-                'gen_ms' => round($this->app->elapsed() * 1000, 1),
+                'php_ms' => round($performance['php_ms'], 1),
+                'gen_ms' => round($performance['app_ms'], 1),
+                'cpu_ms' => $performance['cpu_ms'] === null ? null : round($performance['cpu_ms'], 1),
+                'wait_ms' => $performance['wait_ms'] === null ? null : round($performance['wait_ms'], 1),
+                'spans' => $spans,
                 'db_ms' => round($diagnostics['total_ms'], 1),
+                'db_execute_ms' => round($spans['db_execute']['ms'] ?? 0.0, 1),
+                'db_fetch_ms' => round($spans['db_fetch']['ms'] ?? 0.0, 1),
                 'db_count' => $diagnostics['count'],
+                'db_rows' => $diagnostics['rows'],
                 'view_ms' => round(array_sum(array_column($views, 'ms')), 1),
                 'views' => $views,
-                'mem_mb' => round(memory_get_usage(true) / 1048576, 1),
-                'peak_mb' => round(memory_get_peak_usage(true) / 1048576, 1),
+                'mem_mb' => round($performance['mem_mb'], 1),
+                'peak_mb' => round($performance['peak_mb'], 1),
                 'included_files' => get_included_files(),
                 'queries' => $diagnostics['queries'],
                 'duplicates' => $diagnostics['duplicates'],
@@ -3772,14 +4108,16 @@ namespace PFrame {
 
             $queryViews = ['short' => '', 'full' => ''];
             if ($qs === []) {
-                $queryViews['short'] = '<div>Brak zapytań.</div>';
+                $message = $d['db_count'] === 0 ? 'Brak zapytań.' : 'Szczegóły SQL są wyłączone.';
+                $queryViews['short'] = '<div>' . $message . '</div>';
                 $queryViews['full'] = $queryViews['short'];
             } else {
                 $queryViews = $this->buildSqlViews(
                     $qs,
                     120,
                     static fn(array $q, int $i): array => [
-                        'prefix' => ($i + 1) . '. (' . $q['ms'] . 'ms)',
+                        'prefix' => ($i + 1) . '. (' . $q['ms'] . 'ms; exec ' . $q['execute_ms']
+                            . ' + fetch ' . $q['fetch_ms'] . '; rows ' . $q['rows'] . ')',
                         'sql' => (string) $q['sql'],
                     ],
                 );

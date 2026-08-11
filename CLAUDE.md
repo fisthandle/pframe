@@ -6,14 +6,14 @@ Single-file PHP 8.4+ micro-framework. Zero runtime dependencies, copy-paste depl
 
 ## Architektura
 
-- **Jeden plik:** `src/PFrame.php` — cały framework (~4000 LOC)
+- **Jeden plik:** `src/PFrame.php` — cały framework (~4300 LOC)
 - **Namespace:** `PFrame` (klasy) + globalne helpery w `namespace {}`
 - **Brak mail:** do maili używamy PHPMailer (zewnętrznie)
 - **Fasada:** `PFrame\Base` — projekty definiują `class P1 extends \PFrame\Base`
 
 ## Klasy (PFrame namespace)
 
-HttpException, Request, Response, SseResponse, App, Db, View, Session, Csrf, Flash, Middleware, Controller, Log, Validator, Cache, TickTask, Tick, DebugBar, Base (fasada)
+HttpException, Request, Response, SseResponse, Performance, App, Db, View, Session, Csrf, Flash, Middleware, Controller, Log, Validator, Cache, TickTask, Tick, DebugBar, Base (fasada)
 
 ## Globalne helpery
 
@@ -29,6 +29,17 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 - `Db::trans()` zwraca status aktywnej transakcji
 - `Db::count()` zwraca row count ostatniego zapytania (także dla SELECT)
 - `Db::log()` zwraca log SQL jako `(X.XXms) SQL`
+- `Db::totalQueryCount()` / `totalQueryTime()` / `totalFetchedRows()` zbierają lekkie agregaty także przy `log_queries=false`
+- czas zapytania obejmuje przygotowanie, wykonanie i pobranie wyników; szczegółowy log rozdziela `execute_time` i `fetch_time`
+
+## Wydajność
+
+- `App::performance()` udostępnia profiler requestu, a `App::measure($name, $callback)` dodaje własny span
+- automatyczne spany obejmują request/router/controller/finalize, DB connect/execute/fetch, widoki oraz start i blokadę sesji
+- `performance.server_timing=true` dodaje standardowy nagłówek `Server-Timing`; domyślnie jest wyłączony
+- `performance.slow_ms=N` loguje requesty od progu `N` ms razem ze spanami i agregatami DB; `0` wyłącza log
+- na PHP ZTS `cpu_ms` i `wait_ms` są `null`, bo `getrusage()` mierzy cały współbieżny proces; wall time i spany pozostają poprawne
+- używaj `$app->startSession()` zamiast surowego `session_start()`, aby zmierzyć oczekiwanie na start sesji
 
 ## Kontrolery i Response
 
@@ -52,7 +63,7 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 
 ## Worker Mode (FrankenPHP)
 
-W klasycznym FPM najpierw wywołaj `$session->register()`, potem `session_start()`, a na końcu
+W klasycznym FPM najpierw wywołaj `$session->register()`, potem `$app->startSession()`, a na końcu
 `$app->run()`. Domyślne `secure=true` wymaga HTTPS; wyłączenie jest dopuszczalne tylko jawnie
 dla lokalnego HTTP.
 
