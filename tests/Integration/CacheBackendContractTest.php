@@ -29,6 +29,9 @@ class CacheBackendContractTest extends TestCase {
             foreach (glob($dir . '/*') ?: [] as $file) {
                 unlink($file);
             }
+            foreach (glob($dir . '/.pframe-cache-lock-*') ?: [] as $file) {
+                unlink($file);
+            }
             rmdir($dir);
         }
     }

@@ -85,6 +85,43 @@ class ViewTest extends TestCase {
         $this->assertSame($levelBefore, ob_get_level(), 'OB level must be restored after exception');
     }
 
+    public function testRenderFileExceptionCleansNestedOutputBuffers(): void {
+        $dir = sys_get_temp_dir() . '/pframe_view_test_' . uniqid('', true);
+        mkdir($dir);
+        file_put_contents($dir . '/throw.php', '<?php ob_start(); echo "nested"; throw new \\RuntimeException("boom");');
+
+        $view = new View($dir);
+        $levelBefore = ob_get_level();
+
+        try {
+            $view->render('throw.php');
+            $this->fail('Expected RuntimeException');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('boom', $e->getMessage());
+        } finally {
+            @unlink($dir . '/throw.php');
+            @rmdir($dir);
+        }
+
+        $this->assertSame($levelBefore, ob_get_level(), 'All nested OB levels must be restored after exception');
+    }
+
+    public function testRenderCollectsUnclosedNestedOutputBuffers(): void {
+        $dir = sys_get_temp_dir() . '/pframe_view_test_' . uniqid('', true);
+        mkdir($dir);
+        file_put_contents($dir . '/nested.php', '<?php echo "outer"; ob_start(); echo "nested";');
+
+        try {
+            $view = new View($dir);
+            $levelBefore = ob_get_level();
+            $this->assertSame('outernested', $view->render('nested.php'));
+            $this->assertSame($levelBefore, ob_get_level());
+        } finally {
+            @unlink($dir . '/nested.php');
+            @rmdir($dir);
+        }
+    }
+
     public function testConstructorThrowsWhenBasePathDoesNotExist(): void {
         $this->expectException(\RuntimeException::class);
         new View('/path/that/does/not/exist-' . uniqid('', true));

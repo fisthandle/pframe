@@ -22,6 +22,9 @@ class CacheTest extends TestCase {
     protected function tearDown(): void {
         $this->cache->clear();
         if (is_dir($this->dir)) {
+            foreach (glob($this->dir . '/.pframe-cache-lock-*') ?: [] as $file) {
+                unlink($file);
+            }
             rmdir($this->dir);
         }
     }
@@ -166,6 +169,36 @@ class CacheTest extends TestCase {
         $this->assertSame('fallback', $this->cache->get('ttl', 'fallback'));
     }
 
+    public function testPruneExpiredRemovesExpiredEntriesOnly(): void {
+        if ($this->hasApcu) {
+            $this->markTestSkipped('This regression exercises the file backend.');
+        }
+
+        $this->cache->set('fresh', 'keep', 3600);
+        $expired = $this->dir . '/' . md5('expired') . '.cache';
+        file_put_contents($expired, serialize(['value' => 'drop', 'ttl' => 1, 'time' => time() - 5]));
+
+        $this->assertSame(1, $this->cache->pruneExpired());
+        $this->assertFileDoesNotExist($expired);
+        $this->assertSame('keep', $this->cache->get('fresh'));
+    }
+
+    public function testPruneExpiredHonorsRemovalLimit(): void {
+        if ($this->hasApcu) {
+            $this->markTestSkipped('This regression exercises the file backend.');
+        }
+
+        foreach (range(1, 3) as $i) {
+            file_put_contents(
+                $this->dir . '/' . md5('expired-' . $i) . '.cache',
+                serialize(['value' => $i, 'ttl' => 1, 'time' => time() - 5]),
+            );
+        }
+
+        $this->assertSame(2, $this->cache->pruneExpired(2));
+        $this->assertCount(1, glob($this->dir . '/*.cache') ?: []);
+    }
+
     public function testClear(): void {
         $this->cache->set('a', 1);
         $this->cache->set('b', 2);
@@ -193,14 +226,38 @@ class CacheTest extends TestCase {
         $this->assertFileExists((string) $file, 'Reader must not unlink a file that may be replaced concurrently');
     }
 
-    public function testClearRemovesRateLimitLockFiles(): void {
+    public function testClearKeepsStableLockFiles(): void {
+        if ($this->hasApcu) {
+            $this->markTestSkipped('This regression exercises the file backend.');
+        }
+
         $this->cache->rateCheck('login', '1.2.3.4', 1, 60);
-        $locksBefore = glob($this->dir . '/*.lock') ?: [];
+        $locksBefore = glob($this->dir . '/.pframe-cache-lock-*') ?: [];
         $this->assertNotEmpty($locksBefore);
 
         $this->cache->clear();
 
-        $locksAfter = glob($this->dir . '/*.lock') ?: [];
-        $this->assertSame([], $locksAfter);
+        $locksAfter = glob($this->dir . '/.pframe-cache-lock-*') ?: [];
+        $this->assertSame($locksBefore, $locksAfter);
+    }
+
+    public function testFileLocksUseBoundedStriping(): void {
+        if ($this->hasApcu) {
+            $this->markTestSkipped('This regression exercises the file backend.');
+        }
+
+        $pathMethod = new \ReflectionMethod($this->cache, 'fileLockPath');
+        $paths = [];
+        for ($i = 0; $i < 8192; $i++) {
+            $path = (string) $pathMethod->invoke($this->cache, md5('key-' . $i));
+            $paths[basename($path)] = true;
+        }
+
+        $this->assertLessThanOrEqual(4096, count($paths));
+        $invalid = array_filter(
+            array_keys($paths),
+            static fn(string $filename): bool => preg_match('/^\.pframe-cache-lock-[0-9a-f]{3}$/', $filename) !== 1,
+        );
+        $this->assertSame([], array_values($invalid));
     }
 }

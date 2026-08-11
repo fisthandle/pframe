@@ -2,7 +2,7 @@
 
 Single-file PHP 8.4+ micro-framework. Zero runtime package dependencies, copy-paste deployment.
 
-One file. 19 classes. Single-file core in `src/PFrame.php` (~3700 LOC). Everything you need, nothing you don't.
+One file. 19 classes. Single-file core in `src/PFrame.php` (~4000 LOC). Everything you need, nothing you don't.
 
 ## Quick Start
 
@@ -69,6 +69,10 @@ return [
     'max_request_body_bytes' => 8_388_608, // 8 MiB; przekroczenie zwraca 413 przed dispatchem trasy
 ];
 ```
+
+The application limit complements, but does not replace, the web-server request-body limit and
+PHP's `post_max_size` / `upload_max_filesize`. Configure those limits explicitly, especially for
+form and multipart uploads that PHP parses before application code runs.
 
 ## Controllers
 
@@ -203,6 +207,7 @@ session_start();
 ```
 
 - **Lazy-write**: when session data is unchanged between `read()` and `write()`, only the timestamp is updated (lightweight `UPDATE` instead of full `INSERT OR REPLACE`)
+- **Strict IDs**: unknown client-supplied IDs are rejected through `SessionUpdateTimestampHandlerInterface::validateId()` and PHP generates a fresh ID
 - **Locking**: with the MySQL driver, advisory locking uses one `GET_LOCK` call; other drivers use `flock` file locks. The optional `lockDir` constructor argument selects the directory for file locks.
 - **Fail-closed lock failure**: if the lock cannot be acquired (timeout or lock error), `read()`, `write()` and `destroy()` return `false`; the caller must handle the failed operation instead of treating it as successful.
 - **Intended URL**: `Session::pullIntendedUrl(string $default = '/')` retrieves and clears the URL stored by `Middleware::auth()`
@@ -286,18 +291,35 @@ $handler = static function () use ($app): void {
 };
 
 if (function_exists('frankenphp_handle_request')) {
-    frankenphp_handle_request($handler);
+    $maxRequests = max(0, (int) ($_SERVER['MAX_REQUESTS'] ?? 500));
+    for ($handled = 0; $maxRequests === 0 || $handled < $maxRequests; $handled++) {
+        $keepRunning = frankenphp_handle_request($handler);
+        gc_collect_cycles();
+        if (!$keepRunning) {
+            break;
+        }
+    }
 } else {
     $handler();
 }
 ```
 
 If your worker entrypoint does not use PHP sessions, call `$app->runWorkerRequest()` with
-the default `startSession: false`.
+the default `startSession: false`. `MAX_REQUESTS=0` keeps a worker alive without a request limit;
+the bounded default periodically recycles the process to contain leaks in application code.
 
 ### Rate Limiting Helper
 
-`Cache::rateCheck($scope, $id, $max, $window)` is protected by a lock file to keep updates atomic between concurrent requests.
+`Cache::rateCheck($scope, $id, $max, $window)` uses stable, bounded striped locks to keep file-backend
+updates atomic between concurrent requests. Internal `.pframe-cache-lock-*` files are deliberately
+kept by `clear()`; deleting a lock path while another process holds it would break mutual exclusion.
+
+Expired APCu entries are reclaimed by APCu. For the file backend, schedule bounded maintenance so
+expired entries that are no longer read do not accumulate:
+
+```php
+$removed = $cache->pruneExpired(1000); // maximum removals in one run
+```
 
 ### Periodic Tasks (Tick)
 
@@ -340,7 +362,7 @@ require dirname(__DIR__) . '/lib/PFrameTesting.php';
 | `DatabaseTransactions` | Wraps each test in a transaction, rolls back all levels (including savepoints) on teardown |
 | `RefreshDatabase` | Runs SQL migrations once per suite, wraps tests in transactions |
 | `HttpTesting` | `get()`, `post()`, `postJson()`, `put()`, `patch()`, `delete()` with automatic CSRF injection |
-| `ResponseAssertions` | `assertOk()`, `assertNotFound()`, `assertRedirectTo()`, `assertSee()`, `assertJson()`, etc. |
+| `ResponseAssertions` | `assertOk()`, `assertNotFound()`, `assertRedirectTo()`, `assertSee()`, `assertJsonContains()`, etc. |
 | `DatabaseAssertions` | `assertDatabaseHas()`, `assertDatabaseMissing()`, `assertDatabaseCount()` |
 | `FlashAssertions` | `assertFlash()`, `assertNoFlash()` |
 | `SessionAssertions` | `assertAuthenticated()`, `assertGuest()`, `assertSessionHas()` |

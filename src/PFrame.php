@@ -1692,6 +1692,7 @@ namespace PFrame {
         public function rollback(): bool {
             if ($this->savepointLevel > 0) {
                 $this->pdo->exec("ROLLBACK TO SAVEPOINT sp_{$this->savepointLevel}");
+                $this->pdo->exec("RELEASE SAVEPOINT sp_{$this->savepointLevel}");
                 $this->savepointLevel--;
                 return true;
             }
@@ -1937,20 +1938,47 @@ namespace PFrame {
             extract($data, EXTR_SKIP);
 
             $t = microtime(true);
+            $initialBufferLevel = ob_get_level();
             ob_start();
             try {
                 include $realFile;
             } catch (\Throwable $e) {
-                ob_end_clean();
+                while (ob_get_level() > $initialBufferLevel) {
+                    $levelBeforeClean = ob_get_level();
+                    @ob_end_clean();
+                    if (ob_get_level() >= $levelBeforeClean) {
+                        break;
+                    }
+                }
                 throw $e;
             }
-            $result = (string) ob_get_clean();
+
+            if (ob_get_level() <= $initialBufferLevel) {
+                throw new \RuntimeException('Template closed the framework output buffer: ' . $template);
+            }
+
+            $result = '';
+            while (ob_get_level() > $initialBufferLevel) {
+                $levelBeforeClean = ob_get_level();
+                $chunk = ob_get_clean();
+                if (ob_get_level() >= $levelBeforeClean) {
+                    while (ob_get_level() > $initialBufferLevel) {
+                        $levelBeforeFallbackClean = ob_get_level();
+                        @ob_end_clean();
+                        if (ob_get_level() >= $levelBeforeFallbackClean) {
+                            break;
+                        }
+                    }
+                    throw new \RuntimeException('Failed to collect template output: ' . $template);
+                }
+                $result = $chunk . $result;
+            }
             $this->renderLog[] = ['template' => $template, 'ms' => round((microtime(true) - $t) * 1000, 2)];
             return $result;
         }
     }
 
-    class Session implements \SessionHandlerInterface {
+    class Session implements \SessionHandlerInterface, \SessionUpdateTimestampHandlerInterface {
         public const INTENDED_URL_KEY = '_intended_url';
         private ?string $lockName = null;
         private ?string $lockedSessionId = null;
@@ -2034,42 +2062,45 @@ namespace PFrame {
             }
         }
 
+        public function validateId(string $id): bool {
+            try {
+                return $this->db->var('SELECT 1 FROM sessions WHERE session_id = ?', [$id]) !== null;
+            } catch (\Throwable $e) {
+                error_log('[SESSION] ID validation failed for ' . $this->sessionLabel($id) . ': ' . $e->getMessage());
+                return false;
+            }
+        }
+
         public function write(string $id, string $data): bool {
             if (!$this->ensureLock($id)) {
-                error_log('[SESSION] Refusing write without session lock for ' . $id);
+                error_log('[SESSION] Refusing write without session lock for ' . $this->sessionLabel($id));
                 return false;
             }
 
             try {
                 if ($this->initialDataLoaded && $data === $this->initialData) {
-                    $this->db->exec('UPDATE sessions SET stamp = ? WHERE session_id = ?', [time(), $id]);
-                    return true;
+                    return $this->refreshTimestamp($id, $data);
                 }
 
-                $ip = (string) ($_SERVER['REMOTE_ADDR'] ?? '');
-                $agent = substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 5000);
-                $stamp = time();
-
-                $driver = $this->db->driver();
-                if ($driver === 'sqlite') {
-                    $this->db->exec(
-                        'INSERT OR REPLACE INTO sessions (session_id, data, ip, agent, stamp) VALUES (?, ?, ?, ?, ?)',
-                        [$id, $data, $ip, $agent, $stamp],
-                    );
-                } else {
-                    $this->db->exec(
-                        'INSERT INTO sessions (session_id, data, ip, agent, stamp) VALUES (?, ?, ?, ?, ?) '
-                        . 'ON DUPLICATE KEY UPDATE data=VALUES(data), ip=VALUES(ip), agent=VALUES(agent), stamp=VALUES(stamp)',
-                        [$id, $data, $ip, $agent, $stamp],
-                    );
-                }
-                $this->initialData = $data;
-                $this->initialDataLoaded = true;
+                $this->persist($id, $data);
             } finally {
                 $this->releaseLock();
             }
 
             return true;
+        }
+
+        public function updateTimestamp(string $id, string $data): bool {
+            if (!$this->ensureLock($id)) {
+                error_log('[SESSION] Refusing timestamp update without session lock for ' . $this->sessionLabel($id));
+                return false;
+            }
+
+            try {
+                return $this->refreshTimestamp($id, $data);
+            } finally {
+                $this->releaseLock();
+            }
         }
 
         public function close(): bool {
@@ -2079,7 +2110,7 @@ namespace PFrame {
 
         public function destroy(string $id): bool {
             if (!$this->ensureLock($id)) {
-                error_log('[SESSION] Refusing destroy without session lock for ' . $id);
+                error_log('[SESSION] Refusing destroy without session lock for ' . $this->sessionLabel($id));
                 return false;
             }
 
@@ -2127,7 +2158,7 @@ namespace PFrame {
         }
 
         private function acquireAdvisoryLock(string $id): bool {
-            $this->lockName = 'sess_' . substr($id, 0, 32);
+            $this->lockName = 'sess_' . substr(hash('sha256', $id), 0, 32);
             $this->lockAcquired = false;
             $this->lockedSessionId = null;
 
@@ -2148,6 +2179,44 @@ namespace PFrame {
             }
 
             return false;
+        }
+
+        private function refreshTimestamp(string $id, string $data): bool {
+            $updated = $this->db->exec('UPDATE sessions SET stamp = ? WHERE session_id = ?', [time(), $id]);
+            if ($updated === 0) {
+                $this->persist($id, $data);
+            } else {
+                $this->initialData = $data;
+                $this->initialDataLoaded = true;
+            }
+
+            return true;
+        }
+
+        private function persist(string $id, string $data): void {
+            $ip = substr((string) ($_SERVER['REMOTE_ADDR'] ?? ''), 0, 45);
+            $agent = mb_substr(mb_scrub((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 'UTF-8'), 0, 5000);
+            $stamp = time();
+
+            if ($this->db->driver() === 'sqlite') {
+                $this->db->exec(
+                    'INSERT OR REPLACE INTO sessions (session_id, data, ip, agent, stamp) VALUES (?, ?, ?, ?, ?)',
+                    [$id, $data, $ip, $agent, $stamp],
+                );
+            } else {
+                $this->db->exec(
+                    'INSERT INTO sessions (session_id, data, ip, agent, stamp) VALUES (?, ?, ?, ?, ?) '
+                    . 'ON DUPLICATE KEY UPDATE data=VALUES(data), ip=VALUES(ip), agent=VALUES(agent), stamp=VALUES(stamp)',
+                    [$id, $data, $ip, $agent, $stamp],
+                );
+            }
+
+            $this->initialData = $data;
+            $this->initialDataLoaded = true;
+        }
+
+        private function sessionLabel(string $id): string {
+            return substr(hash('sha256', $id), 0, 16);
         }
 
         private function acquireFileLock(string $id): bool {
@@ -2607,17 +2676,18 @@ namespace PFrame {
         }
 
         public static function required(mixed $value): bool {
-            return $value !== null && $value !== '';
+            return $value !== null && $value !== '' && $value !== [];
         }
 
         public static function intRange(mixed $value, int $min, int $max): bool {
-            if (is_int($value)) {
-                return $value >= $min && $value <= $max;
-            }
-            if (!is_scalar($value) || !is_numeric((string) $value)) {
+            if (!is_int($value) && !is_string($value)) {
                 return false;
             }
-            $int = (int) $value;
+
+            $int = filter_var($value, FILTER_VALIDATE_INT);
+            if (!is_int($int)) {
+                return false;
+            }
             return $int >= $min && $int <= $max;
         }
 
@@ -2643,9 +2713,9 @@ namespace PFrame {
                 foreach ((array) $fieldRules as $rule) {
                     $error = match (true) {
                         $rule === 'required' && !self::required($value) => 'Pole wymagane',
-                        $rule === 'email' && is_string($value) && !self::email($value) => 'Nieprawidłowy email',
-                        $rule === 'phone' && is_string($value) && !self::phone($value) => 'Nieprawidłowy telefon',
-                        $rule === 'postcode' && is_string($value) && !self::postcode($value) => 'Format: XX-XXX',
+                        $rule === 'email' && $value !== null && (!is_string($value) || !self::email($value)) => 'Nieprawidłowy email',
+                        $rule === 'phone' && $value !== null && (!is_string($value) || !self::phone($value)) => 'Nieprawidłowy telefon',
+                        $rule === 'postcode' && $value !== null && (!is_string($value) || !self::postcode($value)) => 'Format: XX-XXX',
                         default => null,
                     };
 
@@ -2691,22 +2761,12 @@ namespace PFrame {
                 return $default;
             }
 
-            $serialized = file_get_contents($path);
-            if ($serialized === false) {
+            $data = $this->readFileEntry($path);
+            if ($data === null) {
                 return $default;
             }
 
-            try {
-                $data = @unserialize($serialized, ['allowed_classes' => false]);
-            } catch (\Throwable) {
-                return $default;
-            }
-
-            if (!is_array($data) || !array_key_exists('value', $data) || !isset($data['ttl'], $data['time'])) {
-                return $default;
-            }
-
-            if ($data['ttl'] > 0 && ((int) $data['time'] + (int) $data['ttl']) < time()) {
+            if ($this->isExpired($data)) {
                 return $default;
             }
 
@@ -2714,13 +2774,20 @@ namespace PFrame {
         }
 
         public function set(string $key, mixed $value, int $ttl = 0): void {
+            $ttl = max(0, $ttl);
             if ($this->hasApcu) {
-                if (!apcu_store($this->apcuKey($key), $value, max(0, $ttl))) {
+                if (!apcu_store($this->apcuKey($key), $value, $ttl)) {
                     throw new \RuntimeException('Failed to persist APCu cache entry.');
                 }
                 return;
             }
 
+            $this->withFileLock($key, function () use ($key, $value, $ttl): void {
+                $this->writeFile($key, $value, $ttl);
+            });
+        }
+
+        private function writeFile(string $key, mixed $value, int $ttl): void {
             $dir = $this->requireDir();
             $tempPath = @tempnam($dir, '.pframe-cache-');
             if ($tempPath === false) {
@@ -2750,32 +2817,16 @@ namespace PFrame {
                 return $this->incrementApcu($key, $ttl);
             }
 
-            $lockPath = $this->path($key) . '.lock';
-            $handle = @fopen($lockPath, 'c');
-            if ($handle === false) {
-                throw new \RuntimeException('Failed to open cache increment lock: ' . $lockPath);
-            }
-
-            try {
-                if (!@flock($handle, LOCK_EX)) {
-                    throw new \RuntimeException('Failed to acquire cache increment lock: ' . $lockPath);
+            return $this->withFileLock($key, function () use ($key, $ttl): int {
+                $current = $this->readFileInteger($key);
+                if ($current === PHP_INT_MAX) {
+                    throw new \RuntimeException('Cache increment overflow: ' . $this->path($key));
                 }
 
-                try {
-                    $current = $this->readFileInteger($key);
-                    if ($current === PHP_INT_MAX) {
-                        throw new \RuntimeException('Cache increment overflow: ' . $this->path($key));
-                    }
-
-                    $next = $current + 1;
-                    $this->set($key, $next, $ttl);
-                    return $next;
-                } finally {
-                    @flock($handle, LOCK_UN);
-                }
-            } finally {
-                fclose($handle);
-            }
+                $next = $current + 1;
+                $this->writeFile($key, $next, $ttl);
+                return $next;
+            });
         }
 
         public function delete(string $key): void {
@@ -2784,10 +2835,12 @@ namespace PFrame {
                 return;
             }
 
-            $path = $this->path($key);
-            if (is_file($path)) {
-                unlink($path);
-            }
+            $this->withFileLock($key, function () use ($key): void {
+                $path = $this->path($key);
+                if (is_file($path) && !@unlink($path)) {
+                    throw new \RuntimeException('Failed to delete cache entry: ' . $path);
+                }
+            });
         }
 
         public function clear(): void {
@@ -2800,11 +2853,58 @@ namespace PFrame {
             }
 
             foreach (glob($this->dir . '/*.cache') ?: [] as $file) {
-                unlink($file);
+                $hash = pathinfo($file, PATHINFO_FILENAME);
+                if (preg_match('/^[0-9a-f]{32}$/', $hash) !== 1) {
+                    continue;
+                }
+
+                $this->withFileHashLock($hash, static function () use ($file): void {
+                    if (is_file($file) && !@unlink($file)) {
+                        throw new \RuntimeException('Failed to clear cache entry: ' . $file);
+                    }
+                });
             }
-            foreach (glob($this->dir . '/*.lock') ?: [] as $file) {
-                unlink($file);
+        }
+
+        public function pruneExpired(int $limit = 1000): int {
+            if ($limit < 1) {
+                throw new \InvalidArgumentException('Cache prune limit must be greater than zero.');
             }
+            if ($this->hasApcu || $this->dir === null) {
+                return 0;
+            }
+
+            $removed = 0;
+            foreach (new \FilesystemIterator($this->dir, \FilesystemIterator::SKIP_DOTS) as $file) {
+                if (!$file instanceof \SplFileInfo) {
+                    continue;
+                }
+                $filename = $file->getFilename();
+                if (!$file->isFile() || preg_match('/^([0-9a-f]{32})\.cache$/', $filename, $matches) !== 1) {
+                    continue;
+                }
+
+                $path = $file->getPathname();
+                $didRemove = $this->withFileHashLock($matches[1], function () use ($path): bool {
+                    $data = $this->readFileEntry($path);
+                    if ($data === null || !$this->isExpired($data)) {
+                        return false;
+                    }
+                    if (is_file($path) && !@unlink($path)) {
+                        throw new \RuntimeException('Failed to prune expired cache entry: ' . $path);
+                    }
+                    return true;
+                });
+
+                if ($didRemove) {
+                    $removed++;
+                    if ($removed >= $limit) {
+                        break;
+                    }
+                }
+            }
+
+            return $removed;
         }
 
         public function rateCheck(string $scope, string $id, int $max, int $window): ?int {
@@ -2813,13 +2913,13 @@ namespace PFrame {
                 return $this->withRateLock($key, function () use ($key, $max, $window): ?int {
                     $data = $this->get($key);
                     if (!is_array($data)) {
-                        $this->set($key, ['count' => 1, 'start' => time()], $window);
+                        $this->storeUnlocked($key, ['count' => 1, 'start' => time()], $window);
                         return null;
                     }
 
                     $elapsed = time() - (int) ($data['start'] ?? 0);
                     if ($elapsed >= $window) {
-                        $this->set($key, ['count' => 1, 'start' => time()], $window);
+                        $this->storeUnlocked($key, ['count' => 1, 'start' => time()], $window);
                         return null;
                     }
 
@@ -2828,7 +2928,7 @@ namespace PFrame {
                     }
 
                     $data['count'] = (int) ($data['count'] ?? 0) + 1;
-                    $this->set($key, $data, $window);
+                    $this->storeUnlocked($key, $data, $window);
                     return null;
                 });
             } catch (\Throwable $e) {
@@ -2843,6 +2943,18 @@ namespace PFrame {
 
         private function apcuKey(string $key): string {
             return $this->apcuPrefix . md5($key);
+        }
+
+        private function storeUnlocked(string $key, mixed $value, int $ttl): void {
+            $ttl = max(0, $ttl);
+            if ($this->hasApcu) {
+                if (!apcu_store($this->apcuKey($key), $value, $ttl)) {
+                    throw new \RuntimeException('Failed to persist APCu cache entry.');
+                }
+                return;
+            }
+
+            $this->writeFile($key, $value, $ttl);
         }
 
         private function incrementApcu(string $key, int $ttl): int {
@@ -2868,22 +2980,12 @@ namespace PFrame {
                 return 0;
             }
 
-            $serialized = @file_get_contents($path);
-            if ($serialized === false) {
-                throw new \RuntimeException('Failed to read cache entry: ' . $path);
-            }
-
-            try {
-                $data = @unserialize($serialized, ['allowed_classes' => false]);
-            } catch (\Throwable $e) {
-                throw new \RuntimeException('Failed to decode cache entry: ' . $path, 0, $e);
-            }
-
-            if (!is_array($data) || !array_key_exists('value', $data) || !isset($data['ttl'], $data['time'])) {
+            $data = $this->readFileEntry($path);
+            if ($data === null) {
                 throw new \RuntimeException('Invalid cache entry: ' . $path);
             }
 
-            if ($data['ttl'] > 0 && ((int) $data['time'] + (int) $data['ttl']) < time()) {
+            if ($this->isExpired($data)) {
                 return 0;
             }
             if (!is_int($data['value'])) {
@@ -2891,6 +2993,37 @@ namespace PFrame {
             }
 
             return $data['value'];
+        }
+
+        /** @return array{value: mixed, ttl: int, time: int}|null */
+        private function readFileEntry(string $path): ?array {
+            $serialized = @file_get_contents($path);
+            if ($serialized === false) {
+                return null;
+            }
+
+            try {
+                $data = @unserialize($serialized, ['allowed_classes' => false]);
+            } catch (\Throwable) {
+                return null;
+            }
+
+            if (
+                !is_array($data)
+                || !array_key_exists('value', $data)
+                || !isset($data['ttl'], $data['time'])
+                || !is_int($data['ttl'])
+                || !is_int($data['time'])
+            ) {
+                return null;
+            }
+
+            return ['value' => $data['value'], 'ttl' => $data['ttl'], 'time' => $data['time']];
+        }
+
+        /** @param array{value: mixed, ttl: int, time: int} $data */
+        private function isExpired(array $data): bool {
+            return $data['ttl'] > 0 && ($data['time'] + $data['ttl']) <= time();
         }
 
         private function clearApcu(): void {
@@ -2924,8 +3057,8 @@ namespace PFrame {
         }
 
         private function withRateLock(string $key, callable $callback): ?int {
-            if ($this->dir === null) {
-                if (!$this->hasApcu || !function_exists('apcu_add')) {
+            if ($this->hasApcu) {
+                if (!function_exists('apcu_add')) {
                     return 1;
                 }
 
@@ -2941,15 +3074,33 @@ namespace PFrame {
                 }
             }
 
-            $lockPath = $this->dir . '/' . md5($key) . '.lock';
+            return $this->withFileLock($key, $callback);
+        }
+
+        /**
+         * @template T
+         * @param callable(): T $callback
+         * @return T
+         */
+        private function withFileLock(string $key, callable $callback): mixed {
+            return $this->withFileHashLock(md5($key), $callback);
+        }
+
+        /**
+         * @template T
+         * @param callable(): T $callback
+         * @return T
+         */
+        private function withFileHashLock(string $hash, callable $callback): mixed {
+            $lockPath = $this->fileLockPath($hash);
             $handle = @fopen($lockPath, 'c');
             if ($handle === false) {
-                return 1;
+                throw new \RuntimeException('Failed to open cache lock: ' . $lockPath);
             }
 
             try {
                 if (!@flock($handle, LOCK_EX)) {
-                    return 1;
+                    throw new \RuntimeException('Failed to acquire cache lock: ' . $lockPath);
                 }
 
                 try {
@@ -2960,6 +3111,10 @@ namespace PFrame {
             } finally {
                 fclose($handle);
             }
+        }
+
+        private function fileLockPath(string $hash): string {
+            return $this->requireDir() . '/.pframe-cache-lock-' . substr($hash, 0, 3);
         }
     }
 

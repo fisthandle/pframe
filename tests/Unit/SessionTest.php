@@ -84,6 +84,24 @@ class SessionTest extends TestCase {
         $this->assertFalse(session_get_cookie_params()['secure']);
     }
 
+    public function testStrictModeRejectsUnknownSuppliedSessionId(): void {
+        $unknownId = str_repeat('A', 64);
+        $session = new Session($this->db, advisory: false);
+        $session->register(['secure' => false]);
+        session_id($unknownId);
+
+        $this->assertTrue(session_start());
+        $this->assertNotSame($unknownId, session_id());
+    }
+
+    public function testValidateIdAcceptsOnlyPersistedSession(): void {
+        $session = new Session($this->db, advisory: false);
+        $session->write('known-session', 'payload');
+
+        $this->assertTrue($session->validateId('known-session'));
+        $this->assertFalse($session->validateId('unknown-session'));
+    }
+
     public function testSessionWriteWorksWithAdvisoryDisabled(): void {
         $session = new Session($this->db, advisory: false);
         $id = bin2hex(random_bytes(16));
@@ -153,6 +171,17 @@ class SessionTest extends TestCase {
         $this->assertGreaterThan(1000, (int) $row['stamp'], 'Stamp should be refreshed even when data unchanged');
     }
 
+    public function testUpdateTimestampRestoresRowDeletedAfterRead(): void {
+        $session = new Session($this->db, advisory: false);
+        $session->write('gc-race', 'payload');
+        $session->open('', '');
+        $this->assertSame('payload', $session->read('gc-race'));
+        $this->db->exec('DELETE FROM sessions WHERE session_id = ?', ['gc-race']);
+
+        $this->assertTrue($session->updateTimestamp('gc-race', 'payload'));
+        $this->assertSame('payload', $this->db->var('SELECT data FROM sessions WHERE session_id = ?', ['gc-race']));
+    }
+
     public function testWriteDoesFullInsertWhenDataChanged(): void {
         $db = new Db(['dsn' => 'sqlite::memory:', 'log_queries' => true]);
         $db->pdo()->exec('CREATE TABLE sessions (session_id TEXT PRIMARY KEY, data TEXT, ip TEXT, agent TEXT, stamp INTEGER)');
@@ -210,7 +239,7 @@ class SessionTest extends TestCase {
         $first = $queries[0] ?? null;
         $this->assertIsArray($first);
         $this->assertSame('SELECT GET_LOCK(?, ?)', $first[0]);
-        $this->assertSame(['sess_sid-lock', 5], $first[1]);
+        $this->assertSame(['sess_' . substr(hash('sha256', 'sid-lock'), 0, 32), 5], $first[1]);
     }
 
     public function testAdvisoryMysqlLockTimeoutFailsClosed(): void {

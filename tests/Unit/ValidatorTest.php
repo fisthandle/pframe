@@ -33,6 +33,7 @@ class ValidatorTest extends TestCase {
         $this->assertTrue(Validator::required('x'));
         $this->assertFalse(Validator::required(''));
         $this->assertFalse(Validator::required(null));
+        $this->assertFalse(Validator::required([]));
     }
 
     public function testIntRange(): void {
@@ -40,6 +41,9 @@ class ValidatorTest extends TestCase {
         $this->assertTrue(Validator::intRange('5', 1, 10));
         $this->assertFalse(Validator::intRange(11, 1, 10));
         $this->assertFalse(Validator::intRange('abc', 1, 10));
+        $this->assertFalse(Validator::intRange(1.9, 1, 10));
+        $this->assertFalse(Validator::intRange('1e1', 1, 10));
+        $this->assertFalse(Validator::intRange(true, 1, 10));
     }
 
     public function testSlug(): void {
@@ -67,5 +71,8 @@ class ValidatorTest extends TestCase {
 
         $errors = Validator::validate(['x' => ['required']], ['x' => '']);
         $this->assertSame('Pole wymagane', $errors['x']);
+
+        $errors = Validator::validate(['email' => ['email']], ['email' => ['attacker-controlled-array']]);
+        $this->assertSame('Nieprawidłowy email', $errors['email']);
     }
 }

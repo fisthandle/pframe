@@ -110,6 +110,21 @@ class DbTest extends TestCase {
         $this->assertSame('outer', $rows[0]['val']);
     }
 
+    public function testNestedRollbackReleasesSavepoint(): void {
+        $this->db->begin();
+        $this->db->begin();
+        $this->db->rollback();
+
+        try {
+            $this->db->pdo()->exec('ROLLBACK TO SAVEPOINT sp_1');
+            $this->fail('Rolled back savepoint should have been released');
+        } catch (\PDOException $e) {
+            $this->assertStringContainsString('no such savepoint', $e->getMessage());
+        } finally {
+            $this->db->rollbackAll();
+        }
+    }
+
     public function testNestedCommitReleasesSavepoint(): void {
         $this->db->exec('CREATE TABLE IF NOT EXISTS sp_test2 (id INTEGER PRIMARY KEY, val TEXT)');
         $this->db->begin();

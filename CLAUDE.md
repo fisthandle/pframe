@@ -6,7 +6,7 @@ Single-file PHP 8.4+ micro-framework. Zero runtime dependencies, copy-paste depl
 
 ## Architektura
 
-- **Jeden plik:** `src/PFrame.php` — cały framework (~3700 LOC)
+- **Jeden plik:** `src/PFrame.php` — cały framework (~4000 LOC)
 - **Namespace:** `PFrame` (klasy) + globalne helpery w `namespace {}`
 - **Brak mail:** do maili używamy PHPMailer (zewnętrznie)
 - **Fasada:** `PFrame\Base` — projekty definiują `class P1 extends \PFrame\Base`
@@ -44,7 +44,9 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 - `App::addSecurityHeaders()` — CSP, HSTS, XFO, XCTO, Referrer-Policy, Permissions-Policy
 - `Request::fromGlobalsWithProxies()` + `trusted_proxies` — bezpieczne IP za proxy
 - `max_request_body_bytes` domyślnie wynosi `8_388_608` (8 MiB); przekroczenie kończy się `413` przed middleware i dispatchem trasy
+- limit aplikacyjny nie zastępuje limitów serwera WWW ani `post_max_size` / `upload_max_filesize`, szczególnie dla form i uploadów parsowanych przed kodem aplikacji
 - `Session::regenerate()` — po logowaniu
+- handler sesji implementuje `validateId()`; bez tego `session.use_strict_mode=1` nie odrzuca obcego ID
 - `Response::redirect()` blokuje external URL gdy HTTP_HOST ustawiony
 - `View::renderFile()` chroni przed path traversal
 
@@ -68,7 +70,14 @@ $handler = static function () use ($app): void {
 };
 
 if (function_exists('frankenphp_handle_request')) {
-    frankenphp_handle_request($handler);
+    $maxRequests = max(0, (int) ($_SERVER['MAX_REQUESTS'] ?? 500));
+    for ($handled = 0; $maxRequests === 0 || $handled < $maxRequests; $handled++) {
+        $keepRunning = frankenphp_handle_request($handler);
+        gc_collect_cycles();
+        if (!$keepRunning) {
+            break;
+        }
+    }
 } else {
     $handler();
 }
@@ -78,6 +87,7 @@ Key rules:
 - `Session::register()` podczas bootstrapu, `session_start()` per request przez `runWorkerRequest()`
 - preflight i `finally` robią `rollbackAll()` oraz reset DB, więc tx/log/rowCount nie przeciekają
 - bez sesji użyj domyślnego `startSession: false`
+- `MAX_REQUESTS=0` oznacza brak limitu; domyślne 500 okresowo recyklinguje proces, a po każdym żądaniu uruchamiany jest GC
 
 ## Testy
 
@@ -124,7 +134,8 @@ Skrypt jest tylko do odczytu: porównuje kopie z `src/`, raportuje rozjazdy i ni
 - `TickTask::command()` uruchamia przez shell — `;` i `&&` wykonywane, wymaga allowlisty/escaping
 - CSP: `style-src 'unsafe-inline'` wymagane (error pages, DebugBar); scripts bez `unsafe-inline`
 - `trusted_proxies` = exact IPs lub resolvable hostnames (np. `infra_caddy`), nie CIDR
-- Cache: jeden backend per request (APCu-only gdy dostępny, file-only bez APCu)
+- Cache: jeden backend per request (APCu-only gdy dostępny, file-only bez APCu); file backend ma trwałe, ograniczone stripe locki, których `clear()` nie usuwa
+- `Cache::pruneExpired(1000)` uruchamiaj okresowo przez `Tick`/cron, bo nieodczytywane wygasłe pliki nie sprzątają się same
 - OPcache preload: `require_once`, nie `opcache_compile_file`
 - `Tick`: `tryLock()` = flock only; `between()` wspiera okna przez północ; `inTimeWindow(?string $now)` testowalny
 
