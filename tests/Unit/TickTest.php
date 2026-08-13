@@ -37,14 +37,47 @@ class TickTest extends TestCase {
         return $dir;
     }
 
+    private function keyPrefix(string $cacheDir, string $prefix = ''): string {
+        return 'tick:' . ($prefix !== '' ? $prefix : md5($cacheDir)) . ':';
+    }
+
     private function lockPath(string $cacheDir, string $taskName, string $prefix = ''): string {
-        $keyPrefix = 'tick:' . ($prefix !== '' ? $prefix : md5($cacheDir)) . ':';
-        return $cacheDir . '/tick/' . md5($keyPrefix . $taskName . ':lock') . '.lock';
+        return $cacheDir . '/tick/' . md5($this->keyPrefix($cacheDir, $prefix) . $taskName . ':lock') . '.lock';
     }
 
     private function failPath(string $cacheDir, string $taskName, string $prefix = ''): string {
-        $keyPrefix = 'tick:' . ($prefix !== '' ? $prefix : md5($cacheDir)) . ':';
-        return $cacheDir . '/tick/' . md5($keyPrefix . $taskName . ':fail') . '.fail';
+        return $cacheDir . '/tick/' . md5($this->keyPrefix($cacheDir, $prefix) . $taskName . ':fail') . '.fail';
+    }
+
+    private function lastRunPath(string $cacheDir, string $taskName, string $prefix = ''): string {
+        return $cacheDir . '/tick/' . md5($this->keyPrefix($cacheDir, $prefix) . $taskName . ':last') . '.last';
+    }
+
+    private function ageGlobalThrottle(string $cacheDir, string $prefix = ''): void {
+        if (function_exists('apcu_enabled') && apcu_enabled()) {
+            usleep(1_100_000);
+            return;
+        }
+
+        $path = $cacheDir . '/tick/' . md5($this->keyPrefix($cacheDir, $prefix) . 'global') . '.tick';
+        self::assertNotFalse(file_put_contents($path, (string)(time() - 2), LOCK_EX));
+    }
+
+    private function setLastRunTimestamp(
+        string $cacheDir,
+        string $taskName,
+        int $timestamp,
+        string $prefix = '',
+    ): void {
+        $key = $this->keyPrefix($cacheDir, $prefix) . $taskName . ':last';
+        if (function_exists('apcu_enabled') && apcu_enabled()) {
+            self::assertTrue(apcu_store($key, $timestamp, 0));
+        }
+        self::assertNotFalse(file_put_contents(
+            $this->lastRunPath($cacheDir, $taskName, $prefix),
+            (string)$timestamp,
+            LOCK_EX,
+        ));
     }
 
     /** @return array{basePath: ?string, minLevel: int} */
@@ -191,7 +224,7 @@ class TickTest extends TestCase {
 
         $tick->task('slow_cmd')
             ->every(1)
-            ->command('sleep 10', timeout: 1);
+            ->command('sleep 10', timeout: 0);
 
         $results = $tick->dispatch(forceRun: true);
 
@@ -342,7 +375,7 @@ class TickTest extends TestCase {
         $tick->dispatch();
         self::assertSame(1, $counter);
 
-        usleep(1_100_000);
+        $this->ageGlobalThrottle($this->cacheDir);
         $tick->dispatch();
         self::assertSame(2, $counter);
     }
@@ -527,7 +560,7 @@ class TickTest extends TestCase {
 
         $res1 = $tick->dispatch(forceRun: true);
         $res2 = $tick->dispatch(forceRun: true);
-        usleep(1_100_000);
+        $this->setLastRunTimestamp($this->cacheDir, 'reset_fail_count', time() - 2);
         $res3 = $tick->dispatch(forceRun: true);
         $res4 = $tick->dispatch(forceRun: true);
         $failPath = $this->failPath($this->cacheDir, 'reset_fail_count');

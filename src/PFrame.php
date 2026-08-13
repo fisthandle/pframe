@@ -622,7 +622,7 @@ namespace PFrame {
         }
 
         private function cpuMilliseconds(): ?float {
-            if (PHP_ZTS !== 0 || !function_exists('getrusage')) {
+            if (PHP_ZTS || !function_exists('getrusage')) {
                 return null;
             }
             $usage = getrusage();

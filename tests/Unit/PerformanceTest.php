@@ -68,6 +68,19 @@ class PerformanceTest extends TestCase {
         }
     }
 
+    public function testSnapshotIncludesCpuTimingOnNonThreadSafePhpWithGetrusage(): void {
+        if (PHP_ZTS || !function_exists('getrusage')) {
+            $this->markTestSkipped('CPU timing requires non-thread-safe PHP with getrusage().');
+        }
+
+        $snapshot = (new Performance())->snapshot();
+
+        $this->assertIsFloat($snapshot['cpu_ms']);
+        $this->assertIsFloat($snapshot['wait_ms']);
+        $this->assertGreaterThanOrEqual(0.0, $snapshot['cpu_ms']);
+        $this->assertGreaterThanOrEqual(0.0, $snapshot['wait_ms']);
+    }
+
     public function testServerTimingUsesSafeBoundedMetricNames(): void {
         $performance = new Performance();
         $performance->record('unsafe metric/value', 1.5);
