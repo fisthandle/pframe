@@ -160,6 +160,6 @@ Skrypt jest tylko do odczytu: porównuje kopie z `src/`, raportuje rozjazdy i ni
 
 ## Wiedza i stan pracy
 
-- Ten rootowy `CLAUDE.md` jest kanoniczną instrukcją. `.codex/napkin.md` jest krótkim inboxem niepromowanych korekt; usuń wpis po utrwaleniu go w kodzie, teście lub tutaj.
+- Ten rootowy `AGENTS.md` jest kanoniczną instrukcją. `.codex/napkin.md` jest krótkim inboxem niepromowanych korekt; usuń wpis po utrwaleniu go w kodzie, teście lub tutaj.
 - Dłuższe, zweryfikowane rozwiązanie umieść w dokumentacji tematycznej. Jeśli powstanie backlog, użyj jednego `tasks/TODO.md`.
 - Nowy plan w `docs/plans/` musi mieć status `draft`, `approved`, `active`, `done` albo `superseded`. Nie zakładaj, że istniejący plan jest aktywny bez porównania z kodem.

@@ -6,7 +6,7 @@
 /.gitattributes export-ignore
 /.gitignore export-ignore
 /bin export-ignore
-/CLAUDE.md export-ignore
+/AGENTS.md export-ignore
 /composer.lock export-ignore
 /docs/plans export-ignore
 /frame export-ignore
