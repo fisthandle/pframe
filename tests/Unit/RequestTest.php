@@ -34,6 +34,22 @@ class RequestTest extends TestCase {
         $this->assertTrue($req->isAjax());
     }
 
+    public function testFromGlobalsIgnoresNonStringServerValues(): void {
+        $_SERVER['REQUEST_METHOD'] = ['POST'];
+        $_SERVER['REQUEST_URI'] = ['/unsafe'];
+        $_SERVER['REMOTE_ADDR'] = ['127.0.0.1'];
+        $_SERVER['HTTP_X_CUSTOM'] = ['value'];
+        $_SERVER['CONTENT_TYPE'] = ['application/json'];
+
+        $request = Request::fromGlobals();
+
+        $this->assertSame('GET', $request->method);
+        $this->assertSame('/', $request->path);
+        $this->assertSame('', $request->ip);
+        $this->assertNull($request->header('X-Custom'));
+        $this->assertNull($request->header('Content-Type'));
+    }
+
     public function testFromGlobalsTrustedProxiesUsesForwardedFor(): void {
         $_SERVER['REQUEST_METHOD'] = 'GET';
         $_SERVER['REQUEST_URI'] = '/';

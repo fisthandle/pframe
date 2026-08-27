@@ -79,6 +79,17 @@ class CacheTest extends TestCase {
         $this->assertGreaterThan(0, $retry);
     }
 
+    public function testRateCheckResetsInvalidState(): void {
+        $key = 'rl:login:invalid-state';
+        $this->cache->set($key, ['count' => 'invalid', 'start' => []], 60);
+
+        $this->assertNull($this->cache->rateCheck('login', 'invalid-state', 3, 60));
+        $state = $this->cache->get($key);
+        $this->assertIsArray($state);
+        $this->assertSame(1, $state['count']);
+        $this->assertIsInt($state['start']);
+    }
+
     public function testIncrementStartsAtOneAndIncrementsAtomically(): void {
         $key = 'increment-' . bin2hex(random_bytes(6));
 

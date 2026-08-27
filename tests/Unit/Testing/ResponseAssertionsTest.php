@@ -101,6 +101,21 @@ class ResponseAssertionsTest extends TestCase {
         $this->assertJsonContains(['success' => true]);
     }
 
+    public function testAssertJsonFailsWhenBodyIsNotAnObject(): void {
+        $this->response = Response::json('scalar');
+        $this->expectException(AssertionFailedError::class);
+        $this->expectExceptionMessage('Response body is not a JSON object');
+        $this->assertJsonContains(['success' => true]);
+    }
+
+    public function testAssertJsonRejectsListEvenForEmptySubset(): void {
+        $this->response = Response::json([['id' => 1]]);
+
+        $this->expectException(AssertionFailedError::class);
+        $this->expectExceptionMessage('Response body is not a JSON object');
+        $this->assertJsonContains([]);
+    }
+
     public function testAssertHeaderPassesOnMatch(): void {
         $this->response = new Response('', 200, ['Content-Type' => 'application/json']);
         $this->assertHeader('Content-Type', 'application/json');

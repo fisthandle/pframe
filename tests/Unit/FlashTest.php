@@ -35,6 +35,27 @@ class FlashTest extends TestCase {
         $this->assertTrue($flash->has());
     }
 
+    public function testCorruptedMessagesAreDiscarded(): void {
+        $_SESSION['_flash_messages'] = [
+            'invalid',
+            ['type' => 'success'],
+            ['type' => 'info', 'text' => 'valid'],
+        ];
+
+        $flash = new Flash();
+        $this->assertTrue($flash->has());
+        $this->assertSame([['type' => 'info', 'text' => 'valid']], $flash->get());
+    }
+
+    public function testAddReplacesInvalidStorage(): void {
+        $_SESSION['_flash_messages'] = 'invalid';
+
+        $flash = new Flash();
+        $flash->success('saved');
+
+        $this->assertSame([['type' => 'success', 'text' => 'saved']], $flash->get());
+    }
+
     public function testConvenienceMethods(): void {
         $flash = new Flash();
         $flash->success('ok');

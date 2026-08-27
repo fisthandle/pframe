@@ -26,6 +26,31 @@ class SseResponseTest extends TestCase {
         $this->assertInstanceOf(Response::class, $response);
     }
 
+    public function testConstructorRejectsNonClosureCallback(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('SseResponse requires callback closure');
+
+        new SseResponse('not-a-callback');
+    }
+
+    public function testInheritedResponseFactoriesAreRejected(): void {
+        $factories = [
+            'json' => static fn(): SseResponse => SseResponse::json(['ok' => true]),
+            'html' => static fn(): SseResponse => SseResponse::html('<p>no</p>'),
+            'file' => static fn(): SseResponse => SseResponse::file('/tmp/no'),
+            'redirect' => static fn(): SseResponse => SseResponse::redirect('/no'),
+        ];
+
+        foreach ($factories as $name => $factory) {
+            try {
+                $factory();
+                $this->fail("SseResponse::$name() should be rejected");
+            } catch (\LogicException $e) {
+                $this->assertStringContainsString("does not support $name()", $e->getMessage());
+            }
+        }
+    }
+
     public function testSendRunsCallback(): void {
         $called = false;
         $response = new SseResponse(function () use (&$called): void {

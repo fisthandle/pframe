@@ -43,7 +43,11 @@ trait DatabaseAssertions {
     protected function assertDatabaseCount(string $table, int $expected, array $conditions = []): void {
         $quotedTable = $this->quoteIdentifier($table);
         [$where, $params] = $this->buildWhereClause($conditions);
-        $count = (int) Base::var("SELECT COUNT(*) FROM $quotedTable WHERE $where", $params);
+        $count = Base::var("SELECT COUNT(*) FROM $quotedTable WHERE $where", $params);
+        if (!is_numeric($count)) {
+            $this->fail("COUNT query for '$table' did not return a numeric value");
+        }
+        $count = (int) $count;
         $scope = $conditions === [] ? "'$table'" : "'$table' matching " . json_encode($conditions);
         $this->assertSame($expected, $count, "Expected $expected rows in $scope, got $count");
     }
@@ -152,8 +156,14 @@ trait ResponseAssertions {
 
     /** @param array<string, mixed> $expected */
     protected function assertJsonContains(array $expected): void {
+        $decoded = json_decode($this->response->body);
+        if (!$decoded instanceof \stdClass) {
+            $this->fail('Response body is not a JSON object');
+        }
         $actual = json_decode($this->response->body, true);
-        $this->assertNotNull($actual, 'Response body is not valid JSON');
+        if (!is_array($actual)) {
+            $this->fail('Response body is not a JSON object');
+        }
         foreach ($expected as $key => $value) {
             $this->assertArrayHasKey($key, $actual, "JSON missing key '$key'");
             $this->assertSame(
@@ -278,13 +288,13 @@ trait FlashAssertions {
     private const FLASH_SESSION_KEY = '_flash_messages';
 
     protected function assertFlash(string $type, ?string $text = null): void {
-        $messages = $_SESSION[self::FLASH_SESSION_KEY] ?? [];
+        $messages = $this->flashMessages();
         $found = false;
         foreach ($messages as $message) {
-            if (($message['type'] ?? null) !== $type) {
+            if ($message['type'] !== $type) {
                 continue;
             }
-            if ($text !== null && ($message['text'] ?? null) !== $text) {
+            if ($text !== null && $message['text'] !== $text) {
                 continue;
             }
             $found = true;
@@ -300,7 +310,7 @@ trait FlashAssertions {
     }
 
     protected function assertNoFlash(?string $type = null): void {
-        $messages = $_SESSION[self::FLASH_SESSION_KEY] ?? [];
+        $messages = $this->flashMessages();
         if ($type === null) {
             $this->assertEmpty($messages, 'Expected no flash messages, but found ' . count($messages));
             return;
@@ -308,12 +318,34 @@ trait FlashAssertions {
 
         $found = false;
         foreach ($messages as $message) {
-            if (($message['type'] ?? null) === $type) {
+            if ($message['type'] === $type) {
                 $found = true;
                 break;
             }
         }
         $this->assertFalse($found, "Unexpected flash message of type '$type'");
+    }
+
+    /** @return list<array{type: string, text: string}> */
+    private function flashMessages(): array {
+        $stored = $_SESSION[self::FLASH_SESSION_KEY] ?? [];
+        if (!is_array($stored)) {
+            $this->fail('Flash session data must be an array');
+        }
+
+        $messages = [];
+        foreach ($stored as $message) {
+            if (!is_array($message)) {
+                $this->fail('Each flash message must be an array');
+            }
+            $type = $message['type'] ?? null;
+            $text = $message['text'] ?? null;
+            if (!is_string($type) || !is_string($text)) {
+                $this->fail('Flash message type and text must be strings');
+            }
+            $messages[] = ['type' => $type, 'text' => $text];
+        }
+        return $messages;
     }
 }
 
@@ -324,12 +356,18 @@ trait SessionAssertions {
 
     protected function assertAuthenticated(): void {
         $key = $this->sessionUserKey();
-        $this->assertNotEmpty($_SESSION[$key] ?? null, 'Expected authenticated user, but session has no user');
+        $user = $_SESSION[$key] ?? null;
+        $hasValidUser = is_array($user)
+            && array_filter(array_keys($user), 'is_string') !== [];
+        $this->assertTrue($hasValidUser, 'Expected authenticated user, but session has no valid user');
     }
 
     protected function assertGuest(): void {
         $key = $this->sessionUserKey();
-        $this->assertEmpty($_SESSION[$key] ?? null, 'Expected guest, but session has user');
+        $user = $_SESSION[$key] ?? null;
+        $hasValidUser = is_array($user)
+            && array_filter(array_keys($user), 'is_string') !== [];
+        $this->assertFalse($hasValidUser, 'Expected guest, but session has user');
     }
 
     protected function assertSessionHas(string $key, mixed ...$value): void {

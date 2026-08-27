@@ -17,6 +17,20 @@ class CsrfTest extends TestCase {
         $this->assertSame($token, Csrf::token());
     }
 
+    public function testCorruptedSessionValuesAreHandledSafely(): void {
+        $_SESSION['_csrf_token'] = ['invalid'];
+        $_SESSION['_csrf_secret'] = new \stdClass();
+
+        $token = Csrf::token();
+        $nonce = Csrf::nonce('save');
+
+        $this->assertSame(64, strlen($token));
+        $this->assertSame(64, strlen($nonce));
+        $this->assertIsString($_SESSION['_csrf_token']);
+        $this->assertIsString($_SESSION['_csrf_secret']);
+        $this->assertFalse(Csrf::validate('invalid'));
+    }
+
     public function testValidateCorrect(): void {
         $this->assertTrue(Csrf::validate(Csrf::token()));
     }

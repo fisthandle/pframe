@@ -16,6 +16,18 @@ class DbTest extends TestCase {
         $this->db->exec('INSERT INTO users (name, email) VALUES (?, ?)', ['Ann', 'ann@x.com']);
     }
 
+    public function testRejectsInvalidDsnConfig(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Database config "dsn" must be a string.');
+        new Db(['dsn' => ['sqlite::memory:']]);
+    }
+
+    public function testRejectsInvalidLogQueriesConfig(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Database config "log_queries" must be a boolean.');
+        new Db(['dsn' => 'sqlite::memory:', 'log_queries' => 'yes']);
+    }
+
     public function testVar(): void {
         $this->assertEquals(2, $this->db->var('SELECT COUNT(*) FROM users'));
     }

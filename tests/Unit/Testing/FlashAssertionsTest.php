@@ -80,4 +80,20 @@ class FlashAssertionsTest extends TestCase {
         $this->assertFlash('error', 'Oops');
         $this->assertNoFlash('warning');
     }
+
+    public function testMalformedFlashStorageFailsClearly(): void {
+        $_SESSION['_flash_messages'] = 'invalid';
+
+        $this->expectException(AssertionFailedError::class);
+        $this->expectExceptionMessage('Flash session data must be an array');
+        $this->assertNoFlash();
+    }
+
+    public function testMalformedFlashMessageFailsClearly(): void {
+        $_SESSION['_flash_messages'] = [['type' => ['success'], 'text' => 'Saved']];
+
+        $this->expectException(AssertionFailedError::class);
+        $this->expectExceptionMessage('Flash message type and text must be strings');
+        $this->assertNoFlash();
+    }
 }

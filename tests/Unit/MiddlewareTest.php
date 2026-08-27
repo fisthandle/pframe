@@ -41,6 +41,17 @@ class MiddlewareTest extends TestCase {
         $this->assertSame('ok', $response->body);
     }
 
+    public function testAuthRejectsMalformedSessionUser(): void {
+        $_SESSION['user'] = 'corrupted';
+
+        $mw = Middleware::auth();
+        $response = $mw(new Request(method: 'GET', path: '/private'), fn (Request $req): Response => new Response('secret'));
+
+        $this->assertSame(302, $response->status);
+        $this->assertSame('/login', $response->headers['Location'] ?? null);
+        $this->assertSame('Musisz się zalogować.', (new Flash())->get()[0]['text'] ?? null);
+    }
+
     public function testAuthFallsBackWhenLoginRouteMissing(): void {
         $mw = Middleware::auth();
         $response = $mw(new Request(method: 'GET', path: '/private'), fn (Request $req): Response => new Response('ok'));

@@ -56,7 +56,7 @@ namespace PFrame {
         /** @var array<string, string> */
         public readonly array $headers;
         private bool $jsonBodyParsed = false;
-        /** @var array<string, mixed>|null */
+        /** @var array<string|int, mixed>|null */
         private ?array $jsonBodyCache = null;
 
         /**
@@ -92,7 +92,7 @@ namespace PFrame {
 
         public static function fromGlobals(int $maxBodyBytes = self::DEFAULT_MAX_BODY_BYTES): static {
             return self::buildFromGlobals(
-                (string) ($_SERVER['REMOTE_ADDR'] ?? ''),
+                self::serverString($_SERVER, 'REMOTE_ADDR'),
                 maxBodyBytes: $maxBodyBytes,
             );
         }
@@ -163,13 +163,13 @@ namespace PFrame {
             array $trustedProxies = [],
             bool $trustedProxiesResolved = false,
         ): static {
-            $uri = $_SERVER['REQUEST_URI'] ?? '/';
+            $uri = self::serverString($_SERVER, 'REQUEST_URI', '/');
             $path = parse_url($uri, PHP_URL_PATH) ?: '/';
             $headers ??= self::parseServerHeaders($_SERVER);
             $body = self::readRequestBody($headers, max(0, $maxBodyBytes));
 
             return new static(
-                method: strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')),
+                method: strtoupper(self::serverString($_SERVER, 'REQUEST_METHOD', 'GET')),
                 path: (string) $path,
                 query: $_GET,
                 post: $_POST,
@@ -257,16 +257,25 @@ namespace PFrame {
                 if (!str_starts_with($key, 'HTTP_')) {
                     continue;
                 }
+                if (!is_string($value)) {
+                    continue;
+                }
                 $name = str_replace('_', '-', substr($key, 5));
-                $headers[ucwords(strtolower($name), '-')] = (string) $value;
+                $headers[ucwords(strtolower($name), '-')] = $value;
             }
-            if (isset($server['CONTENT_TYPE'])) {
-                $headers['Content-Type'] = (string) $server['CONTENT_TYPE'];
+            if (isset($server['CONTENT_TYPE']) && is_string($server['CONTENT_TYPE'])) {
+                $headers['Content-Type'] = $server['CONTENT_TYPE'];
             }
-            if (isset($server['CONTENT_LENGTH'])) {
-                $headers['Content-Length'] = (string) $server['CONTENT_LENGTH'];
+            if (isset($server['CONTENT_LENGTH']) && is_string($server['CONTENT_LENGTH'])) {
+                $headers['Content-Length'] = $server['CONTENT_LENGTH'];
             }
             return $headers;
+        }
+
+        /** @param array<string, mixed> $server */
+        private static function serverString(array $server, string $key, string $default = ''): string {
+            $value = $server[$key] ?? $default;
+            return is_string($value) ? $value : $default;
         }
 
         /**
@@ -275,7 +284,7 @@ namespace PFrame {
          * @param list<string> $trustedProxies
          */
         private static function resolveIp(array $server, array $headers, array $trustedProxies): string {
-            $remoteAddr = (string) ($server['REMOTE_ADDR'] ?? '');
+            $remoteAddr = self::serverString($server, 'REMOTE_ADDR');
             if ($remoteAddr === '') {
                 return '';
             }
@@ -284,7 +293,7 @@ namespace PFrame {
                 return $remoteAddr;
             }
 
-            $xff = (string) ($server['HTTP_X_FORWARDED_FOR'] ?? '');
+            $xff = self::serverString($server, 'HTTP_X_FORWARDED_FOR');
             if ($xff !== '') {
                 foreach (array_reverse(array_map('trim', explode(',', $xff))) as $ip) {
                     if ($ip === '' || in_array($ip, $trustedProxies, true)) {
@@ -296,7 +305,7 @@ namespace PFrame {
                 }
             }
 
-            $realIp = (string) ($server['HTTP_X_REAL_IP'] ?? '');
+            $realIp = self::serverString($server, 'HTTP_X_REAL_IP');
             if ($realIp !== '' && filter_var($realIp, FILTER_VALIDATE_IP)) {
                 return $realIp;
             }
@@ -422,7 +431,8 @@ namespace PFrame {
 
                 $host = parse_url($url, PHP_URL_HOST);
                 if (is_string($host)) {
-                    $currentHost = (string) ($_SERVER['HTTP_HOST'] ?? '');
+                    $currentHostValue = $_SERVER['HTTP_HOST'] ?? '';
+                    $currentHost = is_string($currentHostValue) ? $currentHostValue : '';
                     if ($currentHost === '') {
                         throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
                     }
@@ -614,7 +624,8 @@ namespace PFrame {
 
         private function resolvePhpStartWall(): float {
             $now = microtime(true);
-            $requestStart = (float) ($_SERVER['REQUEST_TIME_FLOAT'] ?? 0.0);
+            $requestStartValue = $_SERVER['REQUEST_TIME_FLOAT'] ?? 0.0;
+            $requestStart = is_numeric($requestStartValue) ? (float) $requestStartValue : 0.0;
             if (PHP_SAPI !== 'cli' && $requestStart > 0.0 && $requestStart <= $now) {
                 return $requestStart;
             }
@@ -746,6 +757,7 @@ namespace PFrame {
             if (!is_array($values)) {
                 throw new \RuntimeException('Config file must return array: ' . $path);
             }
+            $values = self::stringKeyedArray($values, 'Config must use string keys: ' . $path);
             $this->configData = array_replace_recursive($this->configData, $values);
             if (isset($this->configData['timezone']) && is_string($this->configData['timezone'])) {
                 date_default_timezone_set($this->configData['timezone']);
@@ -766,6 +778,38 @@ namespace PFrame {
                 $value = $value[$segment];
             }
             return $value;
+        }
+
+        /**
+         * @param array<array-key, mixed> $values
+         * @return array<string, mixed>
+         */
+        private static function stringKeyedArray(array $values, string $error): array {
+            $result = [];
+            foreach ($values as $key => $value) {
+                if (!is_string($key)) {
+                    throw new \RuntimeException($error);
+                }
+                $result[$key] = $value;
+            }
+            return $result;
+        }
+
+        private static function intValue(mixed $value, int $default): int {
+            if (is_int($value)) {
+                return $value;
+            }
+            if (is_float($value) || is_bool($value) || (is_string($value) && is_numeric($value))) {
+                return (int) $value;
+            }
+            return $default;
+        }
+
+        private static function floatValue(mixed $value, float $default): float {
+            if (is_int($value) || is_float($value) || is_bool($value) || (is_string($value) && is_numeric($value))) {
+                return (float) $value;
+            }
+            return $default;
         }
 
         public function setConfig(string $key, mixed $value): void {
@@ -795,6 +839,7 @@ namespace PFrame {
                 if (!is_array($config)) {
                     throw new \RuntimeException('Database not configured.');
                 }
+                $config = self::stringKeyedArray($config, 'Database config must use string keys.');
                 $this->db = new Db($config, $this->performance);
             }
             return $this->db;
@@ -941,7 +986,11 @@ namespace PFrame {
                     if (!array_key_exists($placeholder, $params)) {
                         throw new \RuntimeException('Missing route parameter "' . $placeholder . '" for route: ' . $name);
                     }
-                    $url = str_replace('{' . $placeholder . '}', rawurlencode((string) $params[$placeholder]), $url);
+                    $value = $params[$placeholder];
+                    if ($value !== null && !is_scalar($value) && !$value instanceof \Stringable) {
+                        throw new \InvalidArgumentException('Route parameter "' . $placeholder . '" must be string-compatible.');
+                    }
+                    $url = str_replace('{' . $placeholder . '}', rawurlencode((string) ($value ?? '')), $url);
                     $usedParams[$placeholder] = true;
                 }
             }
@@ -1221,6 +1270,10 @@ namespace PFrame {
                 return $result;
             }
 
+            if ($result !== null && !is_scalar($result) && !$result instanceof \Stringable) {
+                throw new \UnexpectedValueException($controllerClass . '::' . $action . ' must return a Response or string-compatible value.');
+            }
+
             return new Response((string) ($result ?? ''));
         }
 
@@ -1253,7 +1306,7 @@ namespace PFrame {
                 }
             }
 
-            $debug = (int) $this->config('debug', 0);
+            $debug = self::intValue($this->config('debug', 0), 0);
             if ($request->isAjax()) {
                 $body = $debug >= 3
                     ? $e->getMessage()
@@ -1272,7 +1325,7 @@ namespace PFrame {
         }
 
         private function handleException(\Throwable $e, Request $request): Response {
-            $debug = (int) $this->config('debug', 0);
+            $debug = self::intValue($this->config('debug', 0), 0);
             $message = $debug >= 3
                 ? $e->getMessage() . "\n" . $e->getTraceAsString()
                 : '';
@@ -1282,7 +1335,7 @@ namespace PFrame {
         private function renderDefaultErrorPage(HttpException $e): string {
             $code = $e->statusCode;
             $status = self::HTTP_STATUS_TEXT[$code] ?? 'Error';
-            $debug = (int) $this->config('debug', 0);
+            $debug = self::intValue($this->config('debug', 0), 0);
             $message = $e->getMessage();
             $showMessage = $debug >= 1 || in_array($code, [400, 422, 429], true);
             $msgHtml = ($showMessage && $message !== '')
@@ -1362,7 +1415,7 @@ namespace PFrame {
                 $this->appendHeader($response, 'Server-Timing', $timing);
             }
 
-            $slowMs = max(0.0, (float) $this->config('performance.slow_ms', 0.0));
+            $slowMs = max(0.0, self::floatValue($this->config('performance.slow_ms', 0.0), 0.0));
             if ($slowMs > 0.0) {
                 $snapshot = $this->performance->snapshot();
                 if ($snapshot['php_ms'] >= $slowMs) {
@@ -1412,7 +1465,8 @@ namespace PFrame {
         }
 
         private function isHttps(Request $request): bool {
-            $https = strtolower((string) ($request->server['HTTPS'] ?? ''));
+            $httpsValue = $request->server['HTTPS'] ?? '';
+            $https = is_string($httpsValue) ? strtolower($httpsValue) : '';
             if ($https !== '' && $https !== 'off') {
                 return true;
             }
@@ -1467,7 +1521,8 @@ namespace PFrame {
                 $trusted = array_values(array_filter($trusted, static fn(mixed $ip): bool => is_string($ip) && $ip !== ''));
                 $trusted = Request::resolveTrustedProxies($trusted);
             }
-            $remote = (string) ($request->server['REMOTE_ADDR'] ?? '');
+            $remoteValue = $request->server['REMOTE_ADDR'] ?? '';
+            $remote = is_string($remoteValue) ? $remoteValue : '';
             return $remote !== '' && in_array($remote, $trusted, true);
         }
 
@@ -1510,7 +1565,7 @@ namespace PFrame {
                     'line' => (int) $error['line'],
                 ]);
 
-                $debug = (int) (self::$instance?->config('debug', 0) ?? 0);
+                $debug = self::intValue(self::$instance?->config('debug', 0) ?? 0, 0);
                 $body = $debug >= 3
                     ? (string) $error['message'] . ' in ' . (string) $error['file'] . ':' . (int) $error['line']
                     : 'Wystąpił błąd serwera.';
@@ -1531,7 +1586,10 @@ namespace PFrame {
                 $trusted = [];
             }
             $trusted = array_values(array_filter($trusted, static fn(mixed $ip): bool => is_string($ip) && $ip !== ''));
-            $maxBodyBytes = max(0, (int) $this->config('max_request_body_bytes', Request::DEFAULT_MAX_BODY_BYTES));
+            $maxBodyBytes = max(0, self::intValue(
+                $this->config('max_request_body_bytes', Request::DEFAULT_MAX_BODY_BYTES),
+                Request::DEFAULT_MAX_BODY_BYTES,
+            ));
             $request = $this->performance->measure(
                 'request',
                 fn(): Request => Request::fromGlobalsWithProxies($trusted, $maxBodyBytes),
@@ -1645,19 +1703,47 @@ namespace PFrame {
         /** @param array<string, mixed> $config */
         public function __construct(array $config, ?Performance $performance = null) {
             $this->performance = $performance;
-            $dsn = $config['dsn'] ?? sprintf(
-                'mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4',
-                $config['host'] ?? 'localhost',
-                (int) ($config['port'] ?? 3306),
-                $config['name'] ?? '',
-            );
+            if (array_key_exists('dsn', $config)) {
+                $dsn = $config['dsn'];
+                if (!is_string($dsn)) {
+                    throw new \InvalidArgumentException('Database config "dsn" must be a string.');
+                }
+            } else {
+                $host = $config['host'] ?? 'localhost';
+                $port = $config['port'] ?? 3306;
+                $name = $config['name'] ?? '';
+                if (!is_string($host)) {
+                    throw new \InvalidArgumentException('Database config "host" must be a string.');
+                }
+                if (!is_int($port) && !(is_string($port) && ctype_digit($port))) {
+                    throw new \InvalidArgumentException('Database config "port" must be an integer.');
+                }
+                if (!is_string($name)) {
+                    throw new \InvalidArgumentException('Database config "name" must be a string.');
+                }
+                $dsn = sprintf(
+                    'mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4',
+                    $host,
+                    (int) $port,
+                    $name,
+                );
+            }
+
+            $user = $config['user'] ?? null;
+            $password = $config['pass'] ?? null;
+            if ($user !== null && !is_string($user)) {
+                throw new \InvalidArgumentException('Database config "user" must be a string or null.');
+            }
+            if ($password !== null && !is_string($password)) {
+                throw new \InvalidArgumentException('Database config "pass" must be a string or null.');
+            }
 
             $connectStart = hrtime(true);
             try {
                 $this->pdo = new \PDO(
                     $dsn,
-                    $config['user'] ?? null,
-                    $config['pass'] ?? null,
+                    $user,
+                    $password,
                     [
                         \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
                         \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
@@ -1667,8 +1753,16 @@ namespace PFrame {
             } finally {
                 $this->performance?->record('db.connect', (hrtime(true) - $connectStart) / 1_000_000);
             }
-            $this->driver = (string) $this->pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
-            $this->configuredLogQueries = (bool) ($config['log_queries'] ?? false);
+            $driver = $this->pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
+            if (!is_string($driver)) {
+                throw new \RuntimeException('PDO returned an invalid driver name.');
+            }
+            $this->driver = $driver;
+            $logQueries = $config['log_queries'] ?? false;
+            if (!is_bool($logQueries)) {
+                throw new \InvalidArgumentException('Database config "log_queries" must be a boolean.');
+            }
+            $this->configuredLogQueries = $logQueries;
             $this->logQueries = $this->configuredLogQueries;
         }
 
@@ -1762,7 +1856,13 @@ namespace PFrame {
                 if (is_int($v) || is_float($v)) {
                     return (string) $v;
                 }
-                return $this->formatLogValue((string) $v);
+                if (is_bool($v)) {
+                    return $this->formatLogValue($v ? '1' : '');
+                }
+                if (is_string($v) || $v instanceof \Stringable) {
+                    return $this->formatLogValue((string) $v);
+                }
+                return $this->formatLogValue('[unsupported ' . get_debug_type($v) . ']');
             }, $sql);
             return $replaced ?? $sql;
         }
@@ -1864,7 +1964,7 @@ namespace PFrame {
 
         /**
          * @param array<int|string, mixed>|string|null $params
-         * @return int|list<array<string, mixed>>
+         * @return int|list<array<string|int, mixed>>
          */
         public function exec(string $sql, array|string|null $params = null): int|array {
             if ($this->isSelectQuery($sql)) {
@@ -1885,25 +1985,41 @@ namespace PFrame {
             return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): mixed {
                 $row = $stmt->fetch(\PDO::FETCH_NUM);
                 $this->lastRowCount = $row === false ? 0 : 1;
-                return $row === false ? null : $row[0];
+                if ($row === false) {
+                    return null;
+                }
+                if (!is_array($row)) {
+                    throw new \RuntimeException('PDO returned an invalid numeric row.');
+                }
+                return $row[0] ?? null;
             });
         }
 
         /**
          * @param array<int|string, mixed>|string|null $params
-         * @return array<string, mixed>|null
+         * @return array<string|int, mixed>|null
          */
         public function row(string $sql, array|string|null $params = null): ?array {
             return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): ?array {
                 $row = $stmt->fetch();
                 $this->lastRowCount = $row === false ? 0 : 1;
-                return $row === false ? null : $row;
+                if ($row === false) {
+                    return null;
+                }
+                if (!is_array($row)) {
+                    throw new \RuntimeException('PDO returned an invalid associative row.');
+                }
+                $result = [];
+                foreach ($row as $column => $value) {
+                    $result[$column] = $value;
+                }
+                return $result;
             });
         }
 
         /**
          * @param array<int|string, mixed>|string|null $params
-         * @return list<array<string, mixed>>
+         * @return list<array<string|int, mixed>>
          */
         public function results(string $sql, array|string|null $params = null): array {
             return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): array {
@@ -2319,7 +2435,16 @@ namespace PFrame {
             $this->lockAcquired = !$this->advisory;
         }
 
-        /** @param array<string, mixed> $cookieParams */
+        /**
+         * @param array{
+         *     lifetime?: int,
+         *     path?: string|null,
+         *     domain?: string|null,
+         *     secure?: bool,
+         *     httponly?: bool,
+         *     samesite?: 'Lax'|'lax'|'None'|'none'|'Strict'|'strict'
+         * } $cookieParams
+         */
         public function register(array $cookieParams = []): void {
             session_set_save_handler($this, true);
             $defaults = [
@@ -2485,7 +2610,7 @@ namespace PFrame {
             try {
                 $timeout = max(0, $this->lockTimeout);
                 $result = $this->db->var('SELECT GET_LOCK(?, ?)', [$this->lockName, $timeout]);
-                if ((int) $result === 1) {
+                if ($result === 1 || $result === '1') {
                     $this->lockAcquired = true;
                     $this->lockedSessionId = $id;
                     return true;
@@ -2514,8 +2639,10 @@ namespace PFrame {
         }
 
         private function persist(string $id, string $data): void {
-            $ip = substr((string) ($_SERVER['REMOTE_ADDR'] ?? ''), 0, 45);
-            $agent = mb_substr(mb_scrub((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 'UTF-8'), 0, 5000);
+            $ipValue = $_SERVER['REMOTE_ADDR'] ?? '';
+            $agentValue = $_SERVER['HTTP_USER_AGENT'] ?? '';
+            $ip = substr(is_string($ipValue) ? $ipValue : '', 0, 45);
+            $agent = mb_substr(mb_scrub(is_string($agentValue) ? $agentValue : '', 'UTF-8'), 0, 5000);
             $stamp = time();
 
             if ($this->db->driver() === 'sqlite') {
@@ -2641,11 +2768,13 @@ namespace PFrame {
         public const EXPIRED_MESSAGE = 'Sesja wygasła. Odśwież stronę.';
 
         public static function token(): string {
-            if (empty($_SESSION[self::SESSION_KEY])) {
-                $_SESSION[self::SESSION_KEY] = bin2hex(random_bytes(32));
+            $token = $_SESSION[self::SESSION_KEY] ?? null;
+            if (!is_string($token) || $token === '') {
+                $token = bin2hex(random_bytes(32));
+                $_SESSION[self::SESSION_KEY] = $token;
             }
 
-            return (string) $_SESSION[self::SESSION_KEY];
+            return $token;
         }
 
         public static function validate(?string $token): bool {
@@ -2653,8 +2782,8 @@ namespace PFrame {
                 return false;
             }
 
-            $stored = (string) ($_SESSION[self::SESSION_KEY] ?? '');
-            if ($stored === '') {
+            $stored = $_SESSION[self::SESSION_KEY] ?? null;
+            if (!is_string($stored) || $stored === '') {
                 return false;
             }
 
@@ -2667,11 +2796,13 @@ namespace PFrame {
         }
 
         public static function nonce(string $action): string {
-            if (empty($_SESSION[self::SECRET_KEY])) {
-                $_SESSION[self::SECRET_KEY] = bin2hex(random_bytes(32));
+            $secret = $_SESSION[self::SECRET_KEY] ?? null;
+            if (!is_string($secret) || $secret === '') {
+                $secret = bin2hex(random_bytes(32));
+                $_SESSION[self::SECRET_KEY] = $secret;
             }
 
-            return hash_hmac('sha256', $action, (string) $_SESSION[self::SECRET_KEY]);
+            return hash_hmac('sha256', $action, $secret);
         }
 
         public static function verifyNonce(string $action, ?string $token): bool {
@@ -2693,18 +2824,41 @@ namespace PFrame {
         private const SESSION_KEY = '_flash_messages';
 
         public function add(string $type, string $text): void {
-            $_SESSION[self::SESSION_KEY][] = ['type' => $type, 'text' => $text];
+            $messages = $this->messages();
+            $messages[] = ['type' => $type, 'text' => $text];
+            $_SESSION[self::SESSION_KEY] = $messages;
         }
 
         /** @return list<array{type: string, text: string}> */
         public function get(): array {
-            $messages = $_SESSION[self::SESSION_KEY] ?? [];
+            $messages = $this->messages();
             unset($_SESSION[self::SESSION_KEY]);
             return $messages;
         }
 
         public function has(): bool {
-            return !empty($_SESSION[self::SESSION_KEY]);
+            return $this->messages() !== [];
+        }
+
+        /** @return list<array{type: string, text: string}> */
+        private function messages(): array {
+            $stored = $_SESSION[self::SESSION_KEY] ?? [];
+            if (!is_array($stored)) {
+                return [];
+            }
+
+            $messages = [];
+            foreach ($stored as $message) {
+                if (!is_array($message)) {
+                    continue;
+                }
+                $type = $message['type'] ?? null;
+                $text = $message['text'] ?? null;
+                if (is_string($type) && is_string($text)) {
+                    $messages[] = ['type' => $type, 'text' => $text];
+                }
+            }
+            return $messages;
         }
 
         public function success(string $text): void {
@@ -2728,7 +2882,10 @@ namespace PFrame {
         /** @return callable(Request, callable): Response */
         public static function auth(string $loginRoute = 'login', string $message = 'Musisz się zalogować.'): callable {
             return function (Request $req, callable $next) use ($loginRoute, $message): Response {
-                if (!isset($_SESSION['user'])) {
+                $user = $_SESSION['user'] ?? null;
+                $hasValidUser = is_array($user)
+                    && array_filter(array_keys($user), 'is_string') !== [];
+                if (!$hasValidUser) {
                     if (in_array($req->method, ['GET', 'HEAD'], true)) {
                         $queryString = http_build_query($req->query, '', '&', PHP_QUERY_RFC3986);
                         $_SESSION[Session::INTENDED_URL_KEY] = $req->path . ($queryString !== '' ? '?' . $queryString : '');
@@ -2782,7 +2939,10 @@ namespace PFrame {
         /** @param array<string, mixed> $data */
         protected function render(string $template, array $data = []): Response {
             $app = App::instance();
-            $viewPath = (string) $app->config('view_path', 'templates');
+            $viewPath = $app->config('view_path', 'templates');
+            if (!is_string($viewPath)) {
+                throw new \RuntimeException('Config "view_path" must be a string.');
+            }
             $view = new View($viewPath);
             $app->setLastView($view);
 
@@ -2843,11 +3003,30 @@ namespace PFrame {
 
         /** @return array<string, mixed>|null */
         protected function currentUser(): ?array {
-            return $_SESSION['user'] ?? null;
+            $user = $_SESSION['user'] ?? null;
+            if (!is_array($user)) {
+                return null;
+            }
+
+            $result = [];
+            foreach ($user as $key => $value) {
+                if (is_string($key)) {
+                    $result[$key] = $value;
+                }
+            }
+            return $result === [] ? null : $result;
         }
 
         protected function currentUserId(): int {
-            return (int) ($this->currentUser()['id'] ?? 0);
+            $id = $this->currentUser()['id'] ?? 0;
+            if (is_int($id)) {
+                return $id;
+            }
+            if (is_string($id)) {
+                $parsed = filter_var($id, FILTER_VALIDATE_INT);
+                return is_int($parsed) ? $parsed : 0;
+            }
+            return 0;
         }
 
         protected function isAuthenticated(): bool {
@@ -2877,7 +3056,8 @@ namespace PFrame {
         /** @return array{page: int, offset: int, total_pages: int, per_page: int, total: int} */
         protected function paginate(int $total, int $perPage = 20): array {
             $perPage = max(1, $perPage);
-            $page = max(1, (int) ($this->request->query('page') ?? 1));
+            $page = filter_var($this->request->query('page', 1), FILTER_VALIDATE_INT);
+            $page = is_int($page) ? max(1, $page) : 1;
             $totalPages = max(1, (int) ceil($total / $perPage));
             $page = min($page, $totalPages);
             $offset = ($page - 1) * $perPage;
@@ -3237,17 +3417,24 @@ namespace PFrame {
                         return null;
                     }
 
-                    $elapsed = time() - (int) ($data['start'] ?? 0);
+                    $start = $data['start'] ?? null;
+                    $count = $data['count'] ?? null;
+                    if (!is_int($start) || !is_int($count)) {
+                        $this->storeUnlocked($key, ['count' => 1, 'start' => time()], $window);
+                        return null;
+                    }
+
+                    $elapsed = time() - $start;
                     if ($elapsed >= $window) {
                         $this->storeUnlocked($key, ['count' => 1, 'start' => time()], $window);
                         return null;
                     }
 
-                    if ((int) ($data['count'] ?? 0) >= $max) {
+                    if ($count >= $max) {
                         return $window - $elapsed;
                     }
 
-                    $data['count'] = (int) ($data['count'] ?? 0) + 1;
+                    $data['count'] = $count + 1;
                     $this->storeUnlocked($key, $data, $window);
                     return null;
                 });
@@ -3605,8 +3792,11 @@ namespace PFrame {
             return $command;
         }
 
-        /** @param array{pid: int} $status */
-        private function terminateProcess(mixed $process, array $status, bool $isolatedGroup): void {
+        /**
+         * @param resource $process
+         * @param array{pid: int} $status
+         */
+        private function terminateProcess($process, array $status, bool $isolatedGroup): void {
             $pid = $status['pid'];
             if ($isolatedGroup && function_exists('posix_getpgid') && function_exists('posix_kill')) {
                 $groupId = @posix_getpgid($pid);
@@ -3768,8 +3958,8 @@ namespace PFrame {
             $key = $this->keyPrefix . $name . ':last';
             if ($this->hasApcu) {
                 $val = apcu_fetch($key, $success);
-                if ($success) {
-                    return (int)$val;
+                if ($success && is_int($val)) {
+                    return $val;
                 }
             }
 
@@ -3906,8 +4096,9 @@ namespace PFrame {
         ) {}
 
         /**
-         * @param list<array<string, mixed>> $rows
-         * @param callable(array<string, mixed>, int): array{prefix: string, sql: string} $formatter
+         * @template T of array<string, mixed>
+         * @param list<T> $rows
+         * @param callable(T, int): array{prefix: string, sql: string} $formatter
          * @return array{short: string, full: string}
          */
         private function buildSqlViews(array $rows, int $shortLimit, callable $formatter): array {
@@ -4006,7 +4197,7 @@ namespace PFrame {
                 $slowViews = $this->buildSqlViews(
                     $d['slowest'],
                     100,
-                    static fn(array $s, int $_): array => [
+                    static fn($s, int $_): array => [
                         'prefix' => '<b>' . $s['ms'] . 'ms</b>',
                         'sql' => (string) $s['sql'],
                     ],
@@ -4027,7 +4218,7 @@ namespace PFrame {
                 $dupsViews = $this->buildSqlViews(
                     $d['duplicates'],
                     90,
-                    static fn(array $dup, int $_): array => [
+                    static fn($dup, int $_): array => [
                         'prefix' => '<b>' . $dup['count'] . '×</b> (' . $dup['total_ms'] . 'ms)',
                         'sql' => (string) ($dup['pattern'] ?? ''),
                     ],
@@ -4115,7 +4306,7 @@ namespace PFrame {
                 $queryViews = $this->buildSqlViews(
                     $qs,
                     120,
-                    static fn(array $q, int $i): array => [
+                    static fn($q, int $i): array => [
                         'prefix' => ($i + 1) . '. (' . $q['ms'] . 'ms; exec ' . $q['execute_ms']
                             . ' + fetch ' . $q['fetch_ms'] . '; rows ' . $q['rows'] . ')',
                         'sql' => (string) $q['sql'],
@@ -4170,7 +4361,7 @@ namespace PFrame {
 
         /**
          * @param array<int|string, mixed>|string|null $params
-         * @return array<string, mixed>|null
+         * @return array<string|int, mixed>|null
          */
         public static function row(string $sql, array|string|null $params = null): ?array {
             return self::db()->row($sql, $params);
@@ -4178,7 +4369,7 @@ namespace PFrame {
 
         /**
          * @param array<int|string, mixed>|string|null $params
-         * @return list<array<string, mixed>>
+         * @return list<array<string|int, mixed>>
          */
         public static function results(string $sql, array|string|null $params = null): array {
             return self::db()->results($sql, $params);
@@ -4194,7 +4385,7 @@ namespace PFrame {
 
         /**
          * @param array<int|string, mixed>|string|null $params
-         * @return int|list<array<string, mixed>>
+         * @return int|list<array<string|int, mixed>>
          */
         public static function exec(string $sql, array|string|null $params = null): int|array {
             return self::db()->exec($sql, $params);
@@ -4232,12 +4423,12 @@ namespace {
         return htmlspecialchars((string) $value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
     }
 
-    /** @phpstan-ignore-next-line */
+    /** @param array<array-key, mixed> $array */
     function ha(array $array, string|int $key, mixed $default = ''): string {
         return h($array[$key] ?? $default);
     }
 
-    /** @phpstan-ignore-next-line */
+    /** @param array<array-key, mixed>|null $array */
     function getS(?array $array, string|int $key, mixed $default = null): mixed {
         if ($array === null) {
             return $default;
@@ -4294,7 +4485,7 @@ namespace {
         return 0;
     }
 
-    /** @phpstan-ignore-next-line */
+    /** @return list<string> */
     function explodeS(string $separator, mixed $string, int $limit = PHP_INT_MAX): array {
         if ($string === null || $string === '' || $string === []) {
             return [];

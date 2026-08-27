@@ -130,6 +130,17 @@ class ControllerTest extends TestCase {
         $this->assertSame(0, $p['offset']);
     }
 
+    public function testPaginateUsesFirstPageForInvalidInput(): void {
+        $ctrl = new class extends Controller {
+            public function test(): array {
+                return $this->paginate(100, 20);
+            }
+        };
+        $ctrl->request = new Request(method: 'GET', path: '/', query: ['page' => ['invalid']]);
+
+        $this->assertSame(1, $ctrl->test()['page']);
+    }
+
     public function testRequireAuthThrowsAndFlashes(): void {
         $ctrl = new class extends Controller {
             public function test(): void {
@@ -150,8 +161,9 @@ class ControllerTest extends TestCase {
 
     public function testRequireAdmin(): void {
         $ctrl = new class extends Controller {
-            public function test(): void {
+            public function test(): bool {
                 $this->requireAdmin();
+                return true;
             }
         };
         $ctrl->request = new Request(method: 'GET', path: '/');
@@ -165,8 +177,7 @@ class ControllerTest extends TestCase {
         }
 
         $_SESSION['user'] = ['id' => 1, 'role' => 'admin'];
-        $ctrl->test();
-        $this->assertTrue(true);
+        $this->assertTrue($ctrl->test());
     }
 
     public function testCurrentUserHelpers(): void {
@@ -187,6 +198,18 @@ class ControllerTest extends TestCase {
         $result = $ctrl->test();
         $this->assertSame(42, $result['id']);
         $this->assertTrue($result['auth']);
+
+        $_SESSION['user'] = ['id' => '43'];
+        $this->assertSame(43, $ctrl->test()['id']);
+
+        $_SESSION['user'] = 'invalid';
+        $this->assertSame(['user' => null, 'id' => 0, 'auth' => false], $ctrl->test());
+
+        $_SESSION['user'] = [];
+        $this->assertSame(['user' => null, 'id' => 0, 'auth' => false], $ctrl->test());
+
+        $_SESSION['user'] = [42 => 'invalid'];
+        $this->assertSame(['user' => null, 'id' => 0, 'auth' => false], $ctrl->test());
     }
 
     public function testValidateCsrfFromPostAndHeader(): void {

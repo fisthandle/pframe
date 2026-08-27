@@ -95,6 +95,15 @@ class AppTest extends TestCase {
         ]));
     }
 
+    public function testNamedRouteRejectsNonStringCompatiblePathParam(): void {
+        $app = new App();
+        $app->get('/o/{slug}', HelloStub::class, 'index', name: 'ad.show');
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Route parameter "slug" must be string-compatible.');
+        $app->url('ad.show', ['slug' => ['invalid']]);
+    }
+
     public function testDuplicateRouteNameThrows(): void {
         $app = new App();
         $app->get('/first', HelloStub::class, 'index', name: 'dup');
@@ -424,6 +433,17 @@ class AppTest extends TestCase {
         $this->assertStringContainsString('boom', $response->body);
     }
 
+    public function testInvalidControllerReturnIsHandledAs500(): void {
+        $app = new App();
+        $app->setConfig('debug', 3);
+        $app->get('/invalid-return', InvalidReturnCtrl::class, 'run');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/invalid-return'));
+
+        $this->assertSame(500, $response->status);
+        $this->assertStringContainsString('must return a Response or string-compatible value', $response->body);
+    }
+
     public function testBeforeAndAfterRouteHooks(): void {
         $app = new App();
         $app->get('/hooks', HookCtrl::class, 'run');
@@ -731,6 +751,12 @@ class Http422Stub {
 class ThrowRuntimeCtrl {
     public function run(): Response {
         throw new \RuntimeException('boom');
+    }
+}
+
+class InvalidReturnCtrl {
+    public function run(): array {
+        return ['invalid'];
     }
 }
 
