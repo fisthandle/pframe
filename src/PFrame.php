@@ -1964,12 +1964,12 @@ namespace PFrame {
 
         /**
          * @param array<int|string, mixed>|string|null $params
-         * @return int|list<array<string|int, mixed>>
+         * @return int|list<array<string, mixed>>
          */
         public function exec(string $sql, array|string|null $params = null): int|array {
             if ($this->isSelectQuery($sql)) {
                 return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): array {
-                    $rows = array_values($stmt->fetchAll());
+                    $rows = self::associativeRows($stmt->fetchAll(\PDO::FETCH_ASSOC));
                     $this->lastRowCount = count($rows);
                     return $rows;
                 });
@@ -1997,11 +1997,11 @@ namespace PFrame {
 
         /**
          * @param array<int|string, mixed>|string|null $params
-         * @return array<string|int, mixed>|null
+         * @return array<string, mixed>|null
          */
         public function row(string $sql, array|string|null $params = null): ?array {
             return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): ?array {
-                $row = $stmt->fetch();
+                $row = $stmt->fetch(\PDO::FETCH_ASSOC);
                 $this->lastRowCount = $row === false ? 0 : 1;
                 if ($row === false) {
                     return null;
@@ -2009,24 +2009,50 @@ namespace PFrame {
                 if (!is_array($row)) {
                     throw new \RuntimeException('PDO returned an invalid associative row.');
                 }
-                $result = [];
-                foreach ($row as $column => $value) {
-                    $result[$column] = $value;
-                }
-                return $result;
+                return self::associativeRow($row);
             });
         }
 
         /**
          * @param array<int|string, mixed>|string|null $params
-         * @return list<array<string|int, mixed>>
+         * @return list<array<string, mixed>>
          */
         public function results(string $sql, array|string|null $params = null): array {
             return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): array {
-                $rows = array_values($stmt->fetchAll());
+                $rows = self::associativeRows($stmt->fetchAll(\PDO::FETCH_ASSOC));
                 $this->lastRowCount = count($rows);
                 return $rows;
             });
+        }
+
+        /**
+         * @param array<array-key, mixed> $row
+         * @return array<string, mixed>
+         */
+        private static function associativeRow(array $row): array {
+            $result = [];
+            foreach ($row as $column => $value) {
+                if (!is_string($column)) {
+                    throw new \RuntimeException('Database result columns must have non-numeric names; alias numeric expressions.');
+                }
+                $result[$column] = $value;
+            }
+            return $result;
+        }
+
+        /**
+         * @param array<array-key, mixed> $rows
+         * @return list<array<string, mixed>>
+         */
+        private static function associativeRows(array $rows): array {
+            $result = [];
+            foreach ($rows as $row) {
+                if (!is_array($row)) {
+                    throw new \RuntimeException('PDO returned an invalid associative row.');
+                }
+                $result[] = self::associativeRow($row);
+            }
+            return $result;
         }
 
         /**
@@ -4361,7 +4387,7 @@ namespace PFrame {
 
         /**
          * @param array<int|string, mixed>|string|null $params
-         * @return array<string|int, mixed>|null
+         * @return array<string, mixed>|null
          */
         public static function row(string $sql, array|string|null $params = null): ?array {
             return self::db()->row($sql, $params);
@@ -4369,7 +4395,7 @@ namespace PFrame {
 
         /**
          * @param array<int|string, mixed>|string|null $params
-         * @return list<array<string|int, mixed>>
+         * @return list<array<string, mixed>>
          */
         public static function results(string $sql, array|string|null $params = null): array {
             return self::db()->results($sql, $params);
@@ -4385,7 +4411,7 @@ namespace PFrame {
 
         /**
          * @param array<int|string, mixed>|string|null $params
-         * @return int|list<array<string|int, mixed>>
+         * @return int|list<array<string, mixed>>
          */
         public static function exec(string $sql, array|string|null $params = null): int|array {
             return self::db()->exec($sql, $params);

@@ -27,7 +27,7 @@ trait DatabaseAssertions {
     protected function assertDatabaseHas(string $table, array $conditions): void {
         $quotedTable = $this->quoteIdentifier($table);
         [$where, $params] = $this->buildWhereClause($conditions);
-        $row = Base::row("SELECT 1 FROM $quotedTable WHERE $where LIMIT 1", $params);
+        $row = Base::row("SELECT 1 AS row_exists FROM $quotedTable WHERE $where LIMIT 1", $params);
         $this->assertNotNull($row, "No row in '$table' matching " . json_encode($conditions));
     }
 
@@ -35,7 +35,7 @@ trait DatabaseAssertions {
     protected function assertDatabaseMissing(string $table, array $conditions): void {
         $quotedTable = $this->quoteIdentifier($table);
         [$where, $params] = $this->buildWhereClause($conditions);
-        $row = Base::row("SELECT 1 FROM $quotedTable WHERE $where LIMIT 1", $params);
+        $row = Base::row("SELECT 1 AS row_exists FROM $quotedTable WHERE $where LIMIT 1", $params);
         $this->assertNull($row, "Unexpected row in '$table' matching " . json_encode($conditions));
     }
 

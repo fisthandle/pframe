@@ -49,6 +49,24 @@ class DbTest extends TestCase {
         $this->assertCount(2, $rows);
     }
 
+    public function testRowRejectsNumericColumnName(): void {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Database result columns must have non-numeric names; alias numeric expressions.');
+        $this->db->row('SELECT 1');
+    }
+
+    public function testResultsRejectNumericColumnName(): void {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Database result columns must have non-numeric names; alias numeric expressions.');
+        $this->db->results('SELECT 1');
+    }
+
+    public function testExecSelectRejectsNumericColumnName(): void {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Database result columns must have non-numeric names; alias numeric expressions.');
+        $this->db->exec('SELECT 1');
+    }
+
     public function testCol(): void {
         $this->assertSame(['Joe', 'Ann'], $this->db->col('SELECT name FROM users ORDER BY id'));
     }
@@ -371,7 +389,7 @@ class DbTest extends TestCase {
 
     public function testFormattedLogReturnsExpectedFormat(): void {
         $db = new Db(['dsn' => 'sqlite::memory:', 'log_queries' => true]);
-        $db->exec('SELECT 1');
+        $db->exec('SELECT 1 AS value');
 
         $log = $db->log();
         $this->assertIsString($log);
