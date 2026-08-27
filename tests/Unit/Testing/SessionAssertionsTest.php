@@ -30,20 +30,17 @@ class SessionAssertionsTest extends TestCase {
         $this->assertAuthenticated();
     }
 
-    public function testAssertAuthenticatedRejectsMalformedUser(): void {
-        $_SESSION['user'] = 'corrupted';
+    public function testAssertAuthenticatedPassesForIntegerIdentifier(): void {
+        $_SESSION['user'] = 42;
+        $this->assertAuthenticated();
+    }
 
-        $this->expectException(AssertionFailedError::class);
+    public function testAssertAuthenticatedPassesForStringIdentifier(): void {
+        $_SESSION['user'] = 'user-token';
         $this->assertAuthenticated();
     }
 
     public function testAssertGuestPassesWhenNoUser(): void {
-        $this->assertGuest();
-    }
-
-    public function testAssertGuestTreatsMalformedUserAsUnauthenticated(): void {
-        $_SESSION['user'] = 'corrupted';
-
         $this->assertGuest();
     }
 

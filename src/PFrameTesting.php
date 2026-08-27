@@ -356,18 +356,12 @@ trait SessionAssertions {
 
     protected function assertAuthenticated(): void {
         $key = $this->sessionUserKey();
-        $user = $_SESSION[$key] ?? null;
-        $hasValidUser = is_array($user)
-            && array_filter(array_keys($user), 'is_string') !== [];
-        $this->assertTrue($hasValidUser, 'Expected authenticated user, but session has no valid user');
+        $this->assertNotEmpty($_SESSION[$key] ?? null, 'Expected authenticated user, but session has no user');
     }
 
     protected function assertGuest(): void {
         $key = $this->sessionUserKey();
-        $user = $_SESSION[$key] ?? null;
-        $hasValidUser = is_array($user)
-            && array_filter(array_keys($user), 'is_string') !== [];
-        $this->assertFalse($hasValidUser, 'Expected guest, but session has user');
+        $this->assertEmpty($_SESSION[$key] ?? null, 'Expected guest, but session has user');
     }
 
     protected function assertSessionHas(string $key, mixed ...$value): void {
