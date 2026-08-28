@@ -113,6 +113,13 @@ ten plik osobno i wymaga go jawnie w `tests/bootstrap.php` po `vendor/autoload.p
 
 PHPUnit 13 nie obsługuje `-v`; gdy potrzebny jest szczegółowy przebieg, użyj `--debug`.
 
+## Lokalne porty
+
+PFrame nie uruchamia stałego lokalnego serwera HTTP. Port hosta `3306` należy
+do usługi MySQL w GitHub Actions tego repozytorium. Kanoniczny przydział portów
+wszystkich repozytoriów jest w `/home/pawel/dev/infra/local-ports.json`; nowy
+stały listener najpierw zarejestruj w tym pliku.
+
 ## Build
 
 - `composer install` — odtwarza zależności i autoloader do lokalnej walidacji biblioteki.
