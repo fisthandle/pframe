@@ -169,6 +169,22 @@ class AppTest extends TestCase {
         $this->assertSame(200, $response->status);
     }
 
+    public function testAjaxRouteTakesPriorityOverSyncFallbackForSamePath(): void {
+        $app = new App();
+        $app->get('/vote', HelloStub::class, 'index');
+        $app->get('/vote', HelloStub::class, 'ajax', ajax: true);
+
+        $syncResponse = $app->handle(new Request(method: 'GET', path: '/vote'));
+        $ajaxResponse = $app->handle(new Request(
+            method: 'GET',
+            path: '/vote',
+            headers: ['X-Requested-With' => 'XMLHttpRequest'],
+        ));
+
+        $this->assertSame('hello world', $syncResponse->body);
+        $this->assertSame('ajax response', $ajaxResponse->body);
+    }
+
     public function testConfig(): void {
         $app = new App();
         $app->loadConfig(__DIR__ . '/../fixtures/config/app.php');
@@ -648,7 +664,12 @@ class AppTest extends TestCase {
         $app->setConfig('debug', 0);
         $app->get('/warn', WarningCtrl::class, 'run');
 
-        $response = $app->handle(new Request(method: 'GET', path: '/warn'));
+        $previousErrorReporting = error_reporting(E_ALL);
+        try {
+            $response = $app->handle(new Request(method: 'GET', path: '/warn'));
+        } finally {
+            error_reporting($previousErrorReporting);
+        }
         $this->assertSame(500, $response->status);
     }
 
@@ -697,6 +718,10 @@ class HelloStub {
     public function submit(): Response {
         self::$runs++;
         return new Response('submitted');
+    }
+
+    public function ajax(): Response {
+        return new Response('ajax response');
     }
 }
 

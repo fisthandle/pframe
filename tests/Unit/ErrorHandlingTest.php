@@ -71,6 +71,16 @@ class ErrorHandlingTest extends TestCase {
         $this->assertStringContainsString('Sensitive 500 message', $response->body);
     }
 
+    public function testSuppressedWarningDoesNotBecomeException(): void {
+        $app = new App();
+        $app->get('/suppressed-warning', SuppressedWarningController::class, 'handle');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/suppressed-warning'));
+
+        $this->assertSame(200, $response->status);
+        $this->assertSame('ok', $response->body);
+    }
+
     public function testMessageVisibleFor422Always(): void {
         $app = new App();
         $app->setConfig('debug', 0);
@@ -288,5 +298,12 @@ class ErrorHandlingTest extends TestCase {
         $this->assertStringContainsString('404', $response->body);
         $this->assertStringContainsString('Not Found', $response->body);
         $this->assertStringContainsString('<!doctype html>', strtolower($response->body));
+    }
+}
+
+final class SuppressedWarningController {
+    public function handle(): Response {
+        @stat(sys_get_temp_dir() . '/pframe-missing-' . uniqid('', true));
+        return new Response('ok');
     }
 }

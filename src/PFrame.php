@@ -1130,18 +1130,21 @@ namespace PFrame {
          * @return array{controller: string, action: string, params: array<string, string>, middleware: array<callable>}|null
          */
         private function matchRouteIndexes(array $indexes, string $path, bool $isAjax, bool $staticRoute = false): ?array {
-            foreach ($indexes as $i) {
-                $route = $this->routes[$i];
-                if ($route['ajax'] && !$isAjax) {
-                    continue;
-                }
+            $ajaxPreference = $isAjax ? [true, false] : [false];
+            foreach ($ajaxPreference as $ajax) {
+                foreach ($indexes as $i) {
+                    $route = $this->routes[$i];
+                    if ($route['ajax'] !== $ajax) {
+                        continue;
+                    }
 
-                $matches = [];
-                if (!$staticRoute && !preg_match($route['regex'], $path, $matches)) {
-                    continue;
-                }
+                    $matches = [];
+                    if (!$staticRoute && !preg_match($route['regex'], $path, $matches)) {
+                        continue;
+                    }
 
-                return $this->buildMatchedRoute($route, $matches);
+                    return $this->buildMatchedRoute($route, $matches);
+                }
             }
 
             return null;
@@ -1528,11 +1531,7 @@ namespace PFrame {
 
         private function withErrorHandler(callable $callback): Response {
             set_error_handler(function (int $severity, string $message, string $file, int $line): bool {
-                if (error_reporting() === 0) {
-                    return false;
-                }
-                $alwaysThrow = [E_WARNING, E_USER_WARNING, E_RECOVERABLE_ERROR, E_USER_ERROR];
-                if (!in_array($severity, $alwaysThrow, true) && !(error_reporting() & $severity)) {
+                if (!(error_reporting() & $severity)) {
                     return false;
                 }
                 throw new \ErrorException($message, 0, $severity, $file, $line);
@@ -2388,14 +2387,15 @@ namespace PFrame {
                 throw new \RuntimeException('Template not found: ' . $template);
             }
 
-            $view = $this;
-            extract($data, EXTR_SKIP);
-
             $start = hrtime(true);
             $initialBufferLevel = ob_get_level();
             ob_start();
             try {
-                include $realFile;
+                (static function (array $__pframeData, string $__pframePath, View $__pframeView): void {
+                    extract($__pframeData, EXTR_SKIP);
+                    $view = $__pframeView;
+                    include $__pframePath;
+                })($data, $realFile, $this);
             } catch (\Throwable $e) {
                 while (ob_get_level() > $initialBufferLevel) {
                     $levelBeforeClean = ob_get_level();

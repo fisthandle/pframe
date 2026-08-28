@@ -19,6 +19,18 @@ class ViewTest extends TestCase {
         $this->assertStringContainsString('Hello Joe', $html);
     }
 
+    public function testTemplateDataKeysDoNotCollideWithRendererInternals(): void {
+        $html = $this->view->render('internal_names.php', [
+            'data' => 'data-value',
+            'template' => 'template-value',
+            'filePath' => 'file-path-value',
+            'templatePath' => 'template-path-value',
+            'templateData' => 'template-data-value',
+        ]);
+
+        $this->assertSame('data-value|template-value|file-path-value|template-path-value|template-data-value', $html);
+    }
+
     public function testRenderWithLayout(): void {
         $html = $this->view->render('with_layout.php', ['title' => 'Test']);
         $this->assertStringContainsString('<html>', $html);
