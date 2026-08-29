@@ -3,6 +3,8 @@
 /.phpunit.result.cache
 /coverage/
 /.claude/
+/.desloppify/
+/.worktrees/
 CLAUDE.md
 example/
 build/
