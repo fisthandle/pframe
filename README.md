@@ -2,55 +2,52 @@
 
 Single-file PHP 8.4+ micro-framework. Zero runtime package dependencies, copy-paste deployment.
 
-One file. 20 classes. Single-file core in `src/PFrame.php` (~4300 LOC). Everything you need, nothing you don't.
+Core znajduje się w `src/PFrame.php`; aplikacja może skopiować go do własnego
+`lib/` bez dodatkowego pakietu runtime.
 
 ## Quick Start
 
-```
-myproject/
-├── public/index.php
-├── src/PFrame.php          # from this repo
-├── lib/PFrame.php          # optional copied/renamed location
-├── config/app.php
-├── controllers/
-├── templates/
-├── logs/
-└── tmp/cache/
-```
+Minimalny przykład działa bez bazy i bez szablonów. Zapisz poniższy plik jako
+`myproject/public/index.php`, kopiując wcześniej `src/PFrame.php` do
+`myproject/src/PFrame.php`:
 
 ```php
 <?php
-// public/index.php
+// myproject/public/index.php
 declare(strict_types=1);
-require dirname(__DIR__) . '/src/PFrame.php'; // or /lib/PFrame.php if copied
+require dirname(__DIR__) . '/src/PFrame.php';
 
-class P1 extends \PFrame\Base {}
+final class HealthController extends \PFrame\Controller {
+    public function index(): \PFrame\Response {
+        return $this->jsonSuccess(['service' => 'demo']);
+    }
+}
 
-$app = P1::app();
-$app->loadConfig(dirname(__DIR__) . '/config/app.php');
-
-$session = new \PFrame\Session($app->db(), advisory: true, lockTimeout: 5);
-$session->register();
-$app->startSession();
-
-$app->get('/', HomeController::class, 'index');
-$app->get('/users/{id}', UserController::class, 'show', name: 'user.show');
-$app->post('/login', AuthController::class, 'login');
-
-$auth = \PFrame\Middleware::auth();
-$csrf = \PFrame\Middleware::csrf();
-
-$app->group('/admin', function (\PFrame\App $app) use ($csrf): void {
-    $app->get('/users', AdminController::class, 'index', name: 'users');
-    $app->post('/users', AdminController::class, 'store', mw: [$csrf], name: 'users.store');
-}, mw: [$auth], namePrefix: 'admin.');
+$app = new \PFrame\App();
+$app->get('/health', HealthController::class, 'index');
 
 $app->run();
 ```
 
-This is the classic one-request-per-process lifecycle. Call `Session::register()` before
-`App::startSession()` and before any output. The secure-cookie default assumes HTTPS; for a local
-plain-HTTP development server, explicitly pass `['secure' => false]` to `register()`.
+Uruchom serwer w pierwszym terminalu. `php -S` blokuje ten terminal:
+
+```bash
+dev_port=18082 # wybierz wolny port; nie używaj portu z lokalnego rejestru usług
+php -S "127.0.0.1:${dev_port:?Podaj port}" -t myproject/public
+```
+
+W drugim terminalu ustaw tę samą wartość i wykonaj żądanie:
+
+```bash
+dev_port=18082 # ten sam port co w pierwszym terminalu
+curl "http://127.0.0.1:${dev_port:?Podaj port}/health"
+# {"success":true,"service":"demo"}
+```
+
+To jest klasyczny cykl jednego żądania na proces. Dopiero przy użyciu sesji
+utwórz `Session`, wywołaj `register()` przed `startSession()` i przed wyjściem
+jakiegokolwiek tekstu. Domyślne ciasteczko `secure` zakłada HTTPS; dla lokalnego
+HTTP przekaż jawnie `['secure' => false]`.
 
 ```php
 <?php
@@ -431,7 +428,7 @@ Test standard v1 profiles:
 
 ```bash
 ./bin/test quick      # syntax + unit + integration
-./bin/test full       # quick + contracts + phpstan
+./bin/test full       # quick + contracts + consumer copies + phpstan
 ./bin/test ci         # full + coverage report, minimum 85% line coverage
 ./bin/test coverage   # coverage artifacts, minimum 85% line coverage
 ./bin/test contracts  # governance/contracts suite
