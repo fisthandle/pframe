@@ -157,9 +157,6 @@ class HttpTestingTest extends TestCase {
     public function testPostJsonFailureResetsFluentState(): void {
         $stream = fopen('php://memory', 'r');
         $this->assertNotFalse($stream);
-        if ($stream === false) {
-            return;
-        }
 
         $error = null;
         try {

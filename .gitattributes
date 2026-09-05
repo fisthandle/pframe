@@ -9,7 +9,6 @@
 /AGENTS.md export-ignore
 /composer.lock export-ignore
 /docs/plans export-ignore
-/frame export-ignore
 /phpstan.neon export-ignore
 /phpunit.xml export-ignore
 /tests export-ignore

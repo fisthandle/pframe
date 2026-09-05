@@ -107,7 +107,7 @@ namespace PFrame {
             $headers = self::parseServerHeaders($_SERVER);
             $trustedProxies = self::resolveTrustedProxies($trustedProxies);
             return self::buildFromGlobals(
-                self::resolveIp($_SERVER, $headers, $trustedProxies),
+                self::resolveIp($_SERVER, $trustedProxies),
                 $headers,
                 $maxBodyBytes,
                 $trustedProxies,
@@ -282,10 +282,9 @@ namespace PFrame {
 
         /**
          * @param array<string, mixed> $server
-         * @param array<string, string> $headers
          * @param list<string> $trustedProxies
          */
-        private static function resolveIp(array $server, array $headers, array $trustedProxies): string {
+        private static function resolveIp(array $server, array $trustedProxies): string {
             $remoteAddr = self::serverString($server, 'REMOTE_ADDR');
             if ($remoteAddr === '') {
                 return '';
@@ -675,7 +674,7 @@ namespace PFrame {
         /** @var array<string, int> */
         private array $namedRoutes = [];
 
-        /** @var array<string, array{invoke_without_args: bool, arg_types: array<int, string>}> */
+        /** @var array<string, list<'request'|'app'|'default'>> */
         private array $methodCallPlanCache = [];
 
         /** @var array<callable> */
@@ -1184,13 +1183,9 @@ namespace PFrame {
             return $allowed;
         }
 
-        /** @return array{invoke_without_args: bool, arg_types: array<int, string>} */
+        /** @return list<'request'|'app'|'default'> */
         private function buildControllerMethodPlan(object $controller, string $method): array {
             $ref = new \ReflectionMethod($controller, $method);
-            if ($ref->getNumberOfParameters() === 0) {
-                return ['invoke_without_args' => true, 'arg_types' => []];
-            }
-
             $argTypes = [];
             foreach ($ref->getParameters() as $param) {
                 $type = $param->getType();
@@ -1217,25 +1212,20 @@ namespace PFrame {
                 );
             }
 
-            return ['invoke_without_args' => false, 'arg_types' => $argTypes];
+            return $argTypes;
         }
 
         private function callControllerMethod(object $controller, string $method, Request $request): mixed {
             $key = get_class($controller) . '::' . $method;
             $plan = $this->methodCallPlanCache[$key] ??= $this->buildControllerMethodPlan($controller, $method);
-            if ($plan['invoke_without_args']) {
-                return $controller->{$method}();
-            }
-
             $args = [];
-            foreach ($plan['arg_types'] as $argType) {
+            foreach ($plan as $argType) {
                 if ($argType === 'default') {
                     break;
                 }
                 $args[] = match ($argType) {
                     'request' => $request,
                     'app' => $this,
-                    default => null,
                 };
             }
 
@@ -1784,17 +1774,6 @@ namespace PFrame {
         }
 
         /**
-         * @param array<int|string, mixed>|string|null $params
-         * @return array<int|string, mixed>|null
-         */
-        private function norm(array|string|null $params): ?array {
-            if (is_string($params)) {
-                return [$params];
-            }
-            return $params;
-        }
-
-        /**
          * @template T
          * @param array<int|string, mixed>|string|null $params
          * @param callable(\PDOStatement): T $consume
@@ -1802,19 +1781,17 @@ namespace PFrame {
          */
         private function executeQuery(string $sql, array|string|null $params, bool $fetchesRows, callable $consume): mixed {
             $start = hrtime(true);
-            $norm = $this->norm($params);
+            $norm = is_string($params) ? [$params] : $params;
             $executeEnd = null;
-            $executed = false;
             $this->lastRowCount = 0;
             try {
                 $stmt = $this->pdo->prepare($sql);
                 $stmt->execute($norm);
                 $executeEnd = hrtime(true);
-                $executed = true;
                 return $consume($stmt);
             } finally {
                 $end = hrtime(true);
-                $this->recordQuery($sql, $norm, $start, $executeEnd ?? $end, $end, $fetchesRows && $executed);
+                $this->recordQuery($sql, $norm, $start, $executeEnd ?? $end, $end, $fetchesRows && $executeEnd !== null);
             }
         }
 
@@ -2216,15 +2193,7 @@ namespace PFrame {
         private function stripLeadingComments(string $sql): string {
             $s = ltrim($sql);
             while (true) {
-                if (str_starts_with($s, '--')) {
-                    $pos = strpos($s, "\n");
-                    if ($pos === false) {
-                        return '';
-                    }
-                    $s = ltrim(substr($s, $pos + 1));
-                    continue;
-                }
-                if (str_starts_with($s, '#')) {
+                if (str_starts_with($s, '--') || str_starts_with($s, '#')) {
                     $pos = strpos($s, "\n");
                     if ($pos === false) {
                         return '';
@@ -2449,7 +2418,6 @@ namespace PFrame {
         private ?string $lockedSessionId = null;
         private bool $lockAcquired = false;
         private readonly bool $useAdvisoryLock;
-        private readonly bool $useFileLock;
         private readonly ?string $fileLockDir;
         /** @var resource|null */
         private $fileLockHandle = null;
@@ -2465,8 +2433,9 @@ namespace PFrame {
         ) {
             $this->performance = $this->db->performance();
             $this->useAdvisoryLock = $this->advisory && $this->db->driver() === 'mysql';
-            $this->useFileLock = $this->advisory && !$this->useAdvisoryLock;
-            $this->fileLockDir = $this->useFileLock ? $this->resolveFileLockDir($lockDir) : null;
+            $this->fileLockDir = $this->advisory && !$this->useAdvisoryLock
+                ? $this->resolveFileLockDir($lockDir)
+                : null;
             $this->lockAcquired = !$this->advisory;
         }
 
@@ -3424,14 +3393,11 @@ namespace PFrame {
 
         public function clear(): void {
             if ($this->hasApcu) {
-                $this->clearApcu();
+                $pattern = '/^' . preg_quote($this->apcuPrefix, '/') . '/';
+                apcu_delete(new \APCUIterator($pattern, \APC_ITER_KEY));
             }
 
-            if ($this->dir === null) {
-                return;
-            }
-
-            if (!is_dir($this->dir)) {
+            if ($this->dir === null || !is_dir($this->dir)) {
                 return;
             }
 
@@ -3599,11 +3565,6 @@ namespace PFrame {
         /** @param array{value: mixed, ttl: int, time: int} $data */
         private function isExpired(array $data): bool {
             return $data['ttl'] > 0 && ($data['time'] + $data['ttl']) <= time();
-        }
-
-        private function clearApcu(): void {
-            $pattern = '/^' . preg_quote($this->apcuPrefix, '/') . '/';
-            apcu_delete(new \APCUIterator($pattern, \APC_ITER_KEY));
         }
 
         private function requireDir(): string {
@@ -3894,12 +3855,12 @@ namespace PFrame {
         private string $keyPrefix;
 
         public function __construct(
-            private readonly string $cacheDir,
+            string $cacheDir,
             private readonly int $throttleSeconds = 30,
             string $prefix = '',
         ) {
             $this->hasApcu = function_exists('apcu_enabled') && apcu_enabled();
-            $this->tickDir = $this->cacheDir . '/tick';
+            $this->tickDir = $cacheDir . '/tick';
             $this->keyPrefix = 'tick:' . ($prefix !== '' ? $prefix : md5($cacheDir)) . ':';
             if (!is_dir($this->tickDir)) {
                 @mkdir($this->tickDir, 0755, true);
@@ -4173,14 +4134,7 @@ namespace PFrame {
             string $fullRows,
             string $shortStyle,
             string $fullStyle,
-            bool $compact = true,
         ): string {
-            if (!$compact) {
-                return '<pre style="' . $fullStyle . '" id="' . $id . '-' . $suffix . '-full">'
-                    . $fullRows
-                    . '</pre>';
-            }
-
             return '<pre style="' . $shortStyle . '" id="' . $id . '-' . $suffix . '-short">'
                 . $shortRows
                 . '</pre><details style="margin-top:4px"><summary style="cursor:pointer">toggle</summary><pre style="'
@@ -4309,12 +4263,7 @@ namespace PFrame {
             $performance = $this->app->performance()->snapshot();
             $spans = $performance['spans'];
 
-            // View render log
-            $views = [];
-            $view = $this->app->lastView();
-            if ($view !== null) {
-                $views = $view->renderLog();
-            }
+            $views = $this->app->lastView()?->renderLog() ?? [];
 
             return [
                 'php_ms' => round($performance['php_ms'], 1),
@@ -4480,10 +4429,6 @@ namespace {
 
     /** @param array<array-key, mixed>|null $array */
     function getS(?array $array, string|int $key, mixed $default = null): mixed {
-        if ($array === null) {
-            return $default;
-        }
-
         return $array[$key] ?? $default;
     }
 
@@ -4526,9 +4471,6 @@ namespace {
     }
 
     function countS(mixed $value): int {
-        if ($value === null) {
-            return 0;
-        }
         if (is_array($value) || $value instanceof \Countable) {
             return count($value);
         }

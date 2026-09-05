@@ -53,9 +53,11 @@ class TickTest extends TestCase {
         return $cacheDir . '/tick/' . md5($this->keyPrefix($cacheDir, $prefix) . $taskName . ':last') . '.last';
     }
 
-    private function ageGlobalThrottle(string $cacheDir, string $prefix = ''): void {
+    private function expireGlobalThrottle(string $cacheDir, string $prefix = ''): void {
         if (function_exists('apcu_enabled') && apcu_enabled()) {
-            usleep(1_100_000);
+            $key = $this->keyPrefix($cacheDir, $prefix) . 'global';
+            self::assertSame(1, apcu_key_info($key)['ttl'] ?? null);
+            self::assertTrue(apcu_delete($key));
             return;
         }
 
@@ -375,7 +377,7 @@ class TickTest extends TestCase {
         $tick->dispatch();
         self::assertSame(1, $counter);
 
-        $this->ageGlobalThrottle($this->cacheDir);
+        $this->expireGlobalThrottle($this->cacheDir);
         $tick->dispatch();
         self::assertSame(2, $counter);
     }
@@ -414,9 +416,6 @@ class TickTest extends TestCase {
         $lockPath = $this->lockPath($this->cacheDir, 'locked');
         $handle = fopen($lockPath, 'c');
         self::assertNotFalse($handle);
-        if ($handle === false) {
-            return;
-        }
 
         try {
             self::assertTrue(flock($handle, LOCK_EX | LOCK_NB));
@@ -441,9 +440,6 @@ class TickTest extends TestCase {
 
         $waitingHandle = fopen($lockPath, 'c');
         self::assertNotFalse($waitingHandle);
-        if ($waitingHandle === false) {
-            return;
-        }
 
         $newHandle = null;
         try {
@@ -453,9 +449,6 @@ class TickTest extends TestCase {
 
             $newHandle = fopen($lockPath, 'c');
             self::assertNotFalse($newHandle);
-            if ($newHandle === false) {
-                return;
-            }
 
             self::assertFalse(
                 flock($newHandle, LOCK_EX | LOCK_NB),

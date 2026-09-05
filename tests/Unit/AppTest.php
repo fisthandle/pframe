@@ -498,6 +498,17 @@ class AppTest extends TestCase {
         $this->assertSame('hello world', $response->body);
     }
 
+    public function testCachedControllerPlanUsesCurrentRequestAndDefaultArguments(): void {
+        $app = new App();
+        $app->get('/di/{value}', DIRequestStub::class, 'withDefault');
+
+        foreach (['first', 'second'] as $value) {
+            $response = $app->handle(new Request(method: 'GET', path: '/di/' . $value));
+            $this->assertSame(200, $response->status);
+            $this->assertSame($value . ':default', $response->body);
+        }
+    }
+
     public function testHeadResponseSuppressesEntityBody(): void {
         $app = new App();
         $app->get('/hello', HelloStub::class, 'index');
@@ -803,6 +814,10 @@ class DIRequestStub {
 
     public function withRequest(Request $request): Response {
         return new Response($request->method);
+    }
+
+    public function withDefault(Request $request, string $suffix = 'default'): Response {
+        return new Response($request->param('value') . ':' . $suffix);
     }
 }
 

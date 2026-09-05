@@ -185,9 +185,6 @@ class WorkerModeTest extends TestCase {
         $this->primeGlobals('GET', '/worker-session');
         $app->performance()->record('stale', 1.0);
 
-        $sessionId = bin2hex(random_bytes(8));
-        session_id($sessionId);
-
         ob_start();
         try {
             $app->runWorkerRequest(startSession: true);
@@ -202,7 +199,6 @@ class WorkerModeTest extends TestCase {
         $this->assertSame(1, $spans['session_start']['count']);
         $this->assertArrayNotHasKey('stale', $spans, 'Worker request must reset profiler state before dispatch');
 
-        session_id($sessionId);
         $this->assertTrue(session_start());
         $this->assertSame('ok', $_SESSION['worker_test'] ?? null, 'runWorkerRequest() must persist session data before closing it');
         session_write_close();
@@ -237,8 +233,6 @@ class WorkerModeTest extends TestCase {
         $db = $app->db();
         $db->exec('CREATE TABLE worker_http_errors (id INTEGER PRIMARY KEY, name TEXT)');
 
-        $sessionId = bin2hex(random_bytes(8));
-        session_id($sessionId);
         $app->get('/worker-http-error', WorkerHttpErrorCtrl::class, 'index');
         $this->primeGlobals('GET', '/worker-http-error');
 
@@ -254,7 +248,6 @@ class WorkerModeTest extends TestCase {
         $this->assertSame(0, (int) $db->var('SELECT COUNT(*) FROM worker_http_errors'));
         $this->assertSame(PHP_SESSION_NONE, session_status(), 'runWorkerRequest() must close session after HttpException');
 
-        session_id($sessionId);
         $this->assertTrue(session_start());
         $this->assertSame('http-error', $_SESSION['worker_http_error'] ?? null);
         session_write_close();
@@ -266,8 +259,6 @@ class WorkerModeTest extends TestCase {
         $db = $app->db();
         $db->exec('CREATE TABLE worker_runtime_errors (id INTEGER PRIMARY KEY, name TEXT)');
 
-        $sessionId = bin2hex(random_bytes(8));
-        session_id($sessionId);
         $app->get('/worker-runtime-error', WorkerRuntimeErrorCtrl::class, 'index');
         $this->primeGlobals('GET', '/worker-runtime-error');
 
@@ -283,7 +274,6 @@ class WorkerModeTest extends TestCase {
         $this->assertSame(0, (int) $db->var('SELECT COUNT(*) FROM worker_runtime_errors'));
         $this->assertSame(PHP_SESSION_NONE, session_status(), 'runWorkerRequest() must close session after runtime exception');
 
-        session_id($sessionId);
         $this->assertTrue(session_start());
         $this->assertSame('runtime-error', $_SESSION['worker_runtime_error'] ?? null);
         session_write_close();
