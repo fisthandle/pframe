@@ -15,13 +15,15 @@ Jedyny runner: `./bin/test <profile>`.
 | Profil | Zakres |
 |-------|--------|
 | `quick` | syntax + `Unit` + `Integration` |
-| `full` | `quick` + `Contracts` + `phpstan` |
+| `full` | `quick` + `Contracts` + kontrola kopii konsumenckich + `phpstan` |
 | `ci` | `full` + coverage report, minimum 85% pokrycia linii |
 | `coverage` | phpunit z coverage artifacts (`build/coverage`), minimum 85% pokrycia linii |
 | `contracts` | governance runnera i testy kontraktowe |
 | `e2e`/`ui` | w repo frameworka N/A (czytelny komunikat + exit 2) |
 
-Komendy `composer test*` są aliasami do tego kontraktu (`composer test` = `./bin/test quick`).
+`composer test`, `test:quick`, `test:full`, `test:ci` i `test:coverage` wywołują profile runnera
+(`composer test` = `./bin/test quick`). `test:unit`, `test:integration` i `test:contracts` uruchamiają
+bezpośrednio wskazaną suitę PHPUnit; `bin/test contracts` dodatkowo sprawdza kopie konsumenckie.
 CI uruchamia dokładnie `./bin/test ci`, bez duplikowania kroków w workflow.
 
 Profile `coverage` i `ci` wymagają drivera (`xdebug`, `pcov` lub `phpdbg`) i kończą się błędem,
@@ -105,6 +107,9 @@ dane z testu nie przenikają do następnego. Zwykły `PHPUnit\TestCase` nie dost
 
 CSRF jest wstrzykiwany automatycznie do POST/PUT/PATCH/DELETE.
 Opt-out: `$this->withoutCsrf()->post(...)`.
+
+Każde wywołanie HTTP zeruje diagnostykę requestu i DB, ale zachowuje aktywną transakcję testową
+oraz jej savepointy. `commit()` wewnętrznej transakcji nie zatwierdza transakcji całego testu.
 
 ## Response assertions
 

@@ -84,6 +84,45 @@ class SessionTest extends TestCase {
         $this->assertFalse(session_get_cookie_params()['secure']);
     }
 
+    public function testRegisterNormalizesNullableCookiePathAndDomain(): void {
+        $session = new Session($this->db, advisory: false);
+        $session->register(['secure' => false]);
+        $defaultCookieParams = session_get_cookie_params();
+        $this->assertSame('/', $defaultCookieParams['path']);
+        $this->assertSame('', $defaultCookieParams['domain']);
+
+        $session->register([
+            'path' => null,
+            'domain' => null,
+            'secure' => false,
+        ]);
+
+        $cookieParams = session_get_cookie_params();
+        $this->assertSame('', $cookieParams['path']);
+        $this->assertSame('', $cookieParams['domain']);
+    }
+
+    public function testRegisterLifetimeZeroPreservesGcMaxlifetime(): void {
+        $previous = ini_get('session.gc_maxlifetime');
+        ini_set('session.gc_maxlifetime', '4321');
+
+        try {
+            $session = new Session($this->db, advisory: false);
+            $session->register(['lifetime' => 0, 'secure' => false]);
+
+            $this->assertSame('4321', ini_get('session.gc_maxlifetime'));
+            $this->assertSame(0, session_get_cookie_params()['lifetime']);
+
+            $session->register(['lifetime' => 1234, 'secure' => false]);
+            $this->assertSame('1234', ini_get('session.gc_maxlifetime'));
+            $this->assertSame(1234, session_get_cookie_params()['lifetime']);
+        } finally {
+            if (is_string($previous)) {
+                ini_set('session.gc_maxlifetime', $previous);
+            }
+        }
+    }
+
     public function testStrictModeRejectsUnknownSuppliedSessionId(): void {
         $unknownId = str_repeat('A', 64);
         $session = new Session($this->db, advisory: false);
@@ -100,6 +139,33 @@ class SessionTest extends TestCase {
 
         $this->assertTrue($session->validateId('known-session'));
         $this->assertFalse($session->validateId('unknown-session'));
+    }
+
+    public function testReadAndValidateIdRejectExpiredRowsWithoutGc(): void {
+        $previous = ini_get('session.gc_maxlifetime');
+        ini_set('session.gc_maxlifetime', '60');
+        $now = time();
+        $this->db->exec(
+            'INSERT INTO sessions (session_id, data, stamp) VALUES (?, ?, ?), (?, ?, ?)',
+            ['expired-session', 'expired', 1, 'fresh-session', 'fresh', $now],
+        );
+
+        try {
+            $session = new Session($this->db, advisory: false);
+
+            $this->assertSame('', $session->read('expired-session'));
+            $this->assertSame('expired', $this->db->var(
+                'SELECT data FROM sessions WHERE session_id = ?',
+                ['expired-session'],
+            ));
+            $this->assertFalse($session->validateId('expired-session'));
+            $this->assertSame('fresh', $session->read('fresh-session'));
+            $this->assertTrue($session->validateId('fresh-session'));
+        } finally {
+            if (is_string($previous)) {
+                ini_set('session.gc_maxlifetime', $previous);
+            }
+        }
     }
 
     public function testSessionWriteWorksWithAdvisoryDisabled(): void {
@@ -169,6 +235,38 @@ class SessionTest extends TestCase {
         $row = $db->row('SELECT stamp FROM sessions WHERE session_id = ?', ['test-stamp']);
         $this->assertNotNull($row);
         $this->assertGreaterThan(1000, (int) $row['stamp'], 'Stamp should be refreshed even when data unchanged');
+    }
+
+    public function testMysqlZeroUpdateDoesNotPersistWhenSessionRowExists(): void {
+        $db = $this->getMockBuilder(Db::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['driver', 'exec', 'var'])
+            ->getMock();
+        $db->method('driver')->willReturn('mysql');
+        $db->expects($this->once())
+            ->method('exec')
+            ->with(
+                'UPDATE sessions SET stamp = ? WHERE session_id = ?',
+                $this->callback(static fn(array $params): bool => $params[1] === 'same-second'),
+            )
+            ->willReturn(0);
+        $db->method('var')->willReturnCallback(
+            static function (string $sql): mixed {
+                if ($sql === 'SELECT data FROM sessions WHERE session_id = ? AND stamp >= ?') {
+                    return 'payload';
+                }
+                if ($sql === 'SELECT 1 FROM sessions WHERE session_id = ?') {
+                    return 1;
+                }
+
+                return null;
+            },
+        );
+
+        $session = new Session($db, advisory: false);
+        $session->open('', '');
+        $this->assertSame('payload', $session->read('same-second'));
+        $this->assertTrue($session->write('same-second', 'payload'));
     }
 
     public function testUpdateTimestampRestoresRowDeletedAfterRead(): void {
@@ -556,7 +654,6 @@ class SessionTest extends TestCase {
         $session = new Session($db, advisory: true);
         $ref = new \ReflectionClass($session);
         $prop = $ref->getProperty('lockTimeout');
-        $prop->setAccessible(true);
         $this->assertSame(5, $prop->getValue($session));
     }
 

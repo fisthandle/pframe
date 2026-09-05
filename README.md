@@ -225,6 +225,13 @@ $count = P1::db()->count(); // last affected/returned row count
 $sqlLog = P1::db()->log();  // "(X.XXms) SQL" lines
 ```
 
+`row()`, `results()` and SELECT `exec()` validate column names without rebuilding the fetched rows.
+The array-returning methods still load the entire result; use bounded SQL queries and `col()` or
+`var()` when only one column or value is needed. Alias numeric expressions used in associative results.
+
+`Db::resetRequestState()` clears diagnostics while preserving active transactions and savepoints.
+Use `rollbackAll()` explicitly when abandoning a transaction; worker requests do this automatically.
+
 DB sessions require the `sessions` table. Use `db/sessions.sql` for MySQL/MariaDB or
 `db/sessions.sqlite.sql` for SQLite.
 
@@ -239,10 +246,14 @@ $app->startSession();
 ```
 
 - **Lazy-write**: when session data is unchanged between `read()` and `write()`, only the timestamp is updated (lightweight `UPDATE` instead of full `INSERT OR REPLACE`)
-- **Strict IDs**: unknown client-supplied IDs are rejected through `SessionUpdateTimestampHandlerInterface::validateId()` and PHP generates a fresh ID
+- **Strict IDs**: unknown or expired client-supplied IDs are rejected through `SessionUpdateTimestampHandlerInterface::validateId()` and PHP generates a fresh ID
+- **Idle expiry**: `read()` and `validateId()` check `stamp` against `session.gc_maxlifetime` even before garbage collection removes the row. A positive cookie `lifetime` also sets this limit; `lifetime=0` creates a browser-session cookie and preserves the configured GC lifetime.
 - **Locking**: with the MySQL driver, advisory locking uses one `GET_LOCK` call; other drivers use `flock` file locks. The optional `lockDir` constructor argument selects the directory for file locks.
 - **Fail-closed lock failure**: if the lock cannot be acquired (timeout or lock error), `read()`, `write()` and `destroy()` return `false`; the caller must handle the failed operation instead of treating it as successful.
 - **Intended URL**: `Session::pullIntendedUrl(string $default = '/')` retrieves and clears the URL stored by `Middleware::auth()`
+
+`Flash` stores identical type/text pairs only once and keeps its serialized message list within
+16 KiB, dropping the oldest messages first. A single message exceeding that budget is discarded.
 
 ## Security
 
@@ -253,7 +264,7 @@ Built-in:
 - Security headers middleware (CSP, HSTS, X-Frame-Options, etc.)
 - Session hardening (strict mode, httponly, samesite)
 - Path traversal protection in template rendering
-- Open redirect prevention (blocks `//`, `\`, scheme-without-authority, non-http schemes)
+- Open redirect prevention (blocks `//`, `\`, malformed URLs, control characters, scheme-without-authority, non-http schemes)
 - Trusted proxy resolution from exact IPs or resolvable hostnames (nearest untrusted IP from `X-Forwarded-For`)
 
 ```php
@@ -267,6 +278,9 @@ Default CSP:
 Built-in middleware:
 - `\PFrame\Middleware::auth()` -- guest -> stores intended URL in session (GET/HEAD only), flash warning + redirect to `login` route
 - `\PFrame\Middleware::csrf()` -- validates token from `csrf_token` field or `X-Csrf-Token` header
+
+`Request` normalizes HTTP methods at construction, including manually created requests. HEAD
+responses retain status and headers without starting an SSE callback or reading a response file.
 
 After login, retrieve the intended URL with `\PFrame\Session::pullIntendedUrl()` (returns stored path or default `/`, clears session key).
 
@@ -312,7 +326,8 @@ CIDR ranges are not supported. Hostnames are resolved to their current IPv4 addr
 
 Register the session handler once during worker bootstrap, then use `runWorkerRequest()` for each
 request. It resets request-scoped state, rolls back leaked DB transactions, resets DB debug
-counters/logs, starts the session per request, and closes it in `finally`.
+counters/logs, starts the session per request, and closes it in `finally`. The final diagnostic reset
+runs after the session has been saved, so session queries do not remain in the completed request state.
 
 ```php
 $session = new \PFrame\Session($app->db(), advisory: true, lockTimeout: 5);
@@ -341,6 +356,10 @@ the default `startSession: false`. `MAX_REQUESTS=0` keeps a worker alive without
 the bounded default periodically recycles the process to contain leaks in application code.
 
 ### Rate Limiting Helper
+
+`Cache::increment($key, $ttl)` uses `$ttl` when creating a missing or expired counter. Incrementing
+an existing counter preserves its original expiry on both file and APCu backends. Use `set()` to
+replace a value and its expiry explicitly.
 
 `Cache::rateCheck($scope, $id, $max, $window)` uses stable, bounded striped locks to keep file-backend
 updates atomic between concurrent requests. Internal `.pframe-cache-lock-*` files are deliberately
@@ -436,7 +455,8 @@ Test standard v1 profiles:
 ./bin/test ui         # unsupported in framework repo (exit 2)
 ```
 
-Composer aliases:
+Composer commands (`test`, `test:quick`, `test:full`, `test:ci`, `test:coverage` wrap the runner;
+`test:unit`, `test:integration`, `test:contracts` run the named PHPUnit suite directly):
 
 ```bash
 composer test

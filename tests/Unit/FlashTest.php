@@ -28,6 +28,38 @@ class FlashTest extends TestCase {
         $this->assertEmpty($flash->get());
     }
 
+    public function testRepeatedMessageIsStoredOncePerType(): void {
+        $flash = new Flash();
+        $flash->info('Saved');
+        $flash->info('Saved');
+        $flash->success('Saved');
+
+        $this->assertSame([
+            ['type' => 'info', 'text' => 'Saved'],
+            ['type' => 'success', 'text' => 'Saved'],
+        ], $flash->get());
+    }
+
+    public function testStorageKeepsNewestMessagesWithinSessionBudget(): void {
+        $flash = new Flash();
+        $texts = [];
+        for ($i = 0; $i < 8; $i++) {
+            $texts[] = $i . str_repeat('x', 4096);
+            $flash->info($texts[$i]);
+        }
+
+        $this->assertLessThanOrEqual(16384, strlen(serialize($_SESSION['_flash_messages'])));
+        $this->assertSame(array_slice($texts, -3), array_column($flash->get(), 'text'));
+    }
+
+    public function testMessageLargerThanSessionBudgetIsDiscarded(): void {
+        $flash = new Flash();
+        $flash->info(str_repeat('x', 16384));
+
+        $this->assertFalse($flash->has());
+        $this->assertSame([], $flash->get());
+    }
+
     public function testHas(): void {
         $flash = new Flash();
         $this->assertFalse($flash->has());

@@ -180,6 +180,28 @@ class HttpTestingTest extends TestCase {
         $this->post('/submit', ['title' => 'state-reset']);
         $this->assertOk();
     }
+
+    public function testEachCallPreservesNestedTransactionRollback(): void {
+        $db = $this->app->db();
+        $db->exec('CREATE TABLE items (name TEXT)');
+        $db->begin();
+
+        try {
+            $db->exec('INSERT INTO items (name) VALUES (?)', ['outer']);
+            $db->begin();
+            $db->exec('INSERT INTO items (name) VALUES (?)', ['inner']);
+
+            $this->get('/query-count');
+            $this->assertOk();
+            $db->commit();
+
+            $this->assertTrue($db->trans(), 'Committing the savepoint must preserve the test transaction');
+            $db->rollback();
+            $this->assertSame(0, $db->var('SELECT COUNT(*) FROM items'));
+        } finally {
+            $db->rollbackAll();
+        }
+    }
 }
 
 class HttpTestingHomeCtrl extends Controller {

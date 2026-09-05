@@ -177,6 +177,54 @@ class DbTest extends TestCase {
         $this->assertFalse($this->db->trans());
     }
 
+    public function testFailedTransactionOperationsPreserveExistingSavepoint(): void {
+        foreach (['begin', 'rollbackAll'] as $operation) {
+            $pdo = new class('sqlite::memory:') extends \PDO {
+                public string $failOperation = '';
+
+                public function exec(string $statement): int|false {
+                    if ($this->failOperation === 'begin' && str_starts_with($statement, 'SAVEPOINT ')) {
+                        throw new \PDOException('Simulated savepoint failure');
+                    }
+                    return parent::exec($statement);
+                }
+
+                public function rollBack(): bool {
+                    if ($this->failOperation === 'rollbackAll') {
+                        throw new \PDOException('Simulated rollback failure');
+                    }
+                    return parent::rollBack();
+                }
+            };
+            (new \ReflectionProperty(Db::class, 'pdo'))->setValue($this->db, $pdo);
+            $this->db->exec('CREATE TABLE items (name TEXT)');
+            $this->db->begin();
+            $this->db->exec('INSERT INTO items (name) VALUES (?)', ['outer']);
+            $this->db->begin();
+            $this->db->exec('INSERT INTO items (name) VALUES (?)', ['inner']);
+
+            try {
+                $pdo->failOperation = $operation;
+                try {
+                    $this->db->$operation();
+                    $this->fail('Expected a PDO failure');
+                } catch (\PDOException $e) {
+                    $this->assertStringContainsString('Simulated', $e->getMessage());
+                }
+                $pdo->failOperation = '';
+
+                $this->db->rollback();
+                $this->assertTrue($this->db->trans(), $operation . ' must preserve the outer transaction');
+                $this->assertSame(['outer'], $this->db->col('SELECT name FROM items'));
+                $this->db->rollback();
+                $this->assertSame([], $this->db->col('SELECT name FROM items'));
+            } finally {
+                $pdo->failOperation = '';
+                $this->db->rollbackAll();
+            }
+        }
+    }
+
     public function testRollbackAllUnwindsNestedSavepoints(): void {
         $this->db->exec('CREATE TABLE IF NOT EXISTS rba_test (id INTEGER PRIMARY KEY, val TEXT)');
         $this->db->begin();

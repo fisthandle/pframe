@@ -55,6 +55,23 @@ class ResponseTest extends TestCase {
         $this->assertSame('https://myapp.com/dashboard', $r->headers['Location']);
     }
 
+    public function testRedirectRejectsUnparseableUrl(): void {
+        $_SERVER['HTTP_HOST'] = 'myapp.com';
+        $this->expectException(\InvalidArgumentException::class);
+        Response::redirect('https://myapp.com:invalid/dashboard');
+    }
+
+    public function testRedirectRejectsControlCharacters(): void {
+        $this->expectException(\InvalidArgumentException::class);
+        Response::redirect("/search?q=line\nbreak");
+    }
+
+    public function testRedirectAllowsEncodedValuesAndSameHostPort(): void {
+        $_SERVER['HTTP_HOST'] = 'myapp.com:8443';
+        $url = 'https://myapp.com:8443/search?q=one%20two#results';
+        $this->assertSame($url, Response::redirect($url)->headers['Location']);
+    }
+
     public function testRedirectAllowsRelativePath(): void {
         $r = Response::redirect('/login');
         $this->assertSame('/login', $r->headers['Location']);

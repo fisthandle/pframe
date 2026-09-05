@@ -36,6 +36,7 @@ class SessionSchemaTest extends TestCase {
             'dsn' => $dsn,
             'user' => getenv('PFRAME_MYSQL_USER') ?: null,
             'pass' => getenv('PFRAME_MYSQL_PASS') ?: null,
+            'log_queries' => true,
         ];
         $db = new Db($config);
         $pdo = $db->pdo();
@@ -49,6 +50,7 @@ class SessionSchemaTest extends TestCase {
             $this->assertSame(['session_id', 'data', 'ip', 'agent', 'stamp'], $columns);
             $this->assertContains('idx_stamp', array_column($indexes, 'Key_name'));
             $this->assertSessionLifecycle($db, advisory: true);
+            $this->assertMysqlLazyWriteDoesNotUpsert($db);
         } finally {
             $pdo->exec('DROP TABLE IF EXISTS sessions');
         }
@@ -70,6 +72,26 @@ class SessionSchemaTest extends TestCase {
         $collector = new Session($db, advisory: false);
         $this->assertSame(1, $collector->gc(0));
         $this->assertNull($db->var('SELECT data FROM sessions WHERE session_id = ?', [$id]));
+    }
+
+    private function assertMysqlLazyWriteDoesNotUpsert(Db $db): void {
+        $id = 'schema-lazy-' . bin2hex(random_bytes(8));
+        $session = new Session($db, advisory: true, lockTimeout: 1);
+        $session->open('', '');
+        $this->assertSame('', $session->read($id));
+        $this->assertTrue($session->write($id, 'payload'));
+
+        $db->exec('UPDATE sessions SET stamp = ? WHERE session_id = ?', [time(), $id]);
+        $db->resetRequestState();
+
+        $this->assertSame('payload', $session->read($id));
+        $this->assertTrue($session->write($id, 'payload'));
+
+        $inserts = array_filter(
+            $db->queryLog(),
+            static fn(array $entry): bool => str_contains($entry['sql'], 'INSERT INTO sessions'),
+        );
+        $this->assertSame([], array_values($inserts));
     }
 
     private function schema(string $filename): string {

@@ -208,6 +208,29 @@ class WorkerModeTest extends TestCase {
         session_write_close();
     }
 
+    public function testWorkerResetsDiagnosticsAfterDatabaseSessionIsSaved(): void {
+        $app = new App();
+        $app->setConfig('db', ['dsn' => 'sqlite::memory:', 'log_queries' => true]);
+        $db = $app->db();
+        $db->pdo()->exec((string) file_get_contents(dirname(__DIR__, 2) . '/db/sessions.sqlite.sql'));
+        session_set_save_handler(new \PFrame\Session($db, advisory: false), false);
+        session_id(bin2hex(random_bytes(8)));
+        $app->get('/worker-session', WorkerSessionCtrl::class, 'index');
+        $this->primeGlobals('GET', '/worker-session');
+
+        ob_start();
+        try {
+            $app->runWorkerRequest(startSession: true);
+            $this->assertSame(0, $db->totalQueryCount());
+            $this->assertSame(0, $db->queryCount());
+            $this->assertSame(0, $db->count());
+            $this->assertSame(1, $db->var('SELECT COUNT(*) FROM sessions'));
+        } finally {
+            ob_end_clean();
+            session_set_save_handler(new \SessionHandler(), false);
+        }
+    }
+
     public function testRunWorkerRequestRollsBackAndClosesSessionAfterHttpException(): void {
         $app = new App();
         $app->setConfig('db', ['dsn' => 'sqlite::memory:']);

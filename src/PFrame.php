@@ -53,6 +53,7 @@ namespace PFrame {
 
         /** @var array<string, mixed> */
         private array $params = [];
+        public readonly string $method;
         /** @var array<string, string> */
         public readonly array $headers;
         private bool $jsonBodyParsed = false;
@@ -69,7 +70,7 @@ namespace PFrame {
          * @param list<string> $trustedProxies
          */
         public function __construct(
-            public readonly string $method,
+            string $method,
             public readonly string $path,
             public readonly array $query = [],
             public readonly array $post = [],
@@ -83,6 +84,7 @@ namespace PFrame {
             public readonly array $trustedProxies = [],
             public readonly bool $trustedProxiesResolved = false,
         ) {
+            $this->method = strtoupper($method);
             $normalized = [];
             foreach ($headers as $k => $v) {
                 $normalized[ucwords(strtolower((string) $k), '-')] = (string) $v;
@@ -169,7 +171,7 @@ namespace PFrame {
             $body = self::readRequestBody($headers, max(0, $maxBodyBytes));
 
             return new static(
-                method: strtoupper(self::serverString($_SERVER, 'REQUEST_METHOD', 'GET')),
+                method: self::serverString($_SERVER, 'REQUEST_METHOD', 'GET'),
                 path: (string) $path,
                 query: $_GET,
                 post: $_POST,
@@ -410,7 +412,7 @@ namespace PFrame {
         public static function redirect(string $url, int $status = 302): static {
             $url = ltrim($url, " \t\n\r\0\x0B");
 
-            if (str_contains($url, '\\')) {
+            if (str_contains($url, '\\') || preg_match('/[\x00-\x1F\x7F]/', $url)) {
                 throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
             }
 
@@ -419,25 +421,24 @@ namespace PFrame {
             }
 
             if (!str_starts_with($url, '/')) {
-                $scheme = parse_url($url, PHP_URL_SCHEME);
-                if (is_string($scheme)) {
-                    if (!in_array(strtolower($scheme), ['http', 'https'], true)) {
-                        throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
-                    }
-                    if (!preg_match('/^[a-z][a-z0-9+.-]*:\/\//i', $url)) {
+                $parts = parse_url($url);
+                if ($parts === false) {
+                    throw new \InvalidArgumentException('Invalid redirect URL.');
+                }
+                if (isset($parts['scheme'])) {
+                    if (!in_array(strtolower($parts['scheme']), ['http', 'https'], true) || !isset($parts['host'])) {
                         throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
                     }
                 }
 
-                $host = parse_url($url, PHP_URL_HOST);
-                if (is_string($host)) {
+                if (isset($parts['host'])) {
                     $currentHostValue = $_SERVER['HTTP_HOST'] ?? '';
                     $currentHost = is_string($currentHostValue) ? $currentHostValue : '';
                     if ($currentHost === '') {
                         throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
                     }
-                    $normalizedCurrentHost = (string) (parse_url('http://' . $currentHost, PHP_URL_HOST) ?? $currentHost);
-                    if (strcasecmp($host, $normalizedCurrentHost) !== 0) {
+                    $normalizedCurrentHost = parse_url('http://' . $currentHost, PHP_URL_HOST);
+                    if (!is_string($normalizedCurrentHost) || strcasecmp($parts['host'], $normalizedCurrentHost) !== 0) {
                         throw new \InvalidArgumentException('External redirect not allowed: ' . $url);
                     }
                 }
@@ -1090,7 +1091,6 @@ namespace PFrame {
          * @return array{controller: string, action: string, params: array<string, string>, middleware: array<callable>}|null
          */
         private function matchRoute(string $method, string $path, bool $isAjax): ?array {
-            $method = strtoupper($method);
             $normalizedPath = $this->normalizeStaticPath($path);
 
             $match = $this->matchRouteIndexes($this->staticRoutesByMethod[$method][$normalizedPath] ?? [], $path, $isAjax, true);
@@ -1380,8 +1380,7 @@ namespace PFrame {
             }
 
             if ($request->method === 'HEAD') {
-                $response->body = '';
-                $response->filePath = null;
+                $response = new Response('', $response->status, $response->headers);
             }
 
             if ($this->securityHeaders === null) {
@@ -1657,11 +1656,6 @@ namespace PFrame {
                 } catch (\Throwable $e) {
                     $cleanupError = $e;
                 }
-                try {
-                    $db->resetRequestState();
-                } catch (\Throwable $e) {
-                    $cleanupError ??= $e;
-                }
             }
 
             if (session_status() === PHP_SESSION_ACTIVE) {
@@ -1675,6 +1669,14 @@ namespace PFrame {
                     } else {
                         error_log('[PFrame] Worker session cleanup also failed: ' . $e->getMessage());
                     }
+                }
+            }
+
+            if ($db !== null) {
+                try {
+                    $db->resetRequestState();
+                } catch (\Throwable $e) {
+                    $cleanupError ??= $e;
                 }
             }
 
@@ -1968,7 +1970,8 @@ namespace PFrame {
         public function exec(string $sql, array|string|null $params = null): int|array {
             if ($this->isSelectQuery($sql)) {
                 return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): array {
-                    $rows = self::associativeRows($stmt->fetchAll(\PDO::FETCH_ASSOC));
+                    $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+                    self::assertAssociativeRows($rows);
                     $this->lastRowCount = count($rows);
                     return $rows;
                 });
@@ -2008,7 +2011,8 @@ namespace PFrame {
                 if (!is_array($row)) {
                     throw new \RuntimeException('PDO returned an invalid associative row.');
                 }
-                return self::associativeRow($row);
+                self::assertAssociativeRow($row);
+                return $row;
             });
         }
 
@@ -2018,7 +2022,8 @@ namespace PFrame {
          */
         public function results(string $sql, array|string|null $params = null): array {
             return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): array {
-                $rows = self::associativeRows($stmt->fetchAll(\PDO::FETCH_ASSOC));
+                $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+                self::assertAssociativeRows($rows);
                 $this->lastRowCount = count($rows);
                 return $rows;
             });
@@ -2026,32 +2031,30 @@ namespace PFrame {
 
         /**
          * @param array<array-key, mixed> $row
-         * @return array<string, mixed>
+         * @phpstan-assert array<string, mixed> $row
          */
-        private static function associativeRow(array $row): array {
-            $result = [];
+        private static function assertAssociativeRow(array $row): void {
             foreach ($row as $column => $value) {
                 if (!is_string($column)) {
                     throw new \RuntimeException('Database result columns must have non-numeric names; alias numeric expressions.');
                 }
-                $result[$column] = $value;
             }
-            return $result;
         }
 
         /**
          * @param array<array-key, mixed> $rows
-         * @return list<array<string, mixed>>
+         * @phpstan-assert list<array<string, mixed>> $rows
          */
-        private static function associativeRows(array $rows): array {
-            $result = [];
+        private static function assertAssociativeRows(array $rows): void {
+            if (!array_is_list($rows)) {
+                throw new \RuntimeException('PDO returned an invalid result list.');
+            }
             foreach ($rows as $row) {
                 if (!is_array($row)) {
                     throw new \RuntimeException('PDO returned an invalid associative row.');
                 }
-                $result[] = self::associativeRow($row);
+                self::assertAssociativeRow($row);
             }
-            return $result;
         }
 
         /**
@@ -2115,8 +2118,9 @@ namespace PFrame {
 
         public function begin(): bool {
             if ($this->pdo->inTransaction()) {
-                $this->savepointLevel++;
-                $this->pdo->exec("SAVEPOINT sp_{$this->savepointLevel}");
+                $nextLevel = $this->savepointLevel + 1;
+                $this->pdo->exec("SAVEPOINT sp_{$nextLevel}");
+                $this->savepointLevel = $nextLevel;
                 return true;
             }
 
@@ -2151,8 +2155,11 @@ namespace PFrame {
                 return false;
             }
 
-            $this->savepointLevel = 0;
-            return $this->pdo->rollBack();
+            $rolledBack = $this->pdo->rollBack();
+            if ($rolledBack) {
+                $this->savepointLevel = 0;
+            }
+            return $rolledBack;
         }
 
         public function trans(): bool {
@@ -2186,7 +2193,9 @@ namespace PFrame {
             $this->totalQueryCount = 0;
             $this->totalQueryTime = 0.0;
             $this->totalFetchedRows = 0;
-            $this->savepointLevel = 0;
+            if (!$this->pdo->inTransaction()) {
+                $this->savepointLevel = 0;
+            }
         }
 
         private function isSelectQuery(string $sql): bool {
@@ -2492,12 +2501,16 @@ namespace PFrame {
                 'session.cookie_httponly' => $params['httponly'] ? '1' : '0',
                 'session.cookie_secure' => $params['secure'] ? '1' : '0',
                 'session.cookie_samesite' => (string) $params['samesite'],
-                'session.gc_maxlifetime' => (string) $params['lifetime'],
             ];
+            if ($params['lifetime'] !== 0) {
+                $ini['session.gc_maxlifetime'] = (string) $params['lifetime'];
+            }
             foreach ($ini as $key => $value) {
                 @ini_set($key, $value);
             }
 
+            $params['path'] ??= '';
+            $params['domain'] ??= '';
             session_set_cookie_params($params);
         }
 
@@ -2518,7 +2531,10 @@ namespace PFrame {
             }
 
             try {
-                $data = $this->db->var('SELECT data FROM sessions WHERE session_id = ?', [$id]);
+                $data = $this->db->var(
+                    'SELECT data FROM sessions WHERE session_id = ? AND stamp >= ?',
+                    [$id, $this->sessionCutoff()],
+                );
                 $result = is_string($data) ? $data : '';
                 $this->initialData = $result;
                 $this->initialDataLoaded = true;
@@ -2531,7 +2547,10 @@ namespace PFrame {
 
         public function validateId(string $id): bool {
             try {
-                return $this->db->var('SELECT 1 FROM sessions WHERE session_id = ?', [$id]) !== null;
+                return $this->db->var(
+                    'SELECT 1 FROM sessions WHERE session_id = ? AND stamp >= ?',
+                    [$id, $this->sessionCutoff()],
+                ) !== null;
             } catch (\Throwable $e) {
                 error_log('[SESSION] ID validation failed for ' . $this->sessionLabel($id) . ': ' . $e->getMessage());
                 return false;
@@ -2654,7 +2673,9 @@ namespace PFrame {
 
         private function refreshTimestamp(string $id, string $data): bool {
             $updated = $this->db->exec('UPDATE sessions SET stamp = ? WHERE session_id = ?', [time(), $id]);
-            if ($updated === 0) {
+            $missing = $updated === 0
+                && $this->db->var('SELECT 1 FROM sessions WHERE session_id = ?', [$id]) === null;
+            if ($missing) {
                 $this->persist($id, $data);
             } else {
                 $this->initialData = $data;
@@ -2662,6 +2683,10 @@ namespace PFrame {
             }
 
             return true;
+        }
+
+        private function sessionCutoff(): int {
+            return time() - max(0, (int) ini_get('session.gc_maxlifetime'));
         }
 
         private function persist(string $id, string $data): void {
@@ -2848,10 +2873,18 @@ namespace PFrame {
 
     class Flash {
         private const SESSION_KEY = '_flash_messages';
+        // Leave room for authentication and other data in the TEXT-backed session.
+        private const MAX_SERIALIZED_BYTES = 16384;
 
         public function add(string $type, string $text): void {
             $messages = $this->messages();
-            $messages[] = ['type' => $type, 'text' => $text];
+            $message = ['type' => $type, 'text' => $text];
+            if (!in_array($message, $messages, true)) {
+                $messages[] = $message;
+            }
+            while (strlen(serialize($messages)) > self::MAX_SERIALIZED_BYTES) {
+                array_shift($messages);
+            }
             $_SESSION[self::SESSION_KEY] = $messages;
         }
 
@@ -3313,7 +3346,7 @@ namespace PFrame {
             });
         }
 
-        private function writeFile(string $key, mixed $value, int $ttl): void {
+        private function writeFile(string $key, mixed $value, int $ttl, ?int $time = null): void {
             $dir = $this->requireDir();
             $tempPath = @tempnam($dir, '.pframe-cache-');
             if ($tempPath === false) {
@@ -3321,7 +3354,7 @@ namespace PFrame {
             }
 
             try {
-                $serialized = serialize(['value' => $value, 'ttl' => $ttl, 'time' => time()]);
+                $serialized = serialize(['value' => $value, 'ttl' => $ttl, 'time' => $time ?? time()]);
                 $written = @file_put_contents($tempPath, $serialized, LOCK_EX);
                 if ($written !== strlen($serialized)) {
                     throw new \RuntimeException('Failed to write complete cache entry: ' . $this->path($key));
@@ -3344,13 +3377,33 @@ namespace PFrame {
             }
 
             return $this->withFileLock($key, function () use ($key, $ttl): int {
-                $current = $this->readFileInteger($key);
+                $path = $this->path($key);
+                $data = is_file($path) ? $this->readFileEntry($path) : null;
+                $entryTtl = $ttl;
+                $entryTime = null;
+
+                if ($data === null) {
+                    if (is_file($path)) {
+                        throw new \RuntimeException('Invalid cache entry: ' . $path);
+                    }
+                    $current = 0;
+                } elseif ($this->isExpired($data)) {
+                    $current = 0;
+                } else {
+                    if (!is_int($data['value'])) {
+                        throw new \RuntimeException('Cache entry is not an integer: ' . $path);
+                    }
+                    $current = $data['value'];
+                    $entryTtl = $data['ttl'];
+                    $entryTime = $data['time'];
+                }
+
                 if ($current === PHP_INT_MAX) {
                     throw new \RuntimeException('Cache increment overflow: ' . $this->path($key));
                 }
 
                 $next = $current + 1;
-                $this->writeFile($key, $next, $ttl);
+                $this->writeFile($key, $next, $entryTtl, $entryTime);
                 return $next;
             });
         }
@@ -3378,12 +3431,22 @@ namespace PFrame {
                 return;
             }
 
-            foreach (glob($this->dir . '/*.cache') ?: [] as $file) {
-                $hash = pathinfo($file, PATHINFO_FILENAME);
-                if (preg_match('/^[0-9a-f]{32}$/', $hash) !== 1) {
+            if (!is_dir($this->dir)) {
+                return;
+            }
+
+            foreach (new \FilesystemIterator($this->dir, \FilesystemIterator::SKIP_DOTS) as $fileInfo) {
+                if (!$fileInfo instanceof \SplFileInfo || !$fileInfo->isFile()) {
                     continue;
                 }
 
+                $filename = $fileInfo->getFilename();
+                if (preg_match('/^([0-9a-f]{32})\.cache$/', $filename, $matches) !== 1) {
+                    continue;
+                }
+
+                $hash = $matches[1];
+                $file = $fileInfo->getPathname();
                 $this->withFileHashLock($hash, static function () use ($file): void {
                     if (is_file($file) && !@unlink($file)) {
                         throw new \RuntimeException('Failed to clear cache entry: ' . $file);
@@ -3507,27 +3570,6 @@ namespace PFrame {
             throw new \RuntimeException('Failed to increment APCu cache entry.');
         }
 
-        private function readFileInteger(string $key): int {
-            $path = $this->path($key);
-            if (!is_file($path)) {
-                return 0;
-            }
-
-            $data = $this->readFileEntry($path);
-            if ($data === null) {
-                throw new \RuntimeException('Invalid cache entry: ' . $path);
-            }
-
-            if ($this->isExpired($data)) {
-                return 0;
-            }
-            if (!is_int($data['value'])) {
-                throw new \RuntimeException('Cache entry is not an integer: ' . $path);
-            }
-
-            return $data['value'];
-        }
-
         /** @return array{value: mixed, ttl: int, time: int}|null */
         private function readFileEntry(string $path): ?array {
             $serialized = @file_get_contents($path);
@@ -3560,26 +3602,8 @@ namespace PFrame {
         }
 
         private function clearApcu(): void {
-            if (!function_exists('apcu_cache_info')) {
-                return;
-            }
-
-            $cacheInfo = apcu_cache_info(false);
-            if (!is_array($cacheInfo)) {
-                return;
-            }
-
-            $cacheList = $cacheInfo['cache_list'] ?? null;
-            if (!is_array($cacheList)) {
-                return;
-            }
-
-            foreach ($cacheList as $entry) {
-                $entryKey = is_array($entry) ? ($entry['info'] ?? null) : null;
-                if (is_string($entryKey) && str_starts_with($entryKey, $this->apcuPrefix)) {
-                    apcu_delete($entryKey);
-                }
-            }
+            $pattern = '/^' . preg_quote($this->apcuPrefix, '/') . '/';
+            apcu_delete(new \APCUIterator($pattern, \APC_ITER_KEY));
         }
 
         private function requireDir(): string {

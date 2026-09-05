@@ -435,8 +435,6 @@ class TickTest extends TestCase {
         $ref = new \ReflectionClass($tick);
         $tryLock = $ref->getMethod('tryLock');
         $unlock = $ref->getMethod('unlock');
-        $tryLock->setAccessible(true);
-        $unlock->setAccessible(true);
 
         $lockPath = $this->lockPath($this->cacheDir, 'inode-safe');
         self::assertTrue($tryLock->invoke($tick, 'inode-safe'));

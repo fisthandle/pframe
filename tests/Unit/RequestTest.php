@@ -135,6 +135,18 @@ class RequestTest extends TestCase {
         $this->assertFalse($req->isAjax());
     }
 
+    public function testConstructorNormalizesMethodForAllRequestConsumers(): void {
+        $post = new Request(method: 'post', path: '/submit');
+        $this->assertSame('POST', $post->method);
+        $this->assertTrue($post->isPost());
+
+        $get = new Request(method: 'get', path: '/');
+        $this->assertSame('GET', $get->method);
+        $this->assertTrue($get->isGet());
+
+        $this->assertSame('HEAD', (new Request(method: 'head', path: '/'))->method);
+    }
+
     public function testParamsSetByRouter(): void {
         $req = new Request(method: 'GET', path: '/o/test-slug');
         $req->setParams(['slug' => 'test-slug']);

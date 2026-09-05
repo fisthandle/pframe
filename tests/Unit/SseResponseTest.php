@@ -85,6 +85,37 @@ class SseResponseTest extends TestCase {
         $this->assertSame("event: ready\n\n", $output);
         $this->assertStringNotContainsString('<html', strtolower($output));
     }
+
+    public function testHeadDoesNotStartStreamCallback(): void {
+        $server = $_SERVER;
+        $_SERVER = ['REQUEST_METHOD' => 'HEAD', 'REQUEST_URI' => '/stream'];
+        $app = new App();
+        $app->get('/stream', HeadSseController::class, 'stream');
+        HeadSseController::$started = false;
+
+        ob_start();
+        try {
+            $app->run();
+        } finally {
+            $output = (string) ob_get_clean();
+            $_SERVER = $server;
+        }
+
+        $this->assertFalse(HeadSseController::$started);
+        $this->assertSame('', $output);
+        $this->assertSame(202, http_response_code());
+    }
+}
+
+class HeadSseController {
+    public static bool $started = false;
+
+    public function stream(): SseResponse {
+        return new SseResponse(static function (): void {
+            self::$started = true;
+            echo "event: ready\n\n";
+        }, status: 202);
+    }
 }
 
 class FailedSseController {

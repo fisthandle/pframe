@@ -130,6 +130,10 @@ class CacheTest extends TestCase {
     }
 
     public function testRateCheckFailsClosedWhenLockCannotBeCreated(): void {
+        if ($this->hasApcu) {
+            $this->markTestSkipped('This regression exercises the file backend.');
+        }
+
         $readOnlyDir = sys_get_temp_dir() . '/p1_cache_test_ro_' . uniqid('', true);
         mkdir($readOnlyDir, 0755, true);
         chmod($readOnlyDir, 0555);
