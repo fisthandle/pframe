@@ -74,6 +74,74 @@ SH);
         );
     }
 
+    public function testMutationFailsClearlyWhenToolOrCoverageDriverIsUnavailable(): void {
+        $missingTool = $this->runRunner('mutation');
+        $this->assertSame(1, $missingTool['exit'], $missingTool['output']);
+        $this->assertStringContainsString('Mutation tool unavailable', $missingTool['output']);
+        $this->assertStringContainsString('status=fail', $missingTool['output']);
+
+        $toolDir = $this->tmpDir . '/tools/infection/vendor/bin';
+        mkdir($toolDir, 0777, true);
+        $fakeInfection = $toolDir . '/infection';
+        file_put_contents($fakeInfection, "#!/usr/bin/env bash\nexit 0\n");
+        chmod($fakeInfection, 0755);
+
+        $missingCoverage = $this->runRunner('mutation', ['PFRAME_FORCE_NO_COVERAGE' => '1']);
+        $this->assertSame(1, $missingCoverage['exit'], $missingCoverage['output']);
+        $this->assertStringContainsString('Mutation coverage driver unavailable', $missingCoverage['output']);
+        $this->assertStringContainsString('status=fail', $missingCoverage['output']);
+    }
+
+    public function testMutationUsesRepositoryScopedLockAndNiceness(): void {
+        $runner = file_get_contents(dirname(__DIR__, 2) . '/bin/test');
+        $this->assertIsString($runner);
+        $this->assertStringContainsString('build/infection/.lock', $runner);
+        $this->assertStringContainsString('flock "$lock_fd"', $runner);
+        $this->assertStringContainsString('nice -n 19', $runner);
+        $this->assertStringContainsString('--initial-tests-php-options=', $runner);
+        $this->assertStringContainsString('pcov.enabled=1', $runner);
+        $this->assertStringContainsString('xdebug.mode=coverage', $runner);
+        $this->assertStringContainsString('"${@:2}" || result=$?', $runner);
+        $this->assertStringContainsString('--threads=1', $runner);
+        $this->assertStringContainsString('--with-uncovered', $runner);
+        $this->assertStringNotContainsString('/tmp/codex-php-mutation.lock', $runner);
+
+        $infectionConfig = file_get_contents(dirname(__DIR__, 2) . '/infection.json5');
+        $this->assertIsString($infectionConfig);
+        $this->assertStringContainsString('"customPath": "tools/infection/phpunit.php"', $infectionConfig);
+    }
+
+    public function testMutationPhpUnitIsolatesItsProcessGroupAndPreservesPhpOptions(): void {
+        if (!function_exists('posix_getpgrp')) {
+            $this->markTestSkipped('POSIX process isolation is unavailable.');
+        }
+
+        $toolDir = $this->tmpDir . '/tools/infection';
+        mkdir($toolDir . '/vendor/bin', 0777, true);
+        copy(dirname(__DIR__, 2) . '/tools/infection/phpunit.php', $toolDir . '/phpunit.php');
+        file_put_contents($toolDir . '/vendor/bin/phpunit', <<<'PHP'
+<?php
+declare(strict_types=1);
+echo json_encode([getmypid(), posix_getpgrp(), ini_get('precision')]);
+PHP);
+
+        $process = proc_open(
+            [PHP_BINARY, '-d', 'precision=7', $toolDir . '/phpunit.php'],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+        );
+        $this->assertIsResource($process);
+        $output = stream_get_contents($pipes[1]);
+        $error = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $this->assertSame(0, proc_close($process), (string) $error);
+        [$pid, $group, $precision] = json_decode((string) $output, true, flags: JSON_THROW_ON_ERROR);
+        $this->assertSame($pid, $group);
+        $this->assertNotSame(posix_getpgrp(), $group);
+        $this->assertSame('7', $precision);
+    }
+
     public function testUnsupportedAndUnknownProfilesHaveStableExitCodes(): void {
         foreach (['e2e', 'ui'] as $profile) {
             $result = $this->runRunner($profile);

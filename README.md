@@ -450,6 +450,7 @@ Test standard v1 profiles:
 ./bin/test full       # quick + contracts + consumer copies + phpstan
 ./bin/test ci         # full + coverage report, minimum 85% line coverage
 ./bin/test coverage   # coverage artifacts, minimum 85% line coverage
+./bin/test mutation   # Infection against src/PFrame.php (requires PCOV or Xdebug)
 ./bin/test contracts  # governance/contracts suite
 ./bin/test e2e        # unsupported in framework repo (exit 2)
 ./bin/test ui         # unsupported in framework repo (exit 2)
@@ -467,12 +468,37 @@ composer test:quick
 composer test:full
 composer test:ci
 composer test:coverage
+composer test:mutation
 composer phpstan
 ```
 
 Coverage artifacts are generated in `build/coverage/` (`clover.xml`, `html/`). The `coverage` and
 `ci` profiles fail if no coverage driver (`xdebug`, `pcov`, `phpdbg`) is available or line coverage
 falls below 85%.
+
+Mutation testing uses the isolated, pinned Infection 0.35.2 + PHPUnit 13.2.4 toolchain so it does
+not add runtime dependencies to the framework package. The isolated PHPUnit binary is intentional:
+the project binary preloads `vendor/autoload.php`, whose `autoload.files` entry loads `src/PFrame.php`
+before Infection can install its mutant interceptor.
+
+```bash
+composer install --working-dir=tools/infection --no-interaction --no-progress --prefer-dist
+./bin/test mutation
+```
+
+The configured source scope is all production code in `src/`, excluding `src/PFrameTesting.php`
+because that file is the PHPUnit-dependent testing harness. Reports are written to the ignored
+`build/infection/` directory. The command fails explicitly when Infection or a PCOV/Xdebug coverage
+driver is unavailable; it deliberately has no mutation-score gate.
+
+The mutation-only PHPUnit wrapper requires POSIX and gives each test process its own process
+group, so a mutated Tick timeout cannot terminate Infection. It preserves PHP coverage options.
+The runner defaults to one worker (override with `--threads=2`), a 1 GiB PHP memory limit
+and Infection's `--only-covering-test-cases`:
+the initial suite still measures all coverage, then each mutant runs its covering test cases.
+Reports contain text diffs and summary JSON. Full-source JSON is deliberately disabled: it
+duplicates the entire single-file framework per mutant and can exhaust memory while rendering.
+`--with-uncovered` includes untested source lines in the report instead of hiding them from MSI.
 
 ## License
 

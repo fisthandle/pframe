@@ -18,6 +18,7 @@ Jedyny runner: `./bin/test <profile>`.
 | `full` | `quick` + `Contracts` + kontrola kopii konsumenckich + `phpstan` |
 | `ci` | `full` + coverage report, minimum 85% pokrycia linii |
 | `coverage` | phpunit z coverage artifacts (`build/coverage`), minimum 85% pokrycia linii |
+| `mutation` | Infection 0.35.2 dla produkcyjnego `src/PFrame.php` |
 | `contracts` | governance runnera i testy kontraktowe |
 | `e2e`/`ui` | w repo frameworka N/A (czytelny komunikat + exit 2) |
 
@@ -28,6 +29,30 @@ CI uruchamia dokładnie `./bin/test ci`, bez duplikowania kroków w workflow.
 
 Profile `coverage` i `ci` wymagają drivera (`xdebug`, `pcov` lub `phpdbg`) i kończą się błędem,
 gdy raport nie powstał albo pokrycie linii spadło poniżej 85%.
+
+Profil `mutation` wymaga PCOV lub Xdebug oraz izolowanego narzędzia instalowanego przez
+`composer install --working-dir=tools/infection`. Toolchain zawiera własny PHPUnit 13.2.4, ponieważ
+projektowa binarka ładuje `vendor/autoload.php` przed bootstrapem Infection, a tamtejsze
+`autoload.files` ładuje `src/PFrame.php` przed instalacją przechwytywania mutanta. Konfiguracja
+obejmuje całe `src/`, ale wyklucza `PFrameTesting.php`: to zależny od PHPUnit test harness kopiowany
+osobno, a nie kod runtime.
+Raporty trafiają do ignorowanego `build/infection/`; profil nie ma arbitralnego progu MSI.
+Wrapper PHPUnit wymaga POSIX i izoluje grupę procesów: mutacja sprzątania procesów w `Tick`
+nie może zakończyć nadrzędnego Infection. Runner zachowuje opcje coverage, domyślnie używa jednego wątku
+i limitu PHP 1 GiB. `--only-covering-test-cases` wybiera testy dla każdej mutacji na podstawie
+pełnego początkowego coverage, bez zawężania zakresu źródeł.
+Jawne `--threads=2` pozwala wykorzystać dwa niezależne procesy testów, jeśli środowisko ma zasoby.
+Raport tekstowy i `summary.json` nie powielają całego źródła dla każdego mutanta, w przeciwieństwie
+do pominiętego szczegółowego loggera JSON, który przekraczał limit pamięci przy zapisie pełnego przebiegu.
+
+Kalibracja z 2026-09-08: `bin/test mutation --threads=2 --show-mutations=0`, PHP 8.4.25,
+PCOV, plikowy backend cache. Pełny zakres wygenerował 3699 mutantów: 1985 zabitych testami,
+1103 niewykryte, 589 niepokrytych, 3 sklasyfikowane jako błąd i 19 jako timeout.
+MSI wyniósł 54,26%, mutation coverage 84,08%, a covered MSI 64,53%.
+Runner zakończył się kodem 0 po 16 min 38 s, zapisał raport tekstowy i podsumowanie JSON,
+bez OOM; błędy i timeouty powyżej dotyczą mutantów, nie bazowej bramki testowej.
+`bin/test full` przeszedł, podobnie jak osobny przebieg Unit + Integration z APCu.
+Wynik nie zastępuje klasyfikacji niewykrytych mutantów ani pomiarów pozostałych konfiguracji runtime.
 
 ## Struktura testów u konsumenta
 

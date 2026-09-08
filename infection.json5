@@ -1,0 +1,19 @@
+{
+    "$schema": "./tools/infection/vendor/infection/infection/resources/schema.json",
+    "source": {
+        "directories": ["src"],
+        "excludes": ["PFrameTesting.php"]
+    },
+    "logs": {
+        "text": "build/infection/infection.log",
+        "summaryJson": "build/infection/summary.json"
+    },
+    "tmpDir": "build/infection/tmp",
+    "phpUnit": {
+        "configDir": ".",
+        "customPath": "tools/infection/phpunit.php"
+    },
+    "testFramework": "phpunit",
+    "testFrameworkExtraArgs": "--testsuite=Unit,Integration,Contracts",
+    "threads": 1
+}

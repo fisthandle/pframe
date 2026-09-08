@@ -1,0 +1,14 @@
+{
+    "name": "pframe/infection-tool",
+    "description": "Isolated mutation-testing toolchain for PFrame",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "infection/infection": "0.35.2",
+        "phpunit/phpunit": "~13.2.4"
+    },
+    "config": {
+        "allow-plugins": false,
+        "sort-packages": true
+    }
+}

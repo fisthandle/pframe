@@ -102,10 +102,11 @@ Key rules:
 
 ## Testy
 
-bin/test profiles: `quick|full|ci|coverage|contracts|e2e|ui`
+bin/test profiles: `quick|full|ci|coverage|mutation|contracts|e2e|ui`
 - `bin/test quick` — składnia + Unit + Integration
 - `bin/test full` — quick + Contracts + Consumer copies + PHPStan
 - `bin/test ci` — full + coverage z minimalnym pokryciem linii 85%; brak drivera kończy profil błędem
+- `bin/test mutation` — izolowany Infection dla `src/PFrame.php`, domyślnie jeden wątek, PCOV/Xdebug i POSIX; instalacja: `composer install --working-dir=tools/infection`
 - `composer test` = alias do `bin/test quick`
 
 `src/PFrameTesting.php` zależy od PHPUnit i nie jest częścią runtime autoload. Konsument kopiuje

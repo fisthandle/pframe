@@ -8,13 +8,14 @@ PROFILE="${1:-quick}"
 
 usage() {
     cat <<'USAGE'
-Usage: ./bin/test [quick|full|ci|coverage|contracts|e2e|ui]
+Usage: ./bin/test [quick|full|ci|coverage|mutation|contracts|e2e|ui]
 
 Profiles:
   quick      syntax + unit + integration (no coverage)
   full       quick + contracts + phpstan
   ci         full + coverage report (minimum 85% line coverage)
   coverage   phpunit with coverage artifacts (minimum 85% line coverage)
+  mutation   Infection against src/PFrame.php (requires PCOV or Xdebug)
   contracts  contract/governance tests
   e2e        unsupported for pframe (returns exit code 2)
   ui         unsupported for pframe (returns exit code 2)
@@ -166,6 +167,69 @@ run_coverage() {
     return 1
 }
 
+run_mutation() {
+    local infection="$ROOT_DIR/tools/infection/vendor/bin/infection"
+
+    if [[ ! -x "$infection" ]]; then
+        step "Mutation tests"
+        echo "Mutation tool unavailable. Run: composer install --working-dir=tools/infection" >&2
+        echo "status=fail duration=0s step=Mutation tests"
+        return 1
+    fi
+
+    if ! coverage_driver_available; then
+        step "Mutation tests"
+        echo "Mutation coverage driver unavailable (xdebug/pcov)." >&2
+        echo "status=fail duration=0s step=Mutation tests"
+        return 1
+    fi
+
+    if ! command -v nice >/dev/null 2>&1; then
+        step "Mutation tests"
+        echo "Mutation niceness utility unavailable (nice)." >&2
+        echo "status=fail duration=0s step=Mutation tests"
+        return 1
+    fi
+
+    if ! command -v flock >/dev/null 2>&1; then
+        step "Mutation tests"
+        echo "Mutation lock utility unavailable (flock)." >&2
+        echo "status=fail duration=0s step=Mutation tests"
+        return 1
+    fi
+
+    mkdir -p build/infection
+    local lock_file="$ROOT_DIR/build/infection/.lock"
+    local lock_fd
+    if ! exec {lock_fd}>"$lock_file"; then
+        step "Mutation tests"
+        echo "Mutation lock cannot be opened: $lock_file" >&2
+        echo "status=fail duration=0s step=Mutation tests"
+        return 1
+    fi
+    if ! flock "$lock_fd"; then
+        step "Mutation tests"
+        echo "Mutation lock cannot be acquired: $lock_file" >&2
+        echo "status=fail duration=0s step=Mutation tests"
+        exec {lock_fd}>&-
+        return 1
+    fi
+
+    local result=0
+    local initial_tests_php_options="-d pcov.enabled=1 -d pcov.directory=$ROOT_DIR/src -d xdebug.mode=coverage"
+    run_step "Mutation tests" nice -n 19 env XDEBUG_MODE=coverage php -d memory_limit=1G "$infection" \
+        --configuration="$ROOT_DIR/infection.json5" \
+        --no-interaction \
+        --with-uncovered \
+        --only-covering-test-cases \
+        --initial-tests-php-options="$initial_tests_php_options" \
+        --threads=1 \
+        "${@:2}" || result=$?
+    flock -u "$lock_fd" || true
+    exec {lock_fd}>&-
+    return "$result"
+}
+
 run_unsupported() {
     local label="$1"
     step "$label"
@@ -187,6 +251,9 @@ case "$PROFILE" in
         ;;
     coverage)
         run_coverage
+        ;;
+    mutation)
+        run_mutation "$@"
         ;;
     contracts)
         run_contracts

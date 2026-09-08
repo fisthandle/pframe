@@ -49,6 +49,7 @@
         "test:full": "./bin/test full",
         "test:ci": "./bin/test ci",
         "test:coverage": "./bin/test coverage",
-        "phpstan": "phpstan analyse"
+        "test:mutation": "./bin/test mutation",
+        "phpstan": "phpstan analyse --memory-limit=512M"
     }
 }
