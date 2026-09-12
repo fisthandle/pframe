@@ -63,7 +63,8 @@ return [
         'user' => 'root',
         'pass' => '',
     ],
-    'max_request_body_bytes' => 8_388_608, // 8 MiB; przekroczenie zwraca 413 przed dispatchem trasy
+    'max_request_body_bytes' => 8_388_608, // zwykłe body; przekroczenie zwraca 413 przed dispatchem
+    // 'max_multipart_body_bytes' => 33_554_432, // opcjonalnie; bez wpisu dziedziczy limit powyżej
     'performance' => [
         'server_timing' => false, // true lokalnie: metryki w DevTools/HTTP
         'slow_ms' => 70,          // 0 wyłącza log wolnych requestów

@@ -542,6 +542,45 @@ class AppTest extends TestCase {
         $this->assertStringContainsString('Payload Too Large', $response->body);
     }
 
+    public function testRunAppliesMultipartBodyLimitAndDefaultInheritance(): void {
+        $server = $_SERVER;
+        $statusCode = http_response_code();
+        $runs = HelloStub::$runs;
+        $_SERVER = [
+            'REQUEST_METHOD' => 'POST',
+            'REQUEST_URI' => '/submit',
+            'REMOTE_ADDR' => '127.0.0.1',
+            'CONTENT_TYPE' => 'multipart/form-data; boundary=test',
+            'CONTENT_LENGTH' => '6',
+        ];
+
+        try {
+            foreach ([[null, 413, 0], [6, 200, 1]] as [$multipartLimit, $expectedStatus, $expectedRuns]) {
+                HelloStub::$runs = 0;
+                $app = new App();
+                $app->setConfig('max_request_body_bytes', 5);
+                if ($multipartLimit !== null) {
+                    $app->setConfig('max_multipart_body_bytes', $multipartLimit);
+                }
+                $app->post('/submit', HelloStub::class, 'submit');
+
+                ob_start();
+                try {
+                    $app->run();
+                } finally {
+                    ob_end_clean();
+                }
+
+                $this->assertSame($expectedStatus, http_response_code());
+                $this->assertSame($expectedRuns, HelloStub::$runs);
+            }
+        } finally {
+            $_SERVER = $server;
+            HelloStub::$runs = $runs;
+            http_response_code(is_int($statusCode) ? $statusCode : 200);
+        }
+    }
+
     public function testElapsedTime(): void {
         $app = new App();
         usleep(5000); // 5ms

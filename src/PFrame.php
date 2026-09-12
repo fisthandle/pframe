@@ -92,10 +92,14 @@ namespace PFrame {
             $this->headers = $normalized;
         }
 
-        public static function fromGlobals(int $maxBodyBytes = self::DEFAULT_MAX_BODY_BYTES): static {
+        public static function fromGlobals(
+            int $maxBodyBytes = self::DEFAULT_MAX_BODY_BYTES,
+            ?int $maxMultipartBodyBytes = null,
+        ): static {
             return self::buildFromGlobals(
                 self::serverString($_SERVER, 'REMOTE_ADDR'),
                 maxBodyBytes: $maxBodyBytes,
+                maxMultipartBodyBytes: $maxMultipartBodyBytes,
             );
         }
 
@@ -103,6 +107,7 @@ namespace PFrame {
         public static function fromGlobalsWithProxies(
             array $trustedProxies = [],
             int $maxBodyBytes = self::DEFAULT_MAX_BODY_BYTES,
+            ?int $maxMultipartBodyBytes = null,
         ): static {
             $headers = self::parseServerHeaders($_SERVER);
             $trustedProxies = self::resolveTrustedProxies($trustedProxies);
@@ -110,6 +115,7 @@ namespace PFrame {
                 self::resolveIp($_SERVER, $trustedProxies),
                 $headers,
                 $maxBodyBytes,
+                $maxMultipartBodyBytes,
                 $trustedProxies,
                 true,
             );
@@ -162,13 +168,18 @@ namespace PFrame {
             string $ip,
             ?array $headers = null,
             int $maxBodyBytes = self::DEFAULT_MAX_BODY_BYTES,
+            ?int $maxMultipartBodyBytes = null,
             array $trustedProxies = [],
             bool $trustedProxiesResolved = false,
         ): static {
             $uri = self::serverString($_SERVER, 'REQUEST_URI', '/');
             $path = parse_url($uri, PHP_URL_PATH) ?: '/';
             $headers ??= self::parseServerHeaders($_SERVER);
-            $body = self::readRequestBody($headers, max(0, $maxBodyBytes));
+            $body = self::readRequestBody(
+                $headers,
+                max(0, $maxBodyBytes),
+                max(0, $maxMultipartBodyBytes ?? $maxBodyBytes),
+            );
 
             return new static(
                 method: self::serverString($_SERVER, 'REQUEST_METHOD', 'GET'),
@@ -191,14 +202,18 @@ namespace PFrame {
          * @param array<string, string> $headers
          * @return array{body: string, too_large: bool}
          */
-        private static function readRequestBody(array $headers, int $maxBodyBytes): array {
+        private static function readRequestBody(
+            array $headers,
+            int $maxBodyBytes,
+            int $maxMultipartBodyBytes,
+        ): array {
             $stream = @fopen('php://input', 'rb');
             if ($stream === false) {
                 return ['body' => '', 'too_large' => false];
             }
 
             try {
-                return self::readRequestBodyStream($stream, $headers, $maxBodyBytes);
+                return self::readRequestBodyStream($stream, $headers, $maxBodyBytes, $maxMultipartBodyBytes);
             } finally {
                 fclose($stream);
             }
@@ -209,14 +224,21 @@ namespace PFrame {
          * @param array<string, string> $headers
          * @return array{body: string, too_large: bool}
          */
-        private static function readRequestBodyStream($stream, array $headers, int $maxBodyBytes): array {
+        private static function readRequestBodyStream(
+            $stream,
+            array $headers,
+            int $maxBodyBytes,
+            int $maxMultipartBodyBytes,
+        ): array {
+            $contentType = strtolower(trim(explode(';', (string) ($headers['Content-Type'] ?? ''), 2)[0]));
+            $multipart = $contentType === 'multipart/form-data';
+            $limit = $multipart ? $maxMultipartBodyBytes : $maxBodyBytes;
             $contentLength = trim((string) ($headers['Content-Length'] ?? ''));
-            if (ctype_digit($contentLength) && (int) $contentLength > $maxBodyBytes) {
+            if (ctype_digit($contentLength) && (int) $contentLength > $limit) {
                 return ['body' => '', 'too_large' => true];
             }
 
-            $contentType = strtolower(trim(explode(';', (string) ($headers['Content-Type'] ?? ''), 2)[0]));
-            return self::readBodyStream($stream, $maxBodyBytes, $contentType !== 'multipart/form-data');
+            return self::readBodyStream($stream, $limit, !$multipart);
         }
 
         /**
@@ -1578,9 +1600,17 @@ namespace PFrame {
                 $this->config('max_request_body_bytes', Request::DEFAULT_MAX_BODY_BYTES),
                 Request::DEFAULT_MAX_BODY_BYTES,
             ));
+            $maxMultipartBodyBytes = max(0, self::intValue(
+                $this->config('max_multipart_body_bytes', $maxBodyBytes),
+                $maxBodyBytes,
+            ));
             $request = $this->performance->measure(
                 'request',
-                fn(): Request => Request::fromGlobalsWithProxies($trusted, $maxBodyBytes),
+                fn(): Request => Request::fromGlobalsWithProxies(
+                    $trusted,
+                    $maxBodyBytes,
+                    $maxMultipartBodyBytes,
+                ),
             );
             $response = $this->handle($request);
             try {

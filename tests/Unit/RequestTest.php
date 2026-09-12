@@ -204,10 +204,39 @@ class RequestTest extends TestCase {
             $this->assertIsResource($untrustedLength);
             fwrite($untrustedLength, '123456');
             rewind($untrustedLength);
-            $result = $requestMethod->invoke(null, $untrustedLength, $headers, 5);
+            $result = $requestMethod->invoke(null, $untrustedLength, $headers, 5, 100);
             $this->assertSame(['body' => '', 'too_large' => true], $result);
             fclose($untrustedLength);
         }
+
+        foreach ([
+            [['Content-Type' => 'application/json', 'Content-Length' => '6'], 100, true],
+            [['Content-Type' => 'multipart/form-data; boundary=test', 'Content-Length' => '6'], 6, false],
+            [['Content-Type' => 'multipart/form-data; boundary=test', 'Content-Length' => '7'], 6, true],
+        ] as [$headers, $multipartLimit, $expectedTooLarge]) {
+            $typed = fopen('php://memory', 'w+b');
+            $this->assertIsResource($typed);
+            fwrite($typed, '123456');
+            rewind($typed);
+            $result = $requestMethod->invoke(null, $typed, $headers, 5, $multipartLimit);
+            $this->assertSame('', $result['body']);
+            $this->assertSame($expectedTooLarge, $result['too_large']);
+            fclose($typed);
+        }
+
+        $multipartWithoutLength = fopen('php://memory', 'w+b');
+        $this->assertIsResource($multipartWithoutLength);
+        fwrite($multipartWithoutLength, '123456');
+        rewind($multipartWithoutLength);
+        $result = $requestMethod->invoke(
+            null,
+            $multipartWithoutLength,
+            ['Content-Type' => 'Multipart/Form-Data; boundary=test'],
+            5,
+            6,
+        );
+        $this->assertSame(['body' => '', 'too_large' => false], $result);
+        fclose($multipartWithoutLength);
     }
 
     public function testHeaderLookupCaseInsensitiveWithManualHeaders(): void {

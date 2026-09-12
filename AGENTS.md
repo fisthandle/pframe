@@ -54,7 +54,9 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 - Router zwraca `405 Method Not Allowed` z nagłówkiem `Allow`
 - `App::addSecurityHeaders()` — CSP, HSTS, XFO, XCTO, Referrer-Policy, Permissions-Policy
 - `Request::fromGlobalsWithProxies()` + `trusted_proxies` — bezpieczne IP za proxy
-- `max_request_body_bytes` domyślnie wynosi `8_388_608` (8 MiB); przekroczenie kończy się `413` przed middleware i dispatchem trasy
+- `max_request_body_bytes` ogranicza buforowane, zwykłe body; `max_multipart_body_bytes`
+  ma osobny limit i domyślnie dziedziczy pierwszą wartość. Przekroczenie kończy się
+  `413` przed middleware i dispatchem trasy
 - limit aplikacyjny nie zastępuje limitów serwera WWW ani `post_max_size` / `upload_max_filesize`, szczególnie dla form i uploadów parsowanych przed kodem aplikacji
 - `Session::regenerate()` — po logowaniu
 - handler sesji implementuje `validateId()`; bez tego `session.use_strict_mode=1` nie odrzuca obcego ID
