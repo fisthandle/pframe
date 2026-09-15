@@ -165,7 +165,7 @@ Skrypt jest tylko do odczytu: porównuje kopie z `src/`, raportuje rozjazdy i ni
 - Zachowuj 1TBS/K&R (otwierający nawias w tej samej linii) oraz polskie komunikaty użytkowe.
 - Null-safe wrappery na funkcje PHP mają sufiks `S` (`trimS`, `countS`, `strtotimeS`). Nie twórz równoległej konwencji.
 - `src/PFrame.php` jest źródłem prawdy. Przy zmianie SQL zaktualizuj testy, które celowo asertują literalne zapytania; po nieudanym patchu najpierw przeczytaj świeży diff i bieżący fragment pliku.
-- Producentami kopii konsumenckich są `src/PFrame.php` i `src/PFrameTesting.php`; checker obejmuje `*/lib/` oraz `*/app/lib/`, bez ręcznych list, hashy ani statusów synchronizacji.
+- Producentami kopii konsumenckich są `src/PFrame.php` i `src/PFrameTesting.php`; checker rekurencyjnie znajduje katalogi `lib/`, także w aplikacjach zagnieżdżonych w monorepozytoriach, bez ręcznych list, hashy ani statusów synchronizacji.
 - `example/` jest ignorowane przez Git. Jeśli świadomie zmieniasz demo, waliduj je osobno i nie zakładaj, że pojawi się w `git status`.
 
 ## Wiedza i stan pracy

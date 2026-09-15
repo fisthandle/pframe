@@ -15,21 +15,23 @@ class ConsumerCheckTest extends TestCase {
         mkdir($this->tmpDir, 0777, true);
         $this->script = dirname(__DIR__, 2) . '/bin/check-consumers.sh';
         $this->sourceDir = dirname(__DIR__, 2) . '/src';
+        $this->runGit('init', '--quiet');
     }
 
     protected function tearDown(): void {
         $this->removeTree($this->tmpDir);
     }
 
-    public function testCurrentConsumersInBothSupportedLayoutsPass(): void {
+    public function testCurrentConsumersInAllSupportedLayoutsPass(): void {
         $this->copyConsumer('first/lib');
         $this->copyConsumer('second/app/lib');
+        $this->copyConsumer('third/apps/publisher/lib');
 
         $result = $this->runCheck();
 
         $this->assertSame(0, $result['exit'], $result['output']);
         $this->assertStringContainsString('All consumers up to date.', $result['output']);
-        $this->assertSame(4, substr_count($result['output'], 'CURRENT'));
+        $this->assertSame(6, substr_count($result['output'], 'CURRENT'));
     }
 
     public function testOutdatedConsumerFails(): void {
@@ -50,12 +52,31 @@ class ConsumerCheckTest extends TestCase {
         $this->assertStringContainsString('No consumers found', $result['output']);
     }
 
-    private function copyConsumer(string $relativeDir): string {
+    public function testUntrackedNestedCopiesAreIgnored(): void {
+        $this->copyConsumer('artifacts/build/lib', false);
+
+        $result = $this->runCheck();
+
+        $this->assertSame(2, $result['exit'], $result['output']);
+        $this->assertStringNotContainsString('artifacts/build', $result['output']);
+    }
+
+    private function copyConsumer(string $relativeDir, bool $tracked = true): string {
         $dir = $this->tmpDir . '/' . $relativeDir;
         mkdir($dir, 0777, true);
         copy($this->sourceDir . '/PFrame.php', $dir . '/PFrame.php');
         copy($this->sourceDir . '/PFrameTesting.php', $dir . '/PFrameTesting.php');
+        if ($tracked) {
+            $this->runGit('add', '--', $relativeDir . '/PFrame.php', $relativeDir . '/PFrameTesting.php');
+        }
         return $dir;
+    }
+
+    private function runGit(string ...$arguments): void {
+        $pipes = [];
+        $process = proc_open(['git', '-C', $this->tmpDir, ...$arguments], [], $pipes);
+        $this->assertIsResource($process);
+        $this->assertSame(0, proc_close($process));
     }
 
     /** @return array{exit: int, output: string} */

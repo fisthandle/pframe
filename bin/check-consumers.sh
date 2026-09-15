@@ -57,26 +57,38 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 found=0
-# Scan both lib/ and app/lib/ locations (posredniak uses app/lib/)
-for lib_file in "$DEV_DIR"/*/lib/PFrame.php "$DEV_DIR"/*/app/lib/PFrame.php; do
-    [[ -f "$lib_file" ]] || continue
-    lib_dir="$(dirname "$lib_file")"
-    proj_dir="${lib_file%/lib/PFrame.php}"
-    proj_dir="${proj_dir%/app}"
-    proj_name="$(basename "$proj_dir")"
+# Scan tracked consumer lib/ files, including nested applications in monorepositories.
+repo_dirs=()
+if [[ -e "$DEV_DIR/.git" ]]; then
+    repo_dirs+=("$DEV_DIR")
+else
+    for repo_dir in "$DEV_DIR"/*; do
+        [[ -e "$repo_dir/.git" ]] || continue
+        repo_dirs+=("$repo_dir")
+    done
+fi
 
-    # skip pframe itself
-    [[ "$proj_name" == "pframe" ]] && continue
+for repo_dir in "${repo_dirs[@]}"; do
+    while IFS= read -r -d '' relative_path; do
+        lib_file="$repo_dir/$relative_path"
+        lib_dir="$(dirname "$lib_file")"
+        consumer_dir="${lib_file%/lib/PFrame.php}"
+        consumer_name="${consumer_dir#"$DEV_DIR"/}"
+        consumer_name="${consumer_name%/app}"
+        proj_name="${consumer_name%%/*}"
 
-    found=1
-    echo -e "${BOLD}$proj_name${NC}"
-    check_file "$SRC_PFRAME" "$lib_dir/PFrame.php" "PFrame.php"
-    check_file "$SRC_TESTING" "$lib_dir/PFrameTesting.php" "PFrameTesting.php"
-    echo ""
+        [[ "$proj_name" == "pframe" ]] && continue
+
+        found=1
+        echo -e "${BOLD}$consumer_name${NC}"
+        check_file "$SRC_PFRAME" "$lib_dir/PFrame.php" "PFrame.php"
+        check_file "$SRC_TESTING" "$lib_dir/PFrameTesting.php" "PFrameTesting.php"
+        echo ""
+    done < <(git -C "$repo_dir" ls-files -z -- ':(glob)**/lib/PFrame.php')
 done
 
 if [[ $found -eq 0 ]]; then
-    echo "No consumers found in $DEV_DIR/{*/lib,*/app/lib}/PFrame.php"
+    echo "No consumers found under $DEV_DIR (expected */lib/PFrame.php)"
     exit 2
 fi
 

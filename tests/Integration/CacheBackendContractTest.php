@@ -46,12 +46,12 @@ class CacheBackendContractTest extends TestCase {
             $cache = $expected === 'apcu' ? new Cache() : new Cache($dir);
             $key = 'ttl-contract-' . bin2hex(random_bytes(6));
             $permanentKey = $key . '-permanent';
-            $cache->set($key, 1, 2);
+            $cache->set($key, 1, 1);
             $cache->set($permanentKey, 7);
 
             $this->assertSame(2, $cache->increment($key, 60));
             $this->assertSame(8, $cache->increment($permanentKey, 1));
-            sleep(3);
+            sleep(2);
             $this->assertSame('expired', $cache->get($key, 'expired'));
             $this->assertSame(8, $cache->get($permanentKey));
             $this->assertSame(1, $cache->increment($key, 60));

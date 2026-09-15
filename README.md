@@ -425,6 +425,7 @@ JSON requests (`postJson`) send CSRF via `X-Csrf-Token` header (matching product
 ## Migration Compatibility
 
 For F3-to-PFrame migration scenarios, the framework now includes:
+- case-insensitive route matching with original parameter values preserved
 - `Db::trans()`, `Db::count()`, `Db::log()`
 - `Controller` view data bag (`set()` / `get()`) auto-merged in `render()`
 - `SseResponse` for SSE endpoints

@@ -969,7 +969,7 @@ namespace PFrame {
             $this->routes[] = [
                 'methods' => $methodList,
                 'pattern' => $pattern,
-                'regex' => '#^' . $regex . '/?$#u',
+                'regex' => '#^' . $regex . '/?$#ui',
                 'paramNames' => $paramNames,
                 'controller' => $controller,
                 'action' => $action,
@@ -1500,7 +1500,7 @@ namespace PFrame {
         }
 
         private function normalizeStaticPath(string $path): string {
-            $normalized = rtrim($path, '/');
+            $normalized = strtolower(rtrim($path, '/'));
             return $normalized === '' ? '/' : $normalized;
         }
 

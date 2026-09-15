@@ -29,6 +29,31 @@ class AppTest extends TestCase {
         $this->assertSame('Hello Joe', $response->body);
     }
 
+    public function testRoutesMatchCaseInsensitivelyAndPreserveParameterCase(): void {
+        $app = new App();
+        $app->get('/Admin/Health', HelloStub::class, 'index');
+        $app->get('/Forum/{name}', HelloStub::class, 'greet');
+        $app->route('GET', '/Assets/*', WildcardCtrl::class, 'show');
+
+        $static = $app->handle(new Request(method: 'GET', path: '/admin/health'));
+        $parameterized = $app->handle(new Request(method: 'GET', path: '/forum/ClosedByAdmin'));
+        $wildcard = $app->handle(new Request(method: 'GET', path: '/assets/Logo.PNG'));
+
+        $this->assertSame(200, $static->status);
+        $this->assertSame('Hello ClosedByAdmin', $parameterized->body);
+        $this->assertSame('Logo.PNG', $wildcard->body);
+    }
+
+    public function testMethodNotAllowedDetectionIsCaseInsensitive(): void {
+        $app = new App();
+        $app->post('/Admin/Submit/{id}', HelloStub::class, 'submit');
+
+        $response = $app->handle(new Request(method: 'GET', path: '/admin/submit/42'));
+
+        $this->assertSame(405, $response->status);
+        $this->assertSame('POST', $response->headers['Allow']);
+    }
+
     public function testStaticRouteMatchesWithTrailingSlash(): void {
         $app = new App();
         $app->get('/about/', StaticRouteStub::class, 'index');
