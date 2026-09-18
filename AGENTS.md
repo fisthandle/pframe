@@ -159,6 +159,11 @@ Skrypt jest tylko do odczytu: porównuje kopie z `src/`, raportuje rozjazdy i ni
 - `Cache::pruneExpired(1000)` uruchamiaj okresowo przez `Tick`/cron, bo nieodczytywane wygasłe pliki nie sprzątają się same
 - OPcache preload: `require_once`, nie `opcache_compile_file`
 - `Tick`: `tryLock()` = flock only; `between()` wspiera okna przez północ; `inTimeWindow(?string $now)` testowalny
+- PHPUnit 11.5 nie obsługuje `-v`; użyj zwykłego uruchomienia albo `--debug`.
+- Gdy PHPStan nie rozpoznaje globalnego helpera z `namespace {}`, preferuj
+  punktowe `@phpstan-ignore-next-line` zamiast komplikowania parsera docblocków.
+- Test fallbacku `error_log()` musi snapshotować i przywracać statyczny stan
+  loggera. Po ręcznym dodaniu testu od razu sprawdź unikalność nazwy `test...`.
 
 ## Konwencje i zakres
 
@@ -170,6 +175,6 @@ Skrypt jest tylko do odczytu: porównuje kopie z `src/`, raportuje rozjazdy i ni
 
 ## Wiedza i stan pracy
 
-- Ten rootowy `AGENTS.md` jest kanoniczną instrukcją. `.codex/napkin.md` jest krótkim inboxem niepromowanych korekt; usuń wpis po utrwaleniu go w kodzie, teście lub tutaj.
+- Ten rootowy `AGENTS.md` jest kanoniczną instrukcją.
 - Dłuższe, zweryfikowane rozwiązanie umieść w dokumentacji tematycznej. Jeśli powstanie backlog, użyj jednego `tasks/TODO.md`.
 - Nowy plan w `docs/plans/` musi mieć status `draft`, `approved`, `active`, `done` albo `superseded`. Nie zakładaj, że istniejący plan jest aktywny bez porównania z kodem.
