@@ -103,6 +103,40 @@ class DbTest extends TestCase {
         $this->assertSame(3, $this->db->insertGetId('INSERT INTO users (name, email) VALUES (?, ?)', ['New', 'new@x.com']));
     }
 
+    public function testInsertGetIdReturnsZeroForIgnoredInsertAndPreservesSubsequentOperations(): void {
+        $this->db->exec('CREATE UNIQUE INDEX users_email_unique ON users(email)');
+        $this->assertSame(
+            3,
+            $this->db->insertGetId('INSERT INTO users (name, email) VALUES (?, ?)', ['New', 'new@x.com'])
+        );
+        $this->db->exec(
+            'INSERT INTO users (id, name, email) VALUES (?, ?, ?)',
+            [42, 'Unrelated', 'unrelated@x.com']
+        );
+
+        $this->db->begin();
+        $this->assertSame(
+            0,
+            $this->db->insertGetId(
+                'INSERT OR IGNORE INTO users (name, email) VALUES (?, ?)',
+                ['Duplicate', 'new@x.com']
+            )
+        );
+        $this->assertSame(0, $this->db->count());
+        $this->assertTrue($this->db->trans());
+        $this->assertSame(
+            43,
+            $this->db->insertGetId('INSERT INTO users (name, email) VALUES (?, ?)', ['After', 'after@x.com'])
+        );
+        $this->db->rollback();
+
+        $this->assertFalse($this->db->trans());
+        $this->assertSame(
+            43,
+            $this->db->insertGetId('INSERT INTO users (name, email) VALUES (?, ?)', ['Committed', 'committed@x.com'])
+        );
+    }
+
     public function testLastInsertIdReturnsPdoLastInsertId(): void {
         $this->db->exec('CREATE TABLE IF NOT EXISTS lid_test (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)');
         $this->db->exec('INSERT INTO lid_test (name) VALUES (?)', ['foo']);

@@ -2081,6 +2081,9 @@ namespace PFrame {
             $this->executeQuery($sql, $params, false, function (\PDOStatement $stmt): void {
                 $this->lastRowCount = $stmt->rowCount();
             });
+            if ($this->lastRowCount === 0) {
+                return 0;
+            }
             return (int) $this->pdo->lastInsertId();
         }
 
