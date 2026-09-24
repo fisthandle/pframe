@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Wydaje bieżący commit PFrame do konsumentów: kopiuje src/PFrame.php (i PFrameTesting.php,
+# jeśli konsument go używa), uruchamia `composer test` konsumenta i commituje kopię.
+# Przy błędzie testów kopia jest cofana. Deploy konsumentów pozostaje ich własną procedurą.
+set -euo pipefail
+
+PFRAME_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=consumers.sh
+source "$PFRAME_DIR/bin/consumers.sh"
+
+usage() {
+    echo "Usage: $0 [--push] [--dev-dir DIR] [consumer ...]"
+    echo "Bez nazw konsumentów wydaje do wszystkich nieaktualnych."
+}
+
+PUSH=0
+DEV_DIR="$(dirname "$PFRAME_DIR")"
+SELECTED=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --push) PUSH=1 ;;
+        --dev-dir) DEV_DIR="$2"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        -*) usage; exit 2 ;;
+        *) SELECTED+=("$1") ;;
+    esac
+    shift
+done
+DEV_DIR="$(cd "$DEV_DIR" && pwd)"
+
+if [[ -n "$(git -C "$PFRAME_DIR" status --porcelain)" ]]; then
+    echo "PFrame ma niezacommitowane zmiany; wydawany może być tylko commit." >&2
+    exit 1
+fi
+git -C "$PFRAME_DIR" fetch --quiet origin
+if ! git -C "$PFRAME_DIR" merge-base --is-ancestor HEAD origin/main; then
+    echo "HEAD PFrame nie jest w origin/main; najpierw wypchnij commit." >&2
+    exit 1
+fi
+
+echo "== PFrame: testy"
+(cd "$PFRAME_DIR" && bin/test quick >/dev/null && composer phpstan >/dev/null)
+
+SHA="$(git -C "$PFRAME_DIR" rev-parse --short HEAD)"
+SUBJECT="$(git -C "$PFRAME_DIR" log -1 --format=%s)"
+
+declare -A LIB_DIRS=()
+while IFS= read -r -d '' lib_dir; do
+    LIB_DIRS["$(pframe_consumer_name "$DEV_DIR" "$lib_dir")"]="$lib_dir"
+done < <(pframe_consumer_lib_dirs "$DEV_DIR")
+
+if [[ ${#SELECTED[@]} -eq 0 ]]; then
+    mapfile -t SELECTED < <(printf '%s\n' "${!LIB_DIRS[@]}" | sort)
+fi
+for name in "${SELECTED[@]}"; do
+    if [[ -z "${LIB_DIRS[$name]:-}" ]]; then
+        echo "Nie znaleziono konsumenta: $name" >&2
+        exit 1
+    fi
+done
+
+# Kopia w toku jest cofana przy każdym przerwaniu: błąd testów, hook commita, Ctrl-C.
+pending_repo=""
+pending_files=()
+rollback() {
+    [[ -n "$pending_repo" ]] && git -C "$pending_repo" checkout -- "${pending_files[@]}"
+    pending_repo=""
+}
+trap 'rollback; exit 130' INT TERM
+trap rollback EXIT
+
+failed=()
+for name in "${SELECTED[@]}"; do
+    lib_dir="${LIB_DIRS[$name]}"
+    files=("$lib_dir/PFrame.php")
+    [[ -f "$lib_dir/PFrameTesting.php" ]] && files+=("$lib_dir/PFrameTesting.php")
+    outdated=0
+    for file in "${files[@]}"; do
+        cmp -s "$PFRAME_DIR/src/$(basename "$file")" "$file" || outdated=1
+    done
+    if [[ $outdated -eq 0 ]]; then
+        echo "== $name: aktualny"
+        continue
+    fi
+
+    repo="$(git -C "$lib_dir" rev-parse --show-toplevel)"
+    if [[ -n "$(git -C "$repo" status --porcelain)" ]]; then
+        echo "== $name: POMINIĘTY — niezacommitowane zmiany w $repo"
+        failed+=("$name")
+        continue
+    fi
+    if [[ $PUSH -eq 1 ]] && ! git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+        echo "== $name: POMINIĘTY — gałąź bez upstreamu, --push niemożliwy"
+        failed+=("$name")
+        continue
+    fi
+
+    echo "== $name: kopia $SHA i testy"
+    pending_repo="$repo"
+    pending_files=("${files[@]}")
+    for file in "${files[@]}"; do
+        cp "$PFRAME_DIR/src/$(basename "$file")" "$file"
+    done
+    log="$(mktemp -t "pframe-release-${name//\//-}-XXXX.log")"
+    if ! (cd "$repo" && composer test) >"$log" 2>&1; then
+        rollback
+        echo "   BŁĄD testów, kopia cofnięta; log: $log"
+        failed+=("$name")
+        continue
+    fi
+    if ! git -C "$repo" commit --quiet -m "Update PFrame to $SHA" -m "$SUBJECT" -- "${files[@]}" >>"$log" 2>&1; then
+        rollback
+        echo "   BŁĄD commita (hook?), kopia cofnięta; log: $log"
+        failed+=("$name")
+        continue
+    fi
+    pending_repo=""
+    echo "   commit $(git -C "$repo" rev-parse --short HEAD) na $(git -C "$repo" branch --show-current)"
+    if [[ $PUSH -eq 1 ]]; then
+        if git -C "$repo" push --quiet >>"$log" 2>&1; then
+            echo "   wypchnięty"
+        else
+            echo "   BŁĄD push (commit zostaje lokalnie); log: $log"
+            failed+=("$name")
+        fi
+    fi
+done
+
+if [[ ${#failed[@]} -gt 0 ]]; then
+    echo "Niewydane: ${failed[*]}" >&2
+    exit 1
+fi

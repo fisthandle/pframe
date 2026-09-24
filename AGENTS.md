@@ -142,6 +142,16 @@ Kopie `PFrame.php` i `PFrameTesting.php` w projektach pod `/home/pawel/dev` spra
 
 Skrypt jest tylko do odczytu: porównuje kopie z `src/`, raportuje rozjazdy i nie synchronizuje plików.
 
+Wydanie zmiany do konsumentów (bez ręcznego kopiowania):
+```bash
+./bin/release [--push] [konsument ...]   # bez nazw: wszyscy nieaktualni
+```
+Wymaga czystego drzewa i HEAD obecnego w `origin/main`, uruchamia `bin/test quick` i PHPStan
+PFrame, a u każdego nieaktualnego konsumenta z czystym drzewem kopiuje pliki, uruchamia jego
+`composer test` i commituje „Update PFrame to <sha>”. Błąd testów, odrzucenie commita przez hook lub
+przerwanie cofa kopię; konsument z niezacommitowanymi zmianami (a przy `--push` bez upstreamu) jest pomijany. Deploy każdego konsumenta wykonuje się jego własną procedurą.
+Każdy konsument musi mieć skrypt `composer test`.
+
 ## Gotchas
 
 - `paginate()` zwraca `per_page`/`offset`, NIE `limit`
