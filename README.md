@@ -68,6 +68,7 @@ return [
     'performance' => [
         'server_timing' => false, // true lokalnie: metryki w DevTools/HTTP
         'slow_ms' => 70,          // 0 wyłącza log wolnych requestów
+        'trace' => false,         // true: pełny ślad każdego żądania w YYYYMMDD_perf.jsonl
     ],
 ];
 ```
@@ -194,9 +195,25 @@ Aggregate query count, total time and fetched rows are always available through
 analysis and slowest-query details remain opt-in through `db.log_queries=true`; this avoids retaining
 parameters and growing a per-request SQL log in production.
 
+Set `performance.trace=true` to append one JSON record per request to `YYYYMMDD_perf.jsonl` in the
+directory configured with `Log::init()` (or to PHP's error log if no directory was configured).
+Each record contains method, path, status, matched route pattern/name/controller/action, resource
+metrics, database totals, and chronological events with start offset and duration in milliseconds.
+Events include request parsing, dispatch, routing, middleware, controller, finalization, each rendered
+template, each PFrame `Db` query, session start/lock, and custom `App::measure()` spans. SQL events
+contain the SQL passed to `Db`, execution and fetch times, and row counts; bound parameter values
+are not expanded. `db.log_queries` does not need to be enabled. For `run()` and `runWorkerRequest()`,
+the trace also includes response sending (including SSE callbacks), the final status, and session
+closing and its SQL. Direct `handle()` calls have no send lifecycle and are logged after response
+generation. Early `sendAndExit()` is logged at PHP shutdown. Nested event durations overlap, so they
+should not be added together. Rotate and
+compress the JSONL file according to the application's traffic and retention policy.
+
 `cpu_ms` and derived `wait_ms` are reported only on non-thread-safe PHP builds. On ZTS runtimes such
 as FrankenPHP they are `null`, because PHP's `getrusage()` reports process-wide CPU and cannot safely
 attribute concurrent worker requests. Wall-clock timings and all named spans remain available.
+`peak_mb` comes from PHP's process peak and can include earlier requests in a long-running worker;
+it is not an isolated per-request peak.
 
 ### Global Helpers
 

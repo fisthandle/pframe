@@ -94,6 +94,9 @@ class ViewTest extends TestCase {
         file_put_contents($dir . '/throw.php', '<?php throw new \RuntimeException("boom");');
 
         $view = new View($dir);
+        $performance = new Performance();
+        $performance->setTraceEnabled(true);
+        $view->setPerformance($performance);
         $levelBefore = ob_get_level();
 
         try {
@@ -107,6 +110,8 @@ class ViewTest extends TestCase {
         }
 
         $this->assertSame($levelBefore, ob_get_level(), 'OB level must be restored after exception');
+        $this->assertSame('throw.php', $performance->traceEvents()[0]['details']['template']);
+        $this->assertSame(\RuntimeException::class, $performance->traceEvents()[0]['details']['error']);
     }
 
     public function testRenderFileExceptionCleansNestedOutputBuffers(): void {

@@ -9,6 +9,7 @@ use PFrame\HttpException;
 use PFrame\Log;
 use PFrame\Request;
 use PFrame\Response;
+use PFrame\View;
 use PHPUnit\Framework\TestCase;
 
 class AppTest extends TestCase {
@@ -692,6 +693,93 @@ class AppTest extends TestCase {
         }
     }
 
+    public function testTraceFlagWritesRouteMiddlewareTemplatesAndEverySqlQuery(): void {
+        $tmpDir = sys_get_temp_dir() . '/pframe_trace_log_' . bin2hex(random_bytes(6));
+        mkdir($tmpDir);
+        $basePath = new \ReflectionProperty(Log::class, 'basePath');
+        $minLevel = new \ReflectionProperty(Log::class, 'minLevel');
+        $previousBasePath = $basePath->getValue();
+        $previousMinLevel = $minLevel->getValue();
+
+        try {
+            Log::init($tmpDir);
+            $app = new App();
+            $app->setConfig('db', ['dsn' => 'sqlite::memory:']);
+            $app->setConfig('performance.trace', true);
+            $app->addMiddleware(static fn(Request $request, callable $next): Response => $next($request));
+            $app->get('/trace/{id}', TraceCtrl::class, 'run', [
+                static fn(Request $request, callable $next): Response => $next($request),
+            ], name: 'trace.show');
+
+            $response = $app->handle(new Request(method: 'GET', path: '/trace/42'));
+
+            $this->assertSame(200, $response->status);
+            $files = glob($tmpDir . '/*_perf.jsonl') ?: [];
+            $this->assertCount(1, $files);
+            $this->assertMatchesRegularExpression('/^\d{8}_perf\.jsonl$/', basename($files[0]));
+            $trace = json_decode(trim((string) file_get_contents($files[0])), true, flags: JSON_THROW_ON_ERROR);
+            $this->assertSame('trace.show', $trace['route']['name']);
+            $this->assertSame('/trace/{id}', $trace['route']['pattern']);
+            $this->assertSame(2, $trace['db_count']);
+            $this->assertGreaterThan(0, $trace['performance']['app_ms']);
+
+            $events = $trace['events'];
+            $sql = array_values(array_filter($events, static fn(array $event): bool => $event['name'] === 'sql'));
+            $templates = array_values(array_filter($events, static fn(array $event): bool => $event['name'] === 'template'));
+            $middlewares = array_values(array_filter($events, static fn(array $event): bool => $event['name'] === 'middleware'));
+            $this->assertCount(2, $sql);
+            $this->assertSame('SELECT ? AS value', $sql[0]['details']['sql']);
+            $this->assertSame('SELECT ? AS value', $sql[1]['details']['sql']);
+            $this->assertArrayHasKey('execute_ms', $sql[0]['details']);
+            $this->assertArrayHasKey('fetch_ms', $sql[0]['details']);
+            $this->assertCount(2, $templates);
+            $this->assertSame(['with_partial.php', '_item.php'], array_column(array_column($templates, 'details'), 'template'));
+            $this->assertCount(2, $middlewares);
+            $this->assertSame('global', $middlewares[0]['details']['scope']);
+            $this->assertSame('route', $middlewares[1]['details']['scope']);
+            $this->assertContains('route', array_column($events, 'name'));
+            $this->assertContains('controller', array_column($events, 'name'));
+            $this->assertContains('custom_step', array_column($events, 'name'));
+            $offsets = array_column($events, 'at_ms');
+            $orderedOffsets = $offsets;
+            sort($orderedOffsets);
+            $this->assertSame($orderedOffsets, $offsets);
+            $this->assertSame([], array_filter($events, static fn(array $event): bool => $event['at_ms'] < 0 || $event['ms'] < 0));
+
+            $app->resetRequestState();
+            $app->db()->resetRequestState();
+            $app->handle(new Request(method: 'GET', path: '/missing'));
+            $lines = file($files[0], FILE_IGNORE_NEW_LINES);
+            $this->assertCount(2, $lines);
+            $notFound = json_decode($lines[1], true, flags: JSON_THROW_ON_ERROR);
+            $this->assertSame(404, $notFound['status']);
+            $this->assertNull($notFound['route']);
+            $this->assertSame(0, $notFound['db_count']);
+            $this->assertNotContains('sql', array_column($notFound['events'], 'name'));
+
+            $app->resetRequestState();
+            $app->db()->resetRequestState();
+            $app->performance()->traceEvent('bad', hrtime(true), INF);
+            $app->performance()->traceEvent('bad_start', INF, 1.0);
+            $app->performance()->traceEvent('sanitized', hrtime(true), 0.1, ['value' => INF]);
+            $app->handle(new Request(method: 'GET', path: '/missing'));
+            $lines = file($files[0], FILE_IGNORE_NEW_LINES);
+            $this->assertCount(3, $lines);
+            $validTrace = json_decode($lines[2], true, flags: JSON_THROW_ON_ERROR);
+            $this->assertNotContains('bad', array_column($validTrace['events'], 'name'));
+            $this->assertNotContains('bad_start', array_column($validTrace['events'], 'name'));
+            $sanitized = array_values(array_filter($validTrace['events'], static fn(array $event): bool => $event['name'] === 'sanitized'));
+            $this->assertNull($sanitized[0]['details']['value']);
+        } finally {
+            foreach (glob($tmpDir . '/*') ?: [] as $file) {
+                @unlink($file);
+            }
+            @rmdir($tmpDir);
+            $basePath->setValue(null, $previousBasePath);
+            $minLevel->setValue(null, $previousMinLevel);
+        }
+    }
+
     public function testResetRequestStateResetsElapsed(): void {
         $app = new App();
         usleep(10000); // 10ms
@@ -914,6 +1002,17 @@ class SlowCtrl {
     public function run(): Response {
         usleep(1000);
         return new Response('ok');
+    }
+}
+
+class TraceCtrl {
+    public function run(Request $request, App $app): Response {
+        $app->db()->exec('SELECT ? AS value', [1]);
+        $app->measure('custom.step', static fn(): int => 42);
+        $app->db()->exec('SELECT ? AS value', [2]);
+        $view = new View(__DIR__ . '/../fixtures/templates');
+        $app->setLastView($view);
+        return Response::html($view->render('with_partial.php', ['items' => ['a']]));
     }
 }
 

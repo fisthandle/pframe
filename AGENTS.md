@@ -38,6 +38,7 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 - automatyczne spany obejmują request/router/controller/finalize, DB connect/execute/fetch, widoki oraz start i blokadę sesji
 - `performance.server_timing=true` dodaje standardowy nagłówek `Server-Timing`; domyślnie jest wyłączony
 - `performance.slow_ms=N` loguje requesty od progu `N` ms razem ze spanami i agregatami DB; `0` wyłącza log
+- `performance.trace=true` zapisuje JSONL w `YYYYMMDD_perf.jsonl` z chronologicznymi spanami, każdym szablonem i SQL przez `Db` (bez rozwijania parametrów); `run()`/worker domykają ślad po wysyłce i zapisie sesji
 - na PHP ZTS `cpu_ms` i `wait_ms` są `null`, bo `getrusage()` mierzy cały współbieżny proces; wall time i spany pozostają poprawne
 - używaj `$app->startSession()` zamiast surowego `session_start()`, aby zmierzyć oczekiwanie na start sesji
 

@@ -491,7 +491,12 @@ namespace PFrame {
         }
 
         public function sendAndExit(): never {
-            $this->send();
+            $app = App::currentInstance();
+            if ($app?->performance()->traceEnabled() === true) {
+                $app->performance()->measure('response.send', fn() => $this->send());
+            } else {
+                $this->send();
+            }
             exit;
         }
     }
@@ -549,11 +554,21 @@ namespace PFrame {
         private const MAX_SERVER_TIMING_SPANS = 20;
 
         private int $appStartNs;
+        private float $appStartWall;
         private float $phpStartWall;
         private ?float $cpuStartMs;
 
         /** @var array<string, array{ms: float, count: int}> */
         private array $spans = [];
+
+        private bool $traceEnabled = false;
+
+        /** @var list<array{name: string, at_ms: float, ms: float, details: array<string, int|string|float|null>}> */
+        private array $events = [];
+
+        /** @var array<int, array{name: string, start: int|float, details: array<string, int|string|float|null>}> */
+        private array $activeTraceMeasures = [];
+        private int $nextTraceMeasureId = 0;
 
         public function __construct() {
             $this->resetRequestState();
@@ -561,23 +576,92 @@ namespace PFrame {
 
         public function resetRequestState(): void {
             $this->appStartNs = hrtime(true);
+            $this->appStartWall = microtime(true);
             $this->phpStartWall = $this->resolvePhpStartWall();
             $this->cpuStartMs = $this->cpuMilliseconds();
             $this->spans = [];
+            $this->events = [];
+            $this->activeTraceMeasures = [];
+            $this->nextTraceMeasureId = 0;
+        }
+
+        public function setTraceEnabled(bool $enabled): void {
+            $this->traceEnabled = $enabled;
+            if (!$enabled) {
+                $this->events = [];
+                $this->activeTraceMeasures = [];
+            }
+        }
+
+        public function traceEnabled(): bool {
+            return $this->traceEnabled;
+        }
+
+        /** @return list<array{name: string, at_ms: float, ms: float, details: array<string, int|string|float|null>}> */
+        public function traceEvents(): array {
+            $events = $this->events;
+            usort($events, static fn(array $a, array $b): int => $a['at_ms'] <=> $b['at_ms']);
+            foreach ($events as &$event) {
+                $event['at_ms'] = round($event['at_ms'], 3);
+            }
+            unset($event);
+            return $events;
+        }
+
+        public function clearTraceEvents(): void {
+            $this->events = [];
+        }
+
+        public function finishActiveTraceMeasures(): void {
+            foreach ($this->activeTraceMeasures as $measure) {
+                $milliseconds = (hrtime(true) - $measure['start']) / 1_000_000;
+                $this->record($measure['name'], $milliseconds);
+                $this->traceEvent($measure['name'], $measure['start'], $milliseconds, $measure['details'] + ['incomplete' => 1]);
+            }
+            $this->activeTraceMeasures = [];
         }
 
         /**
          * @template T
          * @param callable(): T $callback
+         * @param array<string, int|string|float|null> $details
          * @return T
          */
-        public function measure(string $name, callable $callback): mixed {
+        public function measure(string $name, callable $callback, array $details = []): mixed {
             $start = hrtime(true);
+            $traceId = null;
+            if ($this->traceEnabled) {
+                $traceId = ++$this->nextTraceMeasureId;
+                $this->activeTraceMeasures[$traceId] = ['name' => $name, 'start' => $start, 'details' => $details];
+            }
             try {
                 return $callback();
             } finally {
-                $this->record($name, (hrtime(true) - $start) / 1_000_000);
+                if ($traceId !== null) {
+                    unset($this->activeTraceMeasures[$traceId]);
+                }
+                $milliseconds = (hrtime(true) - $start) / 1_000_000;
+                $this->record($name, $milliseconds);
+                $this->traceEvent($name, $start, $milliseconds, $details);
             }
+        }
+
+        /** @param array<string, int|string|float|null> $details */
+        public function traceEvent(string $name, int|float $startNs, float $milliseconds, array $details = []): void {
+            if (!$this->traceEnabled || !is_finite((float) $startNs) || $milliseconds < 0 || !is_finite($milliseconds)) {
+                return;
+            }
+            foreach ($details as $key => $value) {
+                if (is_float($value) && !is_finite($value)) {
+                    $details[$key] = null;
+                }
+            }
+            $this->events[] = [
+                'name' => $this->normalizeName($name),
+                'at_ms' => ($startNs - $this->appStartNs) / 1_000_000,
+                'ms' => round($milliseconds, 3),
+                'details' => $details,
+            ];
         }
 
         public function record(string $name, float $milliseconds): void {
@@ -597,6 +681,10 @@ namespace PFrame {
 
         public function appMilliseconds(): float {
             return (hrtime(true) - $this->appStartNs) / 1_000_000;
+        }
+
+        public function appStartedAt(): float {
+            return $this->appStartWall;
         }
 
         /** @return array{php_ms: float, app_ms: float, cpu_ms: ?float, wait_ms: ?float, mem_mb: float, peak_mb: float, spans: array<string, array{ms: float, count: int}>} */
@@ -729,6 +817,16 @@ namespace PFrame {
         private ?Db $db = null;
         private ?View $lastView = null;
 
+        /** @var array{pattern: string, name: ?string, controller: string, action: string}|null */
+        private ?array $matchedRoute = null;
+
+        private ?Request $traceRequest = null;
+        private ?Response $traceResponse = null;
+        private ?string $traceError = null;
+        private bool $traceStarted = false;
+        private bool $traceDeferred = false;
+        private bool $traceWritten = false;
+
         private Performance $performance;
 
         public function __construct() {
@@ -766,9 +864,20 @@ namespace PFrame {
             return $instance;
         }
 
+        public static function currentInstance(): ?self {
+            return self::$instance;
+        }
+
         public function resetRequestState(): void {
             $this->performance->resetRequestState();
             $this->lastView = null;
+            $this->matchedRoute = null;
+            $this->traceRequest = null;
+            $this->traceResponse = null;
+            $this->traceError = null;
+            $this->traceStarted = false;
+            $this->traceDeferred = false;
+            $this->traceWritten = false;
         }
 
         public function loadConfig(string $path): void {
@@ -781,6 +890,7 @@ namespace PFrame {
             }
             $values = self::stringKeyedArray($values, 'Config must use string keys: ' . $path);
             $this->configData = array_replace_recursive($this->configData, $values);
+            $this->performance->setTraceEnabled($this->config('performance.trace', false) === true);
             if (isset($this->configData['timezone']) && is_string($this->configData['timezone'])) {
                 date_default_timezone_set($this->configData['timezone']);
             }
@@ -838,6 +948,7 @@ namespace PFrame {
             $segments = explode('.', $key);
             if (count($segments) === 1) {
                 $this->configData[$key] = $value;
+                $this->performance->setTraceEnabled($this->config('performance.trace', false) === true);
                 return;
             }
 
@@ -853,6 +964,7 @@ namespace PFrame {
                 }
                 $cursor = &$cursor[$segment];
             }
+            $this->performance->setTraceEnabled($this->config('performance.trace', false) === true);
         }
 
         public function db(): Db {
@@ -1040,16 +1152,38 @@ namespace PFrame {
 
         /** @param array<string, mixed> $options */
         public function startSession(array $options = []): bool {
+            if ($this->performance->traceEnabled()) {
+                $this->traceStarted = true;
+            }
             if (session_status() === PHP_SESSION_ACTIVE) {
                 return true;
             }
-            return $this->performance->measure(
-                'session.start',
-                static fn(): bool => session_start($options),
-            );
+            try {
+                $started = $this->performance->measure(
+                    'session.start',
+                    static fn(): bool => session_start($options),
+                );
+            } catch (\Throwable $e) {
+                if ($this->performance->traceEnabled()) {
+                    $this->traceError = 'session.start:' . $e::class;
+                }
+                throw $e;
+            }
+            if (!$started && $this->performance->traceEnabled()) {
+                $this->traceError = 'session.start';
+            }
+            return $started;
         }
 
         public function handle(Request $request): Response {
+            $this->matchedRoute = null;
+            if ($this->performance->traceEnabled()) {
+                $this->traceStarted = true;
+                $this->traceRequest = $request;
+                $this->traceResponse = null;
+                $this->traceError = null;
+                $this->traceWritten = false;
+            }
             return $this->withErrorHandler(function () use ($request): Response {
                 $response = $this->performance->measure('dispatch', function () use ($request): Response {
                     try {
@@ -1060,6 +1194,7 @@ namespace PFrame {
                             $request,
                             fn (Request $req): Response => $this->dispatch($req),
                             $this->middleware,
+                            'global',
                         );
                     } catch (HttpException $e) {
                         return $this->handleHttpException($e, $request);
@@ -1093,6 +1228,12 @@ namespace PFrame {
             }
 
             $request->setParams($match['params']);
+            $this->matchedRoute = [
+                'pattern' => $match['pattern'],
+                'name' => $match['name'],
+                'controller' => $match['controller'],
+                'action' => $match['action'],
+            ];
 
             return $this->applyMiddleware(
                 $request,
@@ -1105,11 +1246,12 @@ namespace PFrame {
                     ),
                 ),
                 $match['middleware'],
+                'route',
             );
         }
 
         /**
-         * @return array{controller: string, action: string, params: array<string, string>, middleware: array<callable>}|null
+         * @return array{pattern: string, name: ?string, controller: string, action: string, params: array<string, string>, middleware: array<callable>}|null
          */
         private function matchRoute(string $method, string $path, bool $isAjax): ?array {
             $normalizedPath = $this->normalizeStaticPath($path);
@@ -1136,11 +1278,17 @@ namespace PFrame {
          * @param array<callable> $middleware
          * @param callable(Request): Response $destination
          */
-        private function applyMiddleware(Request $request, callable $destination, array $middleware): Response {
+        private function applyMiddleware(Request $request, callable $destination, array $middleware, string $scope): Response {
             $handler = $destination;
-            foreach (array_reverse($middleware) as $mw) {
+            foreach (array_reverse($middleware, true) as $index => $mw) {
                 $next = $handler;
-                $handler = fn (Request $req): Response => $mw($req, $next);
+                $handler = $this->config('performance.trace', false) === true
+                    ? fn (Request $req): Response => $this->performance->measure(
+                        'middleware',
+                        fn(): Response => $mw($req, $next),
+                        ['scope' => $scope, 'index' => $index],
+                    )
+                    : fn (Request $req): Response => $mw($req, $next);
             }
 
             return $handler($request);
@@ -1148,7 +1296,7 @@ namespace PFrame {
 
         /**
          * @param array<int, int> $indexes
-         * @return array{controller: string, action: string, params: array<string, string>, middleware: array<callable>}|null
+         * @return array{pattern: string, name: ?string, controller: string, action: string, params: array<string, string>, middleware: array<callable>}|null
          */
         private function matchRouteIndexes(array $indexes, string $path, bool $isAjax, bool $staticRoute = false): ?array {
             $ajaxPreference = $isAjax ? [true, false] : [false];
@@ -1174,7 +1322,7 @@ namespace PFrame {
         /**
          * @param array{methods: list<string>, pattern: string, regex: string, paramNames: list<string>, controller: string, action: string, middleware: array<callable>, name: ?string, ajax: bool} $route
          * @param array<int, string> $matches
-         * @return array{controller: string, action: string, params: array<string, string>, middleware: array<callable>}
+         * @return array{pattern: string, name: ?string, controller: string, action: string, params: array<string, string>, middleware: array<callable>}
          */
         private function buildMatchedRoute(array $route, array $matches = []): array {
             $params = [];
@@ -1183,6 +1331,8 @@ namespace PFrame {
             }
 
             return [
+                'pattern' => $route['pattern'],
+                'name' => $route['name'],
                 'controller' => $route['controller'],
                 'action' => $route['action'],
                 'params' => $params,
@@ -1420,7 +1570,13 @@ namespace PFrame {
         }
 
         private function addPerformanceDiagnostics(Response $response, Request $request): Response {
+            if ($this->performance->traceEnabled()) {
+                $this->traceResponse = $response;
+            }
             if ($response instanceof SseResponse) {
+                if (!$this->traceDeferred) {
+                    $this->logRequestTrace();
+                }
                 return $response;
             }
 
@@ -1436,7 +1592,55 @@ namespace PFrame {
                     $this->logSlowRequest($request, $response, $snapshot);
                 }
             }
+            if (!$this->traceDeferred) {
+                $this->logRequestTrace();
+            }
             return $response;
+        }
+
+        private function logRequestTrace(): void {
+            if (!$this->performance->traceEnabled() || $this->traceWritten) {
+                return;
+            }
+            $this->traceWritten = true;
+            $this->performance->finishActiveTraceMeasures();
+            $db = $this->dbIfInitialized();
+            $uri = $_SERVER['REQUEST_URI'] ?? '/';
+            $path = is_string($uri) ? parse_url($uri, PHP_URL_PATH) : '/';
+            $serverMethod = $_SERVER['REQUEST_METHOD'] ?? null;
+            $httpStatus = http_response_code();
+            $method = is_string($serverMethod) ? strtoupper($serverMethod) : 'UNKNOWN';
+            $path = is_string($path) ? $path : '/';
+            if ($this->traceRequest !== null) {
+                $method = $this->traceRequest->method;
+                $path = $this->traceRequest->path;
+            }
+            $status = $this->traceError !== null ? 500 : (is_int($httpStatus) ? $httpStatus : 200);
+            if ($this->traceResponse !== null) {
+                $status = $this->traceResponse->status;
+            }
+            $trace = [
+                'timestamp' => $this->performance->appStartedAt(),
+                'method' => $method,
+                'path' => $path,
+                'status' => $status,
+                'route' => $this->matchedRoute,
+                'performance' => $this->performance->snapshot(),
+                'db_count' => $db?->totalQueryCount() ?? 0,
+                'db_ms' => round(($db?->totalQueryTime() ?? 0.0) * 1000, 2),
+                'db_rows' => $db?->totalFetchedRows() ?? 0,
+                'events' => $this->performance->traceEvents(),
+            ];
+            if ($this->traceError !== null) {
+                $trace['error'] = $this->traceError;
+            }
+            try {
+                Log::toFile('perf.jsonl', json_encode($trace, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR), prefixTimestamp: false, daily: true);
+            } catch (\Throwable $e) {
+                error_log('[PFrame] Request trace failed: ' . $e::class);
+            } finally {
+                $this->performance->clearTraceEvents();
+            }
         }
 
         /** @param array{php_ms: float, app_ms: float, cpu_ms: ?float, wait_ms: ?float, mem_mb: float, peak_mb: float, spans: array<string, array{ms: float, count: int}>} $snapshot */
@@ -1562,77 +1766,114 @@ namespace PFrame {
 
             register_shutdown_function(function (): void {
                 $error = error_get_last();
-                if ($error === null) {
-                    return;
-                }
-                if (!in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
-                    return;
-                }
+                $fatal = $error !== null && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true);
+                if ($fatal) {
+                    Log::error('Fatal error', [
+                        'message' => (string) $error['message'],
+                        'file' => (string) $error['file'],
+                        'line' => (int) $error['line'],
+                    ]);
 
-                Log::error('Fatal error', [
-                    'message' => (string) $error['message'],
-                    'file' => (string) $error['file'],
-                    'line' => (int) $error['line'],
-                ]);
+                    $debug = self::intValue(self::$instance?->config('debug', 0) ?? 0, 0);
+                    $body = $debug >= 3
+                        ? (string) $error['message'] . ' in ' . (string) $error['file'] . ':' . (int) $error['line']
+                        : 'Wystąpił błąd serwera.';
 
-                $debug = self::intValue(self::$instance?->config('debug', 0) ?? 0, 0);
-                $body = $debug >= 3
-                    ? (string) $error['message'] . ' in ' . (string) $error['file'] . ':' . (int) $error['line']
-                    : 'Wystąpił błąd serwera.';
-
-                if (!headers_sent()) {
-                    http_response_code(500);
-                    header('Content-Type: text/plain; charset=UTF-8');
+                    if (!headers_sent()) {
+                        http_response_code(500);
+                        header('Content-Type: text/plain; charset=UTF-8');
+                    }
+                    echo $body;
                 }
-                echo $body;
+                self::$instance?->finishTraceAtShutdown($fatal);
             });
 
             self::$shutdownRegistered = true;
         }
 
-        public function run(): void {
-            $trusted = $this->config('trusted_proxies', []);
-            if (!is_array($trusted)) {
-                $trusted = [];
+        private function finishTraceAtShutdown(bool $fatal): void {
+            if (!$this->performance->traceEnabled() || $this->traceWritten || (!$this->traceDeferred && !$this->traceStarted)) {
+                return;
             }
-            $trusted = array_values(array_filter($trusted, static fn(mixed $ip): bool => is_string($ip) && $ip !== ''));
-            $maxBodyBytes = max(0, self::intValue(
-                $this->config('max_request_body_bytes', Request::DEFAULT_MAX_BODY_BYTES),
-                Request::DEFAULT_MAX_BODY_BYTES,
-            ));
-            $maxMultipartBodyBytes = max(0, self::intValue(
-                $this->config('max_multipart_body_bytes', $maxBodyBytes),
-                $maxBodyBytes,
-            ));
-            $request = $this->performance->measure(
-                'request',
-                fn(): Request => Request::fromGlobalsWithProxies(
-                    $trusted,
-                    $maxBodyBytes,
-                    $maxMultipartBodyBytes,
-                ),
-            );
-            $response = $this->handle($request);
-            try {
-                $response->send();
-            } catch (\Throwable $e) {
-                Log::error('Response send failed', [
-                    'message' => $e->getMessage(),
-                    'file' => $e->getFile(),
-                    'line' => $e->getLine(),
-                ]);
-
-                if ($response instanceof SseResponse || headers_sent()) {
-                    return;
+            if ($fatal) {
+                $this->traceError = 'fatal';
+            }
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                try {
+                    if (!$this->performance->measure('session.close', static fn(): bool => session_write_close())) {
+                        $this->traceError ??= 'session.close';
+                    }
+                } catch (\Throwable $e) {
+                    $this->traceError ??= 'session.close:' . $e::class;
                 }
-
-                $fallback = $this->finalizeResponse($this->handleException($e, $request), $request);
-                $fallback->send();
             }
+            $this->logRequestTrace();
+        }
+
+        public function run(): void {
+            if ($this->performance->traceEnabled()) {
+                $this->traceDeferred = true;
+                $this->traceWritten = false;
+            }
+            try {
+                $trusted = $this->config('trusted_proxies', []);
+                if (!is_array($trusted)) {
+                    $trusted = [];
+                }
+                $trusted = array_values(array_filter($trusted, static fn(mixed $ip): bool => is_string($ip) && $ip !== ''));
+                $maxBodyBytes = max(0, self::intValue(
+                    $this->config('max_request_body_bytes', Request::DEFAULT_MAX_BODY_BYTES),
+                    Request::DEFAULT_MAX_BODY_BYTES,
+                ));
+                $maxMultipartBodyBytes = max(0, self::intValue(
+                    $this->config('max_multipart_body_bytes', $maxBodyBytes),
+                    $maxBodyBytes,
+                ));
+                $request = $this->performance->measure(
+                    'request',
+                    fn(): Request => Request::fromGlobalsWithProxies(
+                        $trusted,
+                        $maxBodyBytes,
+                        $maxMultipartBodyBytes,
+                    ),
+                );
+                $response = $this->handle($request);
+                try {
+                    $this->sendResponse($response);
+                } catch (\Throwable $e) {
+                    $this->traceError = 'response.send:' . $e::class;
+                    Log::error('Response send failed', [
+                        'message' => $e->getMessage(),
+                        'file' => $e->getFile(),
+                        'line' => $e->getLine(),
+                    ]);
+
+                    if ($response instanceof SseResponse || headers_sent()) {
+                        return;
+                    }
+
+                    $fallback = $this->finalizeResponse($this->handleException($e, $request), $request);
+                    $this->traceResponse = $fallback;
+                    $this->sendResponse($fallback);
+                }
+            } catch (\Throwable $e) {
+                $this->traceError ??= $e::class;
+                throw $e;
+            }
+        }
+
+        private function sendResponse(Response $response): void {
+            if ($this->performance->traceEnabled()) {
+                $this->performance->measure('response.send', fn() => $response->send());
+                return;
+            }
+            $response->send();
         }
 
         public function runWorkerRequest(bool $startSession = false): void {
             $this->prepareWorkerRequest();
+
+            $this->traceDeferred = $this->performance->traceEnabled();
 
             try {
                 if ($startSession && session_status() !== PHP_SESSION_ACTIVE) {
@@ -1642,6 +1883,9 @@ namespace PFrame {
                 }
 
                 $this->run();
+            } catch (\Throwable $e) {
+                $this->traceError ??= $e::class;
+                throw $e;
             } finally {
                 $this->finishWorkerRequest();
             }
@@ -1680,7 +1924,10 @@ namespace PFrame {
 
             if (session_status() === PHP_SESSION_ACTIVE) {
                 try {
-                    if (!session_write_close()) {
+                    $closed = $this->performance->traceEnabled()
+                        ? $this->performance->measure('session.close', static fn(): bool => session_write_close())
+                        : session_write_close();
+                    if (!$closed) {
                         throw new \RuntimeException('Failed to close worker session.');
                     }
                 } catch (\Throwable $e) {
@@ -1691,6 +1938,11 @@ namespace PFrame {
                     }
                 }
             }
+
+            if ($cleanupError !== null) {
+                $this->traceError ??= 'worker.cleanup:' . $cleanupError::class;
+            }
+            $this->logRequestTrace();
 
             if ($db !== null) {
                 try {
@@ -1772,7 +2024,9 @@ namespace PFrame {
                     ],
                 );
             } finally {
-                $this->performance?->record('db.connect', (hrtime(true) - $connectStart) / 1_000_000);
+                $connectMs = (hrtime(true) - $connectStart) / 1_000_000;
+                $this->performance?->record('db.connect', $connectMs);
+                $this->performance?->traceEvent('db.connect', $connectStart, $connectMs);
             }
             $driver = $this->pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
             if (!is_string($driver)) {
@@ -1838,6 +2092,12 @@ namespace PFrame {
                 $this->performance?->record('db.fetch', $fetchSeconds * 1000);
             }
             $this->performance?->record('db', $totalSeconds * 1000);
+            $this->performance?->traceEvent('sql', $start, $totalSeconds * 1000, [
+                'sql' => $sql,
+                'execute_ms' => round($executeSeconds * 1000, 3),
+                'fetch_ms' => round($fetchSeconds * 1000, 3),
+                'rows' => $this->lastRowCount,
+            ]);
 
             if ($this->logQueries) {
                 $this->log[] = [
@@ -2415,6 +2675,12 @@ namespace PFrame {
                         break;
                     }
                 }
+                $milliseconds = (hrtime(true) - $start) / 1_000_000;
+                $this->performance?->record('view', $milliseconds);
+                $this->performance?->traceEvent('template', $start, $milliseconds, [
+                    'template' => $template,
+                    'error' => $e::class,
+                ]);
                 throw $e;
             }
 
@@ -2441,6 +2707,7 @@ namespace PFrame {
             $milliseconds = (hrtime(true) - $start) / 1_000_000;
             $this->renderLog[] = ['template' => $template, 'ms' => round($milliseconds, 2)];
             $this->performance?->record('view', $milliseconds);
+            $this->performance?->traceEvent('template', $start, $milliseconds, ['template' => $template]);
             return $result;
         }
     }
@@ -3176,7 +3443,7 @@ namespace PFrame {
             self::log('error', $msg, $ctx);
         }
 
-        public static function toFile(string $filename, string $message): void {
+        public static function toFile(string $filename, string $message, bool $prefixTimestamp = true, bool $daily = false): void {
             if (self::$basePath === null) {
                 error_log('[PFrame] ' . $message);
                 return;
@@ -3189,8 +3456,8 @@ namespace PFrame {
                 @mkdir(self::$basePath, 0755, true);
             }
 
-            $path = self::$basePath . '/' . date('Y') . '_' . $filename;
-            $written = @file_put_contents($path, date('[Y-m-d H:i:s] ') . $message . "\n", FILE_APPEND | LOCK_EX);
+            $path = self::$basePath . '/' . date($daily ? 'Ymd' : 'Y') . '_' . $filename;
+            $written = @file_put_contents($path, ($prefixTimestamp ? date('[Y-m-d H:i:s] ') : '') . $message . "\n", FILE_APPEND | LOCK_EX);
             if ($written === false) {
                 error_log('[PFrame] Log write failed (' . $path . '): ' . $message);
             }
