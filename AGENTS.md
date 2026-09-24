@@ -160,6 +160,7 @@ Każdy konsument musi mieć skrypt `composer test`.
 - `App::instance()` throws `LogicException` przy konflikcie klas
 - `example/` jest w `.gitignore` — footgun przy demo
 - Flash PRZED session clear — `session_regenerate_id(true)` nie `destroy()`
+- `run()` i `sendAndExit()` zapisują i zamykają sesję przed wysłaniem odpowiedzi (wolny klient nie blokuje kolejnych żądań użytkownika) — zapis do `$_SESSION` w callbacku `SseResponse` ani w shutdown handlerze nie jest utrwalany
 - Logout = POST + CSRF (nie GET)
 - `$app->get()` nie `addRoute()` — sprawdzaj istniejące wzorce routingu
 - Nested transactions w testach: `rollbackAll()` nie pojedynczy `rollback()`

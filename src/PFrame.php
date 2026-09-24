@@ -492,6 +492,7 @@ namespace PFrame {
 
         public function sendAndExit(): never {
             $app = App::currentInstance();
+            $app?->releaseSession();
             if ($app?->performance()->traceEnabled() === true) {
                 $app->performance()->measure('response.send', fn() => $this->send());
             } else {
@@ -1862,7 +1863,25 @@ namespace PFrame {
             }
         }
 
+        /**
+         * Zapisuje sesję i zwalnia jej blokadę przed wysyłką, aby wolny klient nie blokował kolejnych żądań użytkownika.
+         * Zapisy do $_SESSION po tym momencie (callback SSE, shutdown) nie są utrwalane.
+         */
+        public function releaseSession(): void {
+            if (session_status() !== PHP_SESSION_ACTIVE) {
+                return;
+            }
+            if (!$this->performance->traceEnabled()) {
+                session_write_close();
+                return;
+            }
+            if (!$this->performance->measure('session.close', static fn(): bool => session_write_close())) {
+                $this->traceError ??= 'session.close';
+            }
+        }
+
         private function sendResponse(Response $response): void {
+            $this->releaseSession();
             if ($this->performance->traceEnabled()) {
                 $this->performance->measure('response.send', fn() => $response->send());
                 return;

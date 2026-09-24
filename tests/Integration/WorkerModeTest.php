@@ -185,6 +185,28 @@ class WorkerModeTest extends TestCase {
         }
     }
 
+    public function testSessionIsWrittenAndReleasedBeforeResponseSend(): void {
+        $app = new App();
+        $app->get('/send-session', WorkerSessionStatusAtSendCtrl::class, 'index');
+        $app->get('/send-session-sse', WorkerSessionStatusAtSseCtrl::class, 'index');
+        session_id(bin2hex(random_bytes(8)));
+
+        foreach (['/send-session', '/send-session-sse'] as $uri) {
+            $this->primeGlobals('GET', $uri);
+            WorkerSessionStatusAtSendCtrl::$statusAtSend = null;
+            ob_start();
+            try {
+                $app->runWorkerRequest(startSession: true);
+            } finally {
+                ob_end_clean();
+            }
+            $this->assertSame(PHP_SESSION_NONE, WorkerSessionStatusAtSendCtrl::$statusAtSend, $uri);
+        }
+
+        session_start();
+        $this->assertSame('written-before-send', $_SESSION['send_test'] ?? null);
+    }
+
     public function testTraceIncludesSseSendAndSql(): void {
         $basePath = new \ReflectionProperty(Log::class, 'basePath');
         $previousBasePath = $basePath->getValue();
@@ -594,6 +616,29 @@ class WorkerSessionCtrl extends Controller {
         $_SESSION['worker_test'] = 'ok';
 
         return new Response(body: 'session-ok');
+    }
+}
+
+class WorkerSessionStatusAtSendCtrl extends Controller {
+    public static ?int $statusAtSend = null;
+
+    public function index(): Response {
+        $_SESSION['send_test'] = 'written-before-send';
+
+        return new class('ok') extends Response {
+            public function send(): void {
+                WorkerSessionStatusAtSendCtrl::$statusAtSend = session_status();
+                parent::send();
+            }
+        };
+    }
+}
+
+class WorkerSessionStatusAtSseCtrl extends Controller {
+    public function index(): SseResponse {
+        return new SseResponse(static function (): void {
+            WorkerSessionStatusAtSendCtrl::$statusAtSend = session_status();
+        });
     }
 }
 
