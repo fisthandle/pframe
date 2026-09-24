@@ -737,8 +737,10 @@ namespace PFrame {
             $now = microtime(true);
             $requestStartValue = $_SERVER['REQUEST_TIME_FLOAT'] ?? 0.0;
             $requestStart = is_numeric($requestStartValue) ? (float) $requestStartValue : 0.0;
-            if (PHP_SAPI !== 'cli' && $requestStart > 0.0 && $requestStart <= $now) {
-                return $requestStart;
+            // min() zamiast `$requestStart <= $now`: tamto porównanie powodowało w PHP 8.4.25
+            // tracing JIT nadpisanie grupy exit stubów przez kod trace'a (SIGSEGV/SIGILL w FPM).
+            if (PHP_SAPI !== 'cli' && $requestStart > 0.0) {
+                return min($requestStart, $now);
             }
             return $now;
         }
