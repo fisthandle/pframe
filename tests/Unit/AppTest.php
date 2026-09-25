@@ -623,6 +623,44 @@ class AppTest extends TestCase {
         $this->assertSame(1, $app->performance()->snapshot()['spans']['domain_prepare']['count']);
     }
 
+    public function testResponsesCarryRequestIdHeader(): void {
+        $server = $_SERVER;
+        try {
+            $app = new App();
+            $app->get('/hello', HelloStub::class, 'index');
+            $app->get('/custom-id', HeaderCtrl::class, 'requestId');
+
+            $_SERVER['HTTP_X_REQUEST_ID'] = 'upstream-1234';
+            $ok = $app->handle(new Request(method: 'GET', path: '/hello'));
+            $this->assertSame('upstream-1234', $ok->headers['X-Request-ID']);
+            $this->assertSame('upstream-1234', $app->requestId());
+
+            $_SERVER['HTTP_X_REQUEST_ID'] = 'bad id';
+            $app->resetRequestState();
+            $notFound = $app->handle(new Request(method: 'GET', path: '/missing'));
+            $this->assertSame(404, $notFound->status);
+            $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $notFound->headers['X-Request-ID']);
+
+            $custom = $app->handle(new Request(method: 'GET', path: '/custom-id'));
+            $this->assertSame('app-defined', $custom->headers['x-request-id']);
+            $this->assertArrayNotHasKey('X-Request-ID', $custom->headers);
+        } finally {
+            $_SERVER = $server;
+        }
+    }
+
+    public function testAppMeasureHelpersForwardToPerformance(): void {
+        $app = new App();
+        $app->setConfig('performance.trace', true);
+
+        $this->assertSame(7, $app->measureProcess('tool', static fn(): int => 7));
+        $app->measure('step', static fn(): null => null, ['key' => 'value']);
+
+        $details = array_column($app->performance()->traceEvents(), 'details', 'name');
+        $this->assertSame(['program' => 'tool', 'exit_code' => 7], array_intersect_key($details['process_exec'], ['program' => 1, 'exit_code' => 1]));
+        $this->assertSame(['key' => 'value'], $details['step']);
+    }
+
     public function testServerTimingIsDisabledByDefault(): void {
         $app = new App();
         $app->get('/hello', HelloStub::class, 'index');
@@ -722,6 +760,13 @@ class AppTest extends TestCase {
             $this->assertSame('/trace/{id}', $trace['route']['pattern']);
             $this->assertSame(2, $trace['db_count']);
             $this->assertGreaterThan(0, $trace['performance']['app_ms']);
+            $this->assertSame(2, $trace['v']);
+            $this->assertSame($response->headers['X-Request-ID'], $trace['request_id']);
+            $this->assertSame(getmypid(), $trace['pid']);
+            $this->assertSame(PHP_SAPI, $trace['sapi']);
+            $this->assertFalse($trace['connection_aborted']);
+            $this->assertNull($trace['fatal']);
+            $this->assertArrayHasKey('children_cpu_ms', $trace['performance']);
 
             $events = $trace['events'];
             $sql = array_values(array_filter($events, static fn(array $event): bool => $event['name'] === 'sql'));
@@ -740,6 +785,11 @@ class AppTest extends TestCase {
             $this->assertContains('route', array_column($events, 'name'));
             $this->assertContains('controller', array_column($events, 'name'));
             $this->assertContains('custom_step', array_column($events, 'name'));
+            $byName = array_column($events, null, 'name');
+            $this->assertSame(['source' => 'app'], $byName['custom_step']['details']);
+            $this->assertSame($byName['controller']['id'], $byName['custom_step']['parent']);
+            $this->assertSame($byName['controller']['id'], $sql[0]['parent']);
+            $this->assertSame(count($events), count(array_unique(array_column($events, 'id'))));
             $offsets = array_column($events, 'at_ms');
             $orderedOffsets = $offsets;
             sort($orderedOffsets);
@@ -1008,7 +1058,7 @@ class SlowCtrl {
 class TraceCtrl {
     public function run(Request $request, App $app): Response {
         $app->db()->exec('SELECT ? AS value', [1]);
-        $app->measure('custom.step', static fn(): int => 42);
+        $app->measure('custom.step', static fn(): int => 42, ['source' => 'app']);
         $app->db()->exec('SELECT ? AS value', [2]);
         $view = new View(__DIR__ . '/../fixtures/templates');
         $app->setLastView($view);
@@ -1017,6 +1067,10 @@ class TraceCtrl {
 }
 
 class HeaderCtrl {
+    public function requestId(): Response {
+        return new Response('ok', headers: ['x-request-id' => 'app-defined']);
+    }
+
     public function customCsp(): Response {
         return new Response('ok', headers: ['content-security-policy' => "default-src 'none'"]);
     }

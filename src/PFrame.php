@@ -552,24 +552,29 @@ namespace PFrame {
 
     class Performance {
         private const MAX_SPANS = 64;
+        private const MAX_TRACE_EVENTS = 5000;
         private const MAX_SERVER_TIMING_SPANS = 20;
+        public const TRACE_VERSION = 2;
 
         private int $appStartNs;
         private float $appStartWall;
         private float $phpStartWall;
         private ?float $cpuStartMs;
+        private ?float $childrenCpuStartMs;
+        private ?string $requestId = null;
 
         /** @var array<string, array{ms: float, count: int}> */
         private array $spans = [];
 
         private bool $traceEnabled = false;
 
-        /** @var list<array{name: string, at_ms: float, ms: float, details: array<string, int|string|float|null>}> */
+        /** @var list<array{id: int, parent: ?int, name: string, at_ms: float, ms: float, cpu_ms?: ?float, mem_kb?: int, details: array<string, int|string|float|null>}> */
         private array $events = [];
 
-        /** @var array<int, array{name: string, start: int|float, details: array<string, int|string|float|null>}> */
+        /** @var array<int, array{name: string, start: int|float, parent: ?int, cpu: ?float, mem: int, details: array<string, int|string|float|null>}> */
         private array $activeTraceMeasures = [];
-        private int $nextTraceMeasureId = 0;
+        private int $nextTraceEventId = 0;
+        private int $droppedTraceEvents = 0;
 
         public function __construct() {
             $this->resetRequestState();
@@ -580,10 +585,24 @@ namespace PFrame {
             $this->appStartWall = microtime(true);
             $this->phpStartWall = $this->resolvePhpStartWall();
             $this->cpuStartMs = $this->cpuMilliseconds();
+            $this->childrenCpuStartMs = $this->cpuMilliseconds(children: true);
+            $this->requestId = null;
             $this->spans = [];
             $this->events = [];
             $this->activeTraceMeasures = [];
-            $this->nextTraceMeasureId = 0;
+            $this->nextTraceEventId = 0;
+            $this->droppedTraceEvents = 0;
+        }
+
+        /** Przychodzący `X-Request-ID` (8-64 znaki `[A-Za-z0-9._-]`) albo nowe 16 znaków hex; stały do resetu stanu requestu. */
+        public function requestId(): string {
+            if ($this->requestId === null) {
+                $incoming = $_SERVER['HTTP_X_REQUEST_ID'] ?? null;
+                $this->requestId = is_string($incoming) && preg_match('/^[A-Za-z0-9._-]{8,64}$/', $incoming) === 1
+                    ? $incoming
+                    : bin2hex(random_bytes(8));
+            }
+            return $this->requestId;
         }
 
         public function setTraceEnabled(bool $enabled): void {
@@ -598,7 +617,7 @@ namespace PFrame {
             return $this->traceEnabled;
         }
 
-        /** @return list<array{name: string, at_ms: float, ms: float, details: array<string, int|string|float|null>}> */
+        /** @return list<array{id: int, parent: ?int, name: string, at_ms: float, ms: float, cpu_ms?: ?float, mem_kb?: int, details: array<string, int|string|float|null>}> */
         public function traceEvents(): array {
             $events = $this->events;
             usort($events, static fn(array $a, array $b): int => $a['at_ms'] <=> $b['at_ms']);
@@ -611,45 +630,149 @@ namespace PFrame {
 
         public function clearTraceEvents(): void {
             $this->events = [];
+            $this->droppedTraceEvents = 0;
+        }
+
+        /** Zdarzenia pominięte po osiągnięciu limitu (długie procesy CLI i cron). */
+        public function droppedTraceEvents(): int {
+            return $this->droppedTraceEvents;
         }
 
         public function finishActiveTraceMeasures(): void {
-            foreach ($this->activeTraceMeasures as $measure) {
+            foreach ($this->activeTraceMeasures as $id => $measure) {
                 $milliseconds = (hrtime(true) - $measure['start']) / 1_000_000;
                 $this->record($measure['name'], $milliseconds);
-                $this->traceEvent($measure['name'], $measure['start'], $milliseconds, $measure['details'] + ['incomplete' => 1]);
+                $this->traceSpanEvent($id, $measure, $milliseconds, $measure['details'] + ['incomplete' => 1]);
             }
             $this->activeTraceMeasures = [];
         }
 
         /**
+         * Szczegóły spanu muszą być skalarne albo null (trafiają wprost do JSONL).
+         *
          * @template T
          * @param callable(): T $callback
          * @param array<string, int|string|float|null> $details
          * @return T
          */
         public function measure(string $name, callable $callback, array $details = []): mixed {
+            return $this->span($name, $callback, $details);
+        }
+
+        /**
+         * `curl_exec()` w spanie `http.request` z czasami fazy DNS/TCP/TLS/TTFB; bez trace to zwykłe `curl_exec()`.
+         */
+        public function measureHttp(string $service, \CurlHandle $ch): string|bool {
+            if (!$this->traceEnabled) {
+                return curl_exec($ch);
+            }
+            return $this->span(
+                'http.request',
+                static fn(): string|bool => curl_exec($ch),
+                ['service' => $service],
+                static function () use ($ch): array {
+                    $ms = static fn(int $option): float => self::intValue(curl_getinfo($ch, $option)) / 1000;
+                    $dns = $ms(CURLINFO_NAMELOOKUP_TIME_T);
+                    $connect = $ms(CURLINFO_CONNECT_TIME_T);
+                    $tls = $ms(CURLINFO_APPCONNECT_TIME_T);
+                    return [
+                        'http_status' => self::intValue(curl_getinfo($ch, CURLINFO_RESPONSE_CODE)),
+                        'total_ms' => round($ms(CURLINFO_TOTAL_TIME_T), 2),
+                        'dns_ms' => round($dns, 2),
+                        'connect_ms' => round(max(0.0, $connect - $dns), 2),
+                        'tls_ms' => round(max(0.0, $tls - $connect), 2),
+                        'ttfb_ms' => round(max(0.0, $ms(CURLINFO_STARTTRANSFER_TIME_T) - max($connect, $tls)), 2),
+                        'bytes' => self::intValue(curl_getinfo($ch, CURLINFO_SIZE_DOWNLOAD_T)),
+                        'curl_errno' => curl_errno($ch),
+                    ];
+                },
+            );
+        }
+
+        /**
+         * Proces zewnętrzny w spanie `process.exec` (`program` = $name) z `children_cpu_ms` (RUSAGE_CHILDREN)
+         * i `exit_code`, gdy callback zwraca int albo tablicę z intowym kluczem `exit_code`; wynik callbacka wraca bez zmian.
+         *
+         * @template T
+         * @param callable(): T $callback
+         * @return T
+         */
+        public function measureProcess(string $name, callable $callback): mixed {
+            $childrenStart = $this->traceEnabled ? $this->cpuMilliseconds(children: true) : null;
+            return $this->span('process.exec', $callback, ['program' => $name], function (mixed $result) use ($childrenStart): array {
+                $childrenNow = $this->cpuMilliseconds(children: true);
+                $exitCode = is_array($result) ? ($result['exit_code'] ?? null) : $result;
+                return [
+                    'exit_code' => is_int($exitCode) ? $exitCode : null,
+                    'children_cpu_ms' => $childrenStart === null || $childrenNow === null ? null : round(max(0.0, $childrenNow - $childrenStart), 2),
+                ];
+            });
+        }
+
+        /**
+         * @template T
+         * @param callable(): T $callback
+         * @param array<string, int|string|float|null> $details
+         * @param (\Closure(mixed): array<string, int|string|float|null>)|null $finish
+         * @return T
+         */
+        private function span(string $name, callable $callback, array $details, ?\Closure $finish = null): mixed {
             $start = hrtime(true);
             $traceId = null;
             if ($this->traceEnabled) {
-                $traceId = ++$this->nextTraceMeasureId;
-                $this->activeTraceMeasures[$traceId] = ['name' => $name, 'start' => $start, 'details' => $details];
+                $traceId = ++$this->nextTraceEventId;
+                $this->activeTraceMeasures[$traceId] = [
+                    'name' => $name,
+                    'start' => $start,
+                    'parent' => array_key_last($this->activeTraceMeasures),
+                    'cpu' => $this->cpuMilliseconds(),
+                    'mem' => memory_get_usage(false),
+                    'details' => $details,
+                ];
             }
+            $result = null;
             try {
-                return $callback();
+                return $result = $callback();
             } finally {
-                if ($traceId !== null) {
-                    unset($this->activeTraceMeasures[$traceId]);
-                }
                 $milliseconds = (hrtime(true) - $start) / 1_000_000;
                 $this->record($name, $milliseconds);
-                $this->traceEvent($name, $start, $milliseconds, $details);
+                if ($traceId !== null && isset($this->activeTraceMeasures[$traceId])) {
+                    $measure = $this->activeTraceMeasures[$traceId];
+                    unset($this->activeTraceMeasures[$traceId]);
+                    $this->traceSpanEvent($traceId, $measure, $milliseconds, $finish !== null ? $details + $finish($result) : $details);
+                }
             }
+        }
+
+        /**
+         * @param array{name: string, start: int|float, parent: ?int, cpu: ?float, mem: int, details: array<string, int|string|float|null>} $measure
+         * @param array<string, int|string|float|null> $details
+         */
+        private function traceSpanEvent(int $id, array $measure, float $milliseconds, array $details): void {
+            $cpuNow = $this->cpuMilliseconds();
+            $this->appendEvent($id, $measure['parent'], $measure['name'], $measure['start'], $milliseconds, $details, [
+                'cpu_ms' => $cpuNow === null || $measure['cpu'] === null ? null : round(max(0.0, $cpuNow - $measure['cpu']), 3),
+                'mem_kb' => (int) round((memory_get_usage(false) - $measure['mem']) / 1024),
+            ]);
         }
 
         /** @param array<string, int|string|float|null> $details */
         public function traceEvent(string $name, int|float $startNs, float $milliseconds, array $details = []): void {
+            if ($this->traceEnabled) {
+                $this->appendEvent(++$this->nextTraceEventId, array_key_last($this->activeTraceMeasures), $name, $startNs, $milliseconds, $details);
+            }
+        }
+
+        /**
+         * @param array<string, int|string|float|null> $details
+         * @param array{cpu_ms?: ?float, mem_kb?: int} $spanMetrics
+         */
+        private function appendEvent(int $id, ?int $parent, string $name, int|float $startNs, float $milliseconds, array $details, array $spanMetrics = []): void {
             if (!$this->traceEnabled || !is_finite((float) $startNs) || $milliseconds < 0 || !is_finite($milliseconds)) {
+                return;
+            }
+            if (count($this->events) >= self::MAX_TRACE_EVENTS) {
+                $this->droppedTraceEvents++;
                 return;
             }
             foreach ($details as $key => $value) {
@@ -658,11 +781,12 @@ namespace PFrame {
                 }
             }
             $this->events[] = [
+                'id' => $id,
+                'parent' => $parent,
                 'name' => $this->normalizeName($name),
                 'at_ms' => ($startNs - $this->appStartNs) / 1_000_000,
                 'ms' => round($milliseconds, 3),
-                'details' => $details,
-            ];
+            ] + $spanMetrics + ['details' => $details];
         }
 
         public function record(string $name, float $milliseconds): void {
@@ -688,19 +812,23 @@ namespace PFrame {
             return $this->appStartWall;
         }
 
-        /** @return array{php_ms: float, app_ms: float, cpu_ms: ?float, wait_ms: ?float, mem_mb: float, peak_mb: float, spans: array<string, array{ms: float, count: int}>} */
+        /** @return array{php_ms: float, app_ms: float, cpu_ms: ?float, wait_ms: ?float, children_cpu_ms: ?float, mem_mb: float, peak_mb: float, spans: array<string, array{ms: float, count: int}>} */
         public function snapshot(): array {
             $appMs = $this->appMilliseconds();
             $cpuNow = $this->cpuMilliseconds();
             $cpuMs = $cpuNow !== null && $this->cpuStartMs !== null
                 ? max(0.0, $cpuNow - $this->cpuStartMs)
                 : null;
+            $childrenCpuNow = $this->cpuMilliseconds(children: true);
 
             return [
                 'php_ms' => round(max(0.0, (microtime(true) - $this->phpStartWall) * 1000), 2),
                 'app_ms' => round($appMs, 2),
                 'cpu_ms' => $cpuMs === null ? null : round($cpuMs, 2),
                 'wait_ms' => $cpuMs === null ? null : round(max(0.0, $appMs - $cpuMs), 2),
+                'children_cpu_ms' => $childrenCpuNow === null || $this->childrenCpuStartMs === null
+                    ? null
+                    : round(max(0.0, $childrenCpuNow - $this->childrenCpuStartMs), 2),
                 'mem_mb' => round(memory_get_usage(true) / 1048576, 2),
                 'peak_mb' => round(memory_get_peak_usage(true) / 1048576, 2),
                 'spans' => $this->roundedSpans(),
@@ -745,16 +873,20 @@ namespace PFrame {
             return $now;
         }
 
-        private function cpuMilliseconds(): ?float {
+        private function cpuMilliseconds(bool $children = false): ?float {
             if (PHP_ZTS || !function_exists('getrusage')) {
                 return null;
             }
-            $usage = getrusage();
+            $usage = getrusage($children ? 1 : 0);
             if (!is_array($usage)) {
                 return null;
             }
             return (($usage['ru_utime.tv_sec'] ?? 0) + ($usage['ru_stime.tv_sec'] ?? 0)) * 1000
                 + (($usage['ru_utime.tv_usec'] ?? 0) + ($usage['ru_stime.tv_usec'] ?? 0)) / 1000;
+        }
+
+        private static function intValue(mixed $value): int {
+            return is_int($value) ? $value : 0;
         }
 
         private function normalizeName(string $name): string {
@@ -826,6 +958,7 @@ namespace PFrame {
         private ?Request $traceRequest = null;
         private ?Response $traceResponse = null;
         private ?string $traceError = null;
+        private ?int $traceFatal = null;
         private bool $traceStarted = false;
         private bool $traceDeferred = false;
         private bool $traceWritten = false;
@@ -849,10 +982,28 @@ namespace PFrame {
         /**
          * @template T
          * @param callable(): T $callback
+         * @param array<string, int|string|float|null> $details
          * @return T
          */
-        public function measure(string $name, callable $callback): mixed {
-            return $this->performance->measure($name, $callback);
+        public function measure(string $name, callable $callback, array $details = []): mixed {
+            return $this->performance->measure($name, $callback, $details);
+        }
+
+        public function measureHttp(string $service, \CurlHandle $ch): string|bool {
+            return $this->performance->measureHttp($service, $ch);
+        }
+
+        /**
+         * @template T
+         * @param callable(): T $callback
+         * @return T
+         */
+        public function measureProcess(string $name, callable $callback): mixed {
+            return $this->performance->measureProcess($name, $callback);
+        }
+
+        public function requestId(): string {
+            return $this->performance->requestId();
         }
 
         public static function instance(): static {
@@ -878,6 +1029,7 @@ namespace PFrame {
             $this->traceRequest = null;
             $this->traceResponse = null;
             $this->traceError = null;
+            $this->traceFatal = null;
             $this->traceStarted = false;
             $this->traceDeferred = false;
             $this->traceWritten = false;
@@ -1547,6 +1699,9 @@ namespace PFrame {
             if ($request->method === 'HEAD') {
                 $response = new Response('', $response->status, $response->headers);
             }
+            if (!$this->hasHeader($response->headers, 'X-Request-ID')) {
+                $response->headers['X-Request-ID'] = $this->performance->requestId();
+            }
 
             if ($this->securityHeaders === null) {
                 return $response;
@@ -1623,16 +1778,23 @@ namespace PFrame {
                 $status = $this->traceResponse->status;
             }
             $trace = [
+                'v' => Performance::TRACE_VERSION,
                 'timestamp' => $this->performance->appStartedAt(),
+                'request_id' => $this->performance->requestId(),
+                'pid' => (int) getmypid(),
+                'sapi' => PHP_SAPI,
                 'method' => $method,
                 'path' => $path,
                 'status' => $status,
+                'connection_aborted' => connection_aborted() === 1,
+                'fatal' => $this->traceFatal,
                 'route' => $this->matchedRoute,
                 'performance' => $this->performance->snapshot(),
                 'db_count' => $db?->totalQueryCount() ?? 0,
                 'db_ms' => round(($db?->totalQueryTime() ?? 0.0) * 1000, 2),
                 'db_rows' => $db?->totalFetchedRows() ?? 0,
                 'events' => $this->performance->traceEvents(),
+                'dropped_events' => $this->performance->droppedTraceEvents(),
             ];
             if ($this->traceError !== null) {
                 $trace['error'] = $this->traceError;
@@ -1646,7 +1808,7 @@ namespace PFrame {
             }
         }
 
-        /** @param array{php_ms: float, app_ms: float, cpu_ms: ?float, wait_ms: ?float, mem_mb: float, peak_mb: float, spans: array<string, array{ms: float, count: int}>} $snapshot */
+        /** @param array{php_ms: float, app_ms: float, cpu_ms: ?float, wait_ms: ?float, children_cpu_ms: ?float, mem_mb: float, peak_mb: float, spans: array<string, array{ms: float, count: int}>} $snapshot */
         private function logSlowRequest(Request $request, Response $response, array $snapshot): void {
             $db = $this->dbIfInitialized();
             Log::warn('Slow request', [
@@ -1785,21 +1947,25 @@ namespace PFrame {
                     if (!headers_sent()) {
                         http_response_code(500);
                         header('Content-Type: text/plain; charset=UTF-8');
+                        if (self::$instance !== null) {
+                            header('X-Request-ID: ' . self::$instance->requestId());
+                        }
                     }
                     echo $body;
                 }
-                self::$instance?->finishTraceAtShutdown($fatal);
+                self::$instance?->finishTraceAtShutdown($fatal ? $error['type'] : null);
             });
 
             self::$shutdownRegistered = true;
         }
 
-        private function finishTraceAtShutdown(bool $fatal): void {
+        private function finishTraceAtShutdown(?int $fatal): void {
             if (!$this->performance->traceEnabled() || $this->traceWritten || (!$this->traceDeferred && !$this->traceStarted)) {
                 return;
             }
-            if ($fatal) {
+            if ($fatal !== null) {
                 $this->traceError = 'fatal';
+                $this->traceFatal = $fatal;
             }
             if (session_status() === PHP_SESSION_ACTIVE) {
                 try {

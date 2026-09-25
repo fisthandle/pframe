@@ -128,11 +128,25 @@ class WorkerModeTest extends TestCase {
             $this->assertCount(1, $files);
             $lines = file($files[0], FILE_IGNORE_NEW_LINES);
             $this->assertCount(2, $lines);
+            $requestIds = [];
             foreach ($lines as $line) {
                 $trace = json_decode($line, true, flags: JSON_THROW_ON_ERROR);
                 $this->assertSame(1, $trace['db_count']);
                 $this->assertCount(1, array_filter($trace['events'], static fn(array $event): bool => $event['name'] === 'sql'));
+                $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $trace['request_id']);
+                $requestIds[] = $trace['request_id'];
             }
+            $this->assertNotSame($requestIds[0], $requestIds[1]);
+
+            $_SERVER['HTTP_X_REQUEST_ID'] = 'proxy-request-0001';
+            ob_start();
+            try {
+                $app->runWorkerRequest();
+            } finally {
+                ob_end_clean();
+            }
+            $lines = file($files[0], FILE_IGNORE_NEW_LINES);
+            $this->assertSame('proxy-request-0001', json_decode($lines[2], true, flags: JSON_THROW_ON_ERROR)['request_id']);
         } finally {
             $basePath->setValue(null, $previousBasePath);
             $minLevel->setValue(null, $previousMinLevel);
@@ -364,6 +378,46 @@ PHP;
         $this->assertSame(200, $trace['status']);
         $this->assertContains('response_send', array_column($trace['events'], 'name'));
         $this->assertContains('session_close', array_column($trace['events'], 'name'));
+    }
+
+    public function testTraceRecordsFatalTypeAtShutdown(): void {
+        $script = <<<'PHP'
+require $argv[1];
+class FatalTraceCtrl {
+    public function run(): \PFrame\Response {
+        eval('function pframe_trace_dup() {} function pframe_trace_dup() {}');
+        return new \PFrame\Response('unreachable');
+    }
+}
+\PFrame\Log::init($argv[2]);
+$app = new \PFrame\App();
+$app->setConfig('performance.trace', true);
+$app->get('/fatal', FatalTraceCtrl::class, 'run');
+$_SERVER['REQUEST_METHOD'] = 'GET';
+$_SERVER['REQUEST_URI'] = '/fatal';
+$app->run();
+PHP;
+        $process = proc_open(
+            [PHP_BINARY, '-d', 'display_errors=0', '-r', $script, dirname(__DIR__, 2) . '/vendor/autoload.php', $this->sessionDir],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+        );
+        $this->assertIsResource($process);
+        stream_get_contents($pipes[1]);
+        $stderr = (string) stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $this->assertSame(255, proc_close($process), $stderr);
+
+        $lines = file($this->sessionDir . '/' . date('Ymd') . '_perf.jsonl', FILE_IGNORE_NEW_LINES);
+        $this->assertCount(1, $lines);
+        $trace = json_decode($lines[0], true, flags: JSON_THROW_ON_ERROR);
+        $this->assertSame(E_COMPILE_ERROR, $trace['fatal']);
+        $this->assertSame('fatal', $trace['error']);
+        $this->assertFalse($trace['connection_aborted']);
+        $this->assertSame(2, $trace['v']);
+        $controller = array_values(array_filter($trace['events'], static fn(array $event): bool => $event['name'] === 'controller'));
+        $this->assertSame(1, $controller[0]['details']['incomplete']);
     }
 
     public function testTraceRecordsSessionFailureBeforeRegularRun(): void {

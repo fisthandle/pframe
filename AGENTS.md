@@ -34,12 +34,16 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 
 ## Wydajność
 
-- `App::performance()` udostępnia profiler requestu, a `App::measure($name, $callback)` dodaje własny span
+- `App::performance()` udostępnia profiler requestu, a `App::measure($name, $callback, $details = [])` dodaje własny span; `$details` to wyłącznie `array<string, scalar|null>`
 - automatyczne spany obejmują request/router/controller/finalize, DB connect/execute/fetch, widoki oraz start i blokadę sesji
 - `performance.server_timing=true` dodaje standardowy nagłówek `Server-Timing`; domyślnie jest wyłączony
 - `performance.slow_ms=N` loguje requesty od progu `N` ms razem ze spanami i agregatami DB; `0` wyłącza log
-- `performance.trace=true` zapisuje JSONL w `YYYYMMDD_perf.jsonl` z chronologicznymi spanami, każdym szablonem i SQL przez `Db` (bez rozwijania parametrów); `run()`/worker domykają ślad po wysyłce i zapisie sesji
-- na PHP ZTS `cpu_ms` i `wait_ms` są `null`, bo `getrusage()` mierzy cały współbieżny proces; wall time i spany pozostają poprawne
+- `performance.trace=true` zapisuje JSONL w `YYYYMMDD_perf.jsonl` (jedna linia na request, wszystkie zdarzenia, bez samplingu) z chronologicznymi spanami, każdym szablonem i SQL przez `Db` (bez rozwijania parametrów); `run()`/worker domykają ślad po wysyłce i zapisie sesji. To standardowe źródło danych wydajności dla aplikacji
+- format v2 (tylko dodaje pola): top-level `v=2`, `request_id`, `pid`, `sapi`, `connection_aborted` (bool), `fatal` (`null` albo typ błędu fatalnego; `error` bez zmian); `performance.children_cpu_ms` (RUSAGE_CHILDREN); każde zdarzenie ma `id` i `parent` (id otaczającego spanu albo `null`), a spany dodatkowo `cpu_ms` i `mem_kb` (`memory_get_usage(false)`); najwyżej 5000 zdarzeń na request, nadmiar liczy `dropped_events` (chroni długie procesy CLI/cron, które zbierają zdarzenia bez zapisu)
+- `requestId()` (`App`/`Performance`) przejmuje przychodzący `X-Request-ID` pasujący do `^[A-Za-z0-9._-]{8,64}$`, inaczej generuje 16 znaków hex; świeży po `resetRequestState()`/w każdym żądaniu workera. Odpowiedzi z `handle()` i strona fatala dostają nagłówek `X-Request-ID`, jeśli go nie ustawiono
+- `measureHttp($service, $curlHandle)` zastępuje `curl_exec()` spanem `http.request` (`service`, `http_status`, `total_ms`, `dns_ms`, `connect_ms`, `tls_ms`, `ttfb_ms`, `bytes`, `curl_errno`); bez trace to czyste `curl_exec()`
+- `measureProcess($program, $callback)` mierzy proces w spanie `process.exec` (`program`, `children_cpu_ms`, `exit_code` z wyniku `int` albo tablicy z intowym `exit_code`, inaczej `null`) i zwraca wynik callbacka bez zmian; callback musi poczekać na proces (`proc_close()`), aby jego CPU trafiło do RUSAGE_CHILDREN
+- na PHP ZTS `cpu_ms`, `wait_ms` i `children_cpu_ms` są `null`, bo `getrusage()` mierzy cały współbieżny proces; wall time i spany pozostają poprawne
 - używaj `$app->startSession()` zamiast surowego `session_start()`, aby zmierzyć oczekiwanie na start sesji
 
 ## Kontrolery i Response
