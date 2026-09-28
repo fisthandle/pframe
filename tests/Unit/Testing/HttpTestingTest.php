@@ -104,8 +104,11 @@ class HttpTestingTest extends TestCase {
     public function testPostJsonSendsCsrfViaHeaderNotPost(): void {
         $this->postJson('/json', ['name' => 'test']);
         $this->assertOk();
-        $body = json_decode($this->response->body, true);
-        $this->assertSame('header', $body['csrf_source'], 'CSRF should come from X-Csrf-Token header, not form field');
+        $this->assertJsonContains([
+            'csrf_source' => 'header',
+            'csrf_in_json' => false,
+            'csrf_in_post' => false,
+        ]);
     }
 
     public function testPostJsonWithoutCsrfFails(): void {
@@ -251,6 +254,8 @@ class HttpTestingJsonCtrl extends Controller {
             'is_ajax' => $this->request->isAjax(),
             'content_type' => $this->request->header('Content-Type'),
             'csrf_source' => $source,
+            'csrf_in_json' => is_array($json) && array_key_exists(Csrf::FIELD_NAME, $json),
+            'csrf_in_post' => $this->request->post(Csrf::FIELD_NAME) !== null,
         ]);
     }
 }

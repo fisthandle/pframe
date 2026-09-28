@@ -2220,6 +2220,11 @@ namespace PFrame {
                 throw new \RuntimeException('PDO returned an invalid driver name.');
             }
             $this->driver = $driver;
+            $sqlitePragmas = $config['sqlite_pragmas'] ?? [];
+            if (!is_array($sqlitePragmas) || ($sqlitePragmas !== [] && $driver !== 'sqlite')) {
+                throw new \InvalidArgumentException('Database config "sqlite_pragmas" requires SQLite and an array.');
+            }
+            $this->configureSqlitePragmas($sqlitePragmas);
             $logQueries = $config['log_queries'] ?? false;
             if (!is_bool($logQueries)) {
                 throw new \InvalidArgumentException('Database config "log_queries" must be a boolean.');
@@ -2242,6 +2247,46 @@ namespace PFrame {
 
         public function performance(): ?Performance {
             return $this->performance;
+        }
+
+        /** @param array<array-key, mixed> $pragmas */
+        private function configureSqlitePragmas(array $pragmas): void {
+            foreach ($pragmas as $name => $value) {
+                if (!is_string($name) || !is_string($value) && !is_int($value)) {
+                    throw new \InvalidArgumentException('Invalid SQLite pragma name or value.');
+                }
+                $value = strtoupper((string) $value);
+                $expected = match ($name) {
+                    'foreign_keys', 'trusted_schema' => match ($value) {
+                        'ON', '1' => '1',
+                        'OFF', '0' => '0',
+                        default => null,
+                    },
+                    'journal_mode' => in_array($value, ['DELETE', 'TRUNCATE', 'PERSIST', 'MEMORY', 'WAL', 'OFF'], true)
+                        ? strtolower($value) : null,
+                    'synchronous' => match ($value) {
+                        'OFF', '0' => '0',
+                        'NORMAL', '1' => '1',
+                        'FULL', '2' => '2',
+                        'EXTRA', '3' => '3',
+                        default => null,
+                    },
+                    'busy_timeout' => ctype_digit($value) ? (ltrim($value, '0') ?: '0') : null,
+                    default => null,
+                };
+                if ($expected === null) {
+                    throw new \InvalidArgumentException("Unsupported SQLite pragma {$name}={$value}.");
+                }
+                $this->pdo->exec("PRAGMA {$name} = {$value}");
+                $statement = $this->pdo->query("PRAGMA {$name}");
+                if ($statement === false) {
+                    throw new \RuntimeException("SQLite pragma {$name} could not be read.");
+                }
+                $actual = $statement->fetchColumn();
+                if (strtolower((string) $actual) !== $expected) {
+                    throw new \RuntimeException("SQLite pragma {$name} is {$actual}, expected {$expected}.");
+                }
+            }
         }
 
         /**
@@ -2436,6 +2481,21 @@ namespace PFrame {
             });
         }
 
+        /** Execute a trusted SQLite migration script containing multiple statements. */
+        public function execScript(string $sql): void {
+            if ($this->driver !== 'sqlite') {
+                throw new \LogicException('Multi-statement scripts require SQLite.');
+            }
+            $start = hrtime(true);
+            $this->lastRowCount = 0;
+            try {
+                $this->pdo->exec($sql);
+            } finally {
+                $end = hrtime(true);
+                $this->recordQuery($sql, null, $start, $end, $end, false);
+            }
+        }
+
         /** @param array<int|string, mixed>|string|null $params */
         public function var(string $sql, array|string|null $params = null): mixed {
             return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): mixed {
@@ -2573,8 +2633,17 @@ namespace PFrame {
             }
         }
 
-        public function begin(): bool {
+        public function begin(string $mode = 'deferred'): bool {
+            if ($mode !== 'deferred' && $mode !== 'immediate') {
+                throw new \InvalidArgumentException('Transaction mode must be deferred or immediate.');
+            }
+            if ($mode === 'immediate' && $this->driver !== 'sqlite') {
+                throw new \LogicException('Immediate transactions require SQLite.');
+            }
             if ($this->pdo->inTransaction()) {
+                if ($mode === 'immediate') {
+                    throw new \LogicException('Cannot start an immediate transaction inside an active transaction.');
+                }
                 $nextLevel = $this->savepointLevel + 1;
                 $this->pdo->exec("SAVEPOINT sp_{$nextLevel}");
                 $this->savepointLevel = $nextLevel;
@@ -2582,7 +2651,40 @@ namespace PFrame {
             }
 
             $this->savepointLevel = 0;
+            if ($mode === 'immediate') {
+                $begin = fn(): bool => $this->pdo->exec('BEGIN IMMEDIATE') !== false;
+                return $this->performance?->measure('db.begin', $begin) ?? $begin();
+            }
             return $this->pdo->beginTransaction();
+        }
+
+        /**
+         * @template T
+         * @param callable(self): T $callback
+         * @return T
+         */
+        public function transaction(callable $callback, string $mode = 'deferred'): mixed {
+            $hadTransaction = $this->trans();
+            $previousLevel = $this->savepointLevel;
+            $this->begin($mode);
+            $ownedLevel = $this->savepointLevel;
+            try {
+                $result = $callback($this);
+                if (!$this->trans() || $this->savepointLevel !== $ownedLevel) {
+                    throw new \LogicException('Transaction callback left a nested transaction open or closed its transaction.');
+                }
+                $this->commit();
+                return $result;
+            } catch (\Throwable $error) {
+                if (!$hadTransaction) {
+                    $this->rollbackAll();
+                } else {
+                    while ($this->trans() && $this->savepointLevel > $previousLevel) {
+                        $this->rollback();
+                    }
+                }
+                throw $error;
+            }
         }
 
         public function commit(): bool {

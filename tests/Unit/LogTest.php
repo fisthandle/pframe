@@ -8,14 +8,19 @@ use PHPUnit\Framework\TestCase;
 
 class LogTest extends TestCase {
     private string $tmpDir;
+    private ?string $originalBasePath;
+    private int $originalMinLevel;
 
     protected function setUp(): void {
+        $this->originalBasePath = (new \ReflectionProperty(Log::class, 'basePath'))->getValue();
+        $this->originalMinLevel = (new \ReflectionProperty(Log::class, 'minLevel'))->getValue();
         $this->tmpDir = sys_get_temp_dir() . '/p1_log_test_' . uniqid('', true);
         mkdir($this->tmpDir);
         Log::init($this->tmpDir, 1);
     }
 
     protected function tearDown(): void {
+        $this->restoreLogState($this->originalBasePath, $this->originalMinLevel);
         foreach (glob($this->tmpDir . '/*') ?: [] as $file) {
             unlink($file);
         }
@@ -70,8 +75,8 @@ class LogTest extends TestCase {
     }
 
     public function testErrorFallsBackToErrorLogWhenNotInitialized(): void {
-        $basePath = new \ReflectionProperty(Log::class, 'basePath');
-        $basePath->setValue(null, null);
+        $logState = $this->logState();
+        $this->restoreLogState(null, $logState['minLevel']);
 
         $logFile = $this->tmpDir . '/php_errors.log';
         $oldErrorLog = ini_set('error_log', $logFile);
@@ -80,7 +85,7 @@ class LogTest extends TestCase {
             Log::error('fallback test', ['key' => 'val']);
         } finally {
             ini_set('error_log', $oldErrorLog !== false ? $oldErrorLog : '');
-            Log::init($this->tmpDir, 1);
+            $this->restoreLogState($logState['basePath'], $logState['minLevel']);
         }
 
         $this->assertFileExists($logFile);
@@ -90,6 +95,7 @@ class LogTest extends TestCase {
     }
 
     public function testToFileFallsBackToErrorLogOnWriteFailure(): void {
+        $logState = $this->logState();
         Log::init('/proc/fake_not_writable', 1);
 
         $logFile = $this->tmpDir . '/php_errors.log';
@@ -99,11 +105,24 @@ class LogTest extends TestCase {
             Log::toFile('app.log', 'write-fail test');
         } finally {
             ini_set('error_log', $oldErrorLog !== false ? $oldErrorLog : '');
-            Log::init($this->tmpDir, 1);
+            $this->restoreLogState($logState['basePath'], $logState['minLevel']);
         }
 
         $this->assertFileExists($logFile);
         $content = (string) file_get_contents($logFile);
         $this->assertStringContainsString('write-fail test', $content);
+    }
+
+    /** @return array{basePath: ?string, minLevel: int} */
+    private function logState(): array {
+        return [
+            'basePath' => (new \ReflectionProperty(Log::class, 'basePath'))->getValue(),
+            'minLevel' => (new \ReflectionProperty(Log::class, 'minLevel'))->getValue(),
+        ];
+    }
+
+    private function restoreLogState(?string $basePath, int $minLevel): void {
+        (new \ReflectionProperty(Log::class, 'basePath'))->setValue(null, $basePath);
+        (new \ReflectionProperty(Log::class, 'minLevel'))->setValue(null, $minLevel);
     }
 }

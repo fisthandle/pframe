@@ -31,6 +31,11 @@ class SessionSchemaTest extends TestCase {
             }
             $this->markTestSkipped('MySQL contract requires PFRAME_MYSQL_DSN.');
         }
+        if (getenv('PFRAME_REQUIRE_MYSQL') !== '1') {
+            $this->markTestSkipped(
+                'This contract drops and recreates the sessions table; set PFRAME_REQUIRE_MYSQL=1 only for a disposable test database.',
+            );
+        }
 
         $config = [
             'dsn' => $dsn,

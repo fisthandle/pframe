@@ -27,7 +27,11 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 - `db/sessions.sqlite.sql` — schemat sesji (SQLite)
 - Session handler wspiera SQLite (INSERT OR REPLACE) i MySQL (ON DUPLICATE KEY)
 - `Db::trans()` zwraca status aktywnej transakcji
+- SQLite: `begin('immediate')` bierze blokadę zapisu na początku transakcji; `transaction($callback, 'immediate')` robi commit lub rollback i przekazuje `Db` do callbacka. Tryb immediate jest odrzucany przy zagnieżdżeniu i poza SQLite; `begin()` bez argumentów zachowuje dotychczasowy tryb.
+- Oczekiwanie na `BEGIN IMMEDIATE` jest mierzone osobnym spanem `db.begin`, bez zwiększania `db_count`
+- `sqlite_pragmas` w konfiguracji Db ustawia i weryfikuje przy połączeniu: `foreign_keys`, `journal_mode`, `synchronous`, `busy_timeout`, `trusted_schema`
 - `Db::count()` zwraca row count ostatniego zapytania (także dla SELECT)
+- `Db::execScript()` wykonuje zaufany, wieloinstrukcyjny skrypt migracyjny SQLite i zapisuje go jako jedno zdarzenie `sql`
 - `Db::log()` zwraca log SQL jako `(X.XXms) SQL`
 - `Db::totalQueryCount()` / `totalQueryTime()` / `totalFetchedRows()` zbierają lekkie agregaty także przy `log_queries=false`
 - czas zapytania obejmuje przygotowanie, wykonanie i pobranie wyników; szczegółowy log rozdziela `execute_time` i `fetch_time`

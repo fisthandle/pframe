@@ -237,6 +237,11 @@ P1::db()->begin();
 // ...
 P1::db()->commit(); // or ->rollback()
 
+// SQLite: acquire the write lock before reading, then commit or roll back
+P1::db()->transaction(static function (\PFrame\Db $db) use ($jobId): void {
+    $db->exec('UPDATE jobs SET status = ? WHERE id = ?', ['claimed', $jobId]);
+}, 'immediate');
+
 // Compatibility helpers used by migration targets
 $inTx = P1::db()->trans();  // bool
 $count = P1::db()->count(); // last affected/returned row count
@@ -249,6 +254,28 @@ The array-returning methods still load the entire result; use bounded SQL querie
 
 `Db::resetRequestState()` clears diagnostics while preserving active transactions and savepoints.
 Use `rollbackAll()` explicitly when abandoning a transaction; worker requests do this automatically.
+
+`begin('immediate')` and `transaction($callback, 'immediate')` require SQLite and no active transaction.
+The default `begin()` remains deferred and supports nested savepoints. A transaction callback receives
+the `Db` instance and must leave its own transaction level open for the helper to commit or roll back;
+do not call `commit()` or `rollback()` on that level inside the callback. The `DatabaseTransactions`
+test trait starts a deferred transaction, so use another test fixture for code requiring immediate mode.
+Waiting for an immediate write lock appears in the separate `db.begin` span and does not increment
+`db_count` or `db_ms`.
+
+Configure SQLite connection pragmas with `sqlite_pragmas`, for example:
+
+```php
+$db = new \PFrame\Db(['dsn' => 'sqlite:' . $path, 'sqlite_pragmas' => [
+    'foreign_keys' => 'ON', 'journal_mode' => 'WAL', 'synchronous' => 'FULL',
+    'busy_timeout' => 5000, 'trusted_schema' => 'OFF',
+]]);
+```
+
+`Db` verifies each pragma after setting it. For trusted multi-statement SQLite migration files,
+use `$db->execScript($sql)`; regular `exec()` prepares one statement. Both record a `sql` event.
+`execScript()` discards result rows, so checks such as `PRAGMA foreign_key_check` must be queried
+separately and their rows inspected before committing the migration.
 
 DB sessions require the `sessions` table. Use `db/sessions.sql` for MySQL/MariaDB or
 `db/sessions.sqlite.sql` for SQLite.

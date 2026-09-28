@@ -459,6 +459,7 @@ PHP;
         $db = $app->db();
         $db->exec('CREATE TABLE worker_counts (id INTEGER PRIMARY KEY, name TEXT)');
 
+        $db->begin('immediate');
         $db->begin();
         $db->exec('INSERT INTO worker_counts (name) VALUES (?)', ['stale']);
 

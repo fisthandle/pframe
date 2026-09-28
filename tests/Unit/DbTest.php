@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace PFrame\Tests\Unit;
 
 use PFrame\Db;
+use PFrame\Performance;
 use PHPUnit\Framework\TestCase;
 
 class DbTest extends TestCase {
@@ -26,6 +27,92 @@ class DbTest extends TestCase {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('Database config "log_queries" must be a boolean.');
         new Db(['dsn' => 'sqlite::memory:', 'log_queries' => 'yes']);
+    }
+
+    public function testConfiguresAndVerifiesSqlitePragmas(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:', 'sqlite_pragmas' => [
+            'foreign_keys' => 'ON',
+            'journal_mode' => 'MEMORY',
+            'synchronous' => 'FULL',
+            'busy_timeout' => '005000',
+            'trusted_schema' => 'OFF',
+        ]]);
+
+        foreach (['foreign_keys' => 1, 'journal_mode' => 'memory', 'synchronous' => 2,
+            'busy_timeout' => 5000, 'trusted_schema' => 0] as $name => $expected) {
+            $this->assertSame($expected, $db->var("PRAGMA {$name}"));
+        }
+    }
+
+    public function testRejectsUnsafeAndUnappliedSqlitePragmas(): void {
+        foreach ([['foreign_keys; DROP TABLE users' => 'ON'], ['busy_timeout' => '-1'],
+            ['journal_mode' => 'WAL; DELETE'], ['foreign_keys' => 'MAYBE']] as $pragmas) {
+            try {
+                new Db(['dsn' => 'sqlite::memory:', 'sqlite_pragmas' => $pragmas]);
+                $this->fail('Expected invalid SQLite pragma');
+            } catch (\InvalidArgumentException) {
+            }
+        }
+        $this->expectException(\RuntimeException::class);
+        new Db(['dsn' => 'sqlite::memory:', 'sqlite_pragmas' => ['journal_mode' => 'WAL']]);
+    }
+
+    public function testRejectsInvalidTransactionModeAndPragmaConfigTypes(): void {
+        try {
+            $this->db->begin('exclusive');
+            $this->fail('Expected invalid transaction mode');
+        } catch (\InvalidArgumentException) {
+            $this->assertFalse($this->db->trans());
+        }
+
+        foreach (['ON', ['foreign_keys' => true]] as $pragmas) {
+            try {
+                new Db(['dsn' => 'sqlite::memory:', 'sqlite_pragmas' => $pragmas]);
+                $this->fail('Expected invalid pragma config type');
+            } catch (\InvalidArgumentException) {
+            }
+        }
+    }
+
+    public function testNamedIntegerAndNulByteStringParameters(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:']);
+        $db->exec('CREATE TABLE values_test (id INTEGER, payload BLOB)');
+        $db->exec('INSERT INTO values_test (id, payload) VALUES (:id, :payload)',
+            [':id' => 7, ':payload' => "a\0b"]);
+
+        $this->assertSame('integer', $db->var('SELECT typeof(id) FROM values_test'));
+        $this->assertSame("a\0b", $db->var('SELECT payload FROM values_test LIMIT :limit', ['limit' => 1]));
+        $this->assertSame(1, $db->count());
+    }
+
+    public function testExecScriptRunsEveryMigrationStatementAndRecordsOneSqlEvent(): void {
+        $performance = new Performance();
+        $performance->setTraceEnabled(true);
+        $db = new Db(['dsn' => 'sqlite::memory:'], $performance);
+
+        $db->transaction(static function (Db $db): void {
+            $db->execScript('CREATE TABLE first (id INTEGER); CREATE TABLE second (id INTEGER);'
+                . ' INSERT INTO second (id) VALUES (7);');
+        }, 'immediate');
+
+        $this->assertSame(1, $db->totalQueryCount());
+        $this->assertSame(0, $db->count());
+        $sql = array_values(array_filter($performance->traceEvents(),
+            static fn(array $event): bool => $event['name'] === 'sql'));
+        $this->assertCount(1, $sql);
+        $this->assertStringContainsString('CREATE TABLE second', $sql[0]['details']['sql']);
+        $this->assertSame(7, $db->var('SELECT id FROM second'));
+        $this->assertSame(2, (int) $db->var("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('first', 'second')"));
+
+        try {
+            $db->transaction(static function (Db $db): void {
+                $db->execScript('CREATE TABLE partial (id INTEGER); INSERT INTO missing (id) VALUES (1);');
+            }, 'immediate');
+            $this->fail('Expected migration statement to fail');
+        } catch (\PDOException) {
+            $this->assertFalse($db->trans());
+        }
+        $this->assertSame(0, (int) $db->var("SELECT COUNT(*) FROM sqlite_master WHERE name = 'partial'"));
     }
 
     public function testVar(): void {
@@ -158,6 +245,156 @@ class DbTest extends TestCase {
         $this->db->exec('INSERT INTO users (name, email) VALUES (?, ?)', ['Tx', 'tx@x.com']);
         $this->db->commit();
         $this->assertEquals(3, $this->db->var('SELECT COUNT(*) FROM users'));
+    }
+
+    public function testImmediateTransactionRollbackAndNestedMode(): void {
+        $this->assertTrue($this->db->begin('immediate'));
+        $this->assertTrue($this->db->trans());
+        $this->assertTrue($this->db->pdo()->inTransaction());
+        $this->db->exec('INSERT INTO users (name, email) VALUES (?, ?)', ['outer', 'outer@x.com']);
+        $this->db->begin();
+        $this->db->exec('INSERT INTO users (name, email) VALUES (?, ?)', ['inner', 'inner@x.com']);
+        $this->db->rollback();
+        $this->assertTrue($this->db->trans());
+        $this->db->rollbackAll();
+        $this->assertFalse($this->db->trans());
+        $this->assertSame(0, (int) $this->db->var("SELECT COUNT(*) FROM users WHERE name IN ('outer', 'inner')"));
+
+        $this->db->begin();
+        try {
+            $this->db->begin('immediate');
+            $this->fail('Expected nested immediate transaction to be rejected');
+        } catch (\LogicException) {
+            $this->assertTrue($this->db->trans());
+        } finally {
+            $this->db->rollbackAll();
+        }
+    }
+
+    public function testTransactionHelperRollsBackAndRethrows(): void {
+        try {
+            $this->db->transaction(function (Db $db): void {
+                $db->exec('INSERT INTO users (name, email) VALUES (?, ?)', ['Tx', 'tx@x.com']);
+                throw new \RuntimeException('callback failed');
+            }, 'immediate');
+            $this->fail('Expected callback error');
+        } catch (\RuntimeException $error) {
+            $this->assertSame('callback failed', $error->getMessage());
+        }
+        $this->assertFalse($this->db->trans());
+        $this->assertSame(0, (int) $this->db->var("SELECT COUNT(*) FROM users WHERE name = 'Tx'"));
+
+        $id = $this->db->transaction(static fn(Db $db): int => $db->insertGetId(
+            'INSERT INTO users (name, email) VALUES (?, ?)', ['Done', 'done@x.com']), 'immediate');
+        $this->assertSame('Done', $this->db->var('SELECT name FROM users WHERE id = ?', [$id]));
+    }
+
+    public function testTransactionHelperUnwindsNestedSavepointsOnFailure(): void {
+        $this->db->begin();
+        $this->db->exec('INSERT INTO users (name, email) VALUES (?, ?)', ['outside', 'outside@x.com']);
+        try {
+            $this->db->transaction(function (Db $db): void {
+                $db->exec('INSERT INTO users (name, email) VALUES (?, ?)', ['inside', 'inside@x.com']);
+                $db->begin();
+                throw new \RuntimeException('nested failure');
+            });
+            $this->fail('Expected nested failure');
+        } catch (\RuntimeException $error) {
+            $this->assertSame('nested failure', $error->getMessage());
+        }
+
+        $this->assertTrue($this->db->trans());
+        $this->assertSame(['outside'], $this->db->col(
+            "SELECT name FROM users WHERE name IN ('outside', 'inside') ORDER BY name"));
+        $this->db->rollbackAll();
+
+        try {
+            $this->db->transaction(function (Db $db): void {
+                $db->begin();
+                throw new \RuntimeException('top-level failure');
+            }, 'immediate');
+            $this->fail('Expected top-level failure');
+        } catch (\RuntimeException $error) {
+            $this->assertSame('top-level failure', $error->getMessage());
+        }
+        $this->assertFalse($this->db->trans());
+
+        try {
+            $this->db->transaction(static function (Db $db): void {
+                $db->begin();
+            }, 'immediate');
+            $this->fail('Expected unclosed savepoint to be rejected');
+        } catch (\LogicException) {
+            $this->assertFalse($this->db->trans());
+        }
+    }
+
+    public function testImmediateTransactionKeepsSqlTraceAndQueryCount(): void {
+        $performance = new Performance();
+        $performance->setTraceEnabled(true);
+        $db = new Db(['dsn' => 'sqlite::memory:'], $performance);
+        $db->transaction(static fn(Db $db): int => (int) $db->var('SELECT :value', ['value' => 7]), 'immediate');
+
+        $this->assertSame(1, $db->totalQueryCount());
+        $sql = array_values(array_filter($performance->traceEvents(),
+            static fn(array $event): bool => $event['name'] === 'sql'));
+        $this->assertCount(1, $sql);
+        $this->assertSame('SELECT :value', $sql[0]['details']['sql']);
+        $this->assertArrayHasKey('db', $performance->snapshot()['spans']);
+        $this->assertArrayHasKey('db_begin', $performance->snapshot()['spans']);
+    }
+
+    public function testImmediateBeginRespectsBusyTimeoutAndDeferredWriteUpgradeFails(): void {
+        $path = tempnam(sys_get_temp_dir(), 'pframe-sqlite-lock-');
+        $this->assertNotFalse($path);
+        try {
+            $config = ['dsn' => 'sqlite:' . $path, 'sqlite_pragmas' => [
+                'journal_mode' => 'WAL', 'busy_timeout' => 120,
+            ]];
+            $first = new Db($config);
+            $performance = new Performance();
+            $second = new Db($config, $performance);
+            $first->exec('CREATE TABLE locks (id INTEGER PRIMARY KEY)');
+            $first->begin('immediate');
+            $first->exec('INSERT INTO locks (id) VALUES (1)');
+
+            $second->begin();
+            $this->assertSame(0, (int) $second->var('SELECT COUNT(*) FROM locks'));
+            try {
+                $second->exec('INSERT INTO locks (id) VALUES (2)');
+                $this->fail('Expected the deferred read transaction to fail on write upgrade');
+            } catch (\PDOException $error) {
+                $this->assertSame(5, $error->errorInfo[1] ?? null);
+            }
+            $second->rollback();
+
+            $start = hrtime(true);
+            try {
+                $second->begin('immediate');
+                $this->fail('Expected SQLITE_BUSY');
+            } catch (\PDOException $error) {
+                $this->assertSame(5, $error->errorInfo[1] ?? null);
+            }
+            $waitedMs = (hrtime(true) - $start) / 1_000_000;
+            $this->assertGreaterThanOrEqual(100, $waitedMs);
+            $this->assertGreaterThanOrEqual(100, $performance->snapshot()['spans']['db_begin']['ms']);
+            $this->assertSame(1, $performance->snapshot()['spans']['db_begin']['count']);
+            $this->assertFalse($second->trans());
+            $first->rollbackAll();
+            $this->assertTrue($second->begin('immediate'));
+            $second->rollback();
+        } finally {
+            if (isset($first)) {
+                $first->rollbackAll();
+            }
+            if (isset($second)) {
+                $second->rollbackAll();
+            }
+            unset($first, $second);
+            @unlink($path);
+            @unlink($path . '-wal');
+            @unlink($path . '-shm');
+        }
     }
 
     public function testNestedBeginCreatesSavepoint(): void {

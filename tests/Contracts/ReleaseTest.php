@@ -120,11 +120,11 @@ class ReleaseTest extends TestCase {
 
     /** @return array{exit: int, output: string} */
     private function sh(string $script): array {
-        $env = getenv() + [
+        $env = array_merge(getenv() ?: [], [
             'GIT_AUTHOR_NAME' => 'PFrame Test', 'GIT_AUTHOR_EMAIL' => 'test@example.invalid',
             'GIT_COMMITTER_NAME' => 'PFrame Test', 'GIT_COMMITTER_EMAIL' => 'test@example.invalid',
             'GIT_CONFIG_GLOBAL' => '/dev/null', 'GIT_CONFIG_NOSYSTEM' => '1',
-        ];
+        ]);
         $pipes = [];
         $process = proc_open(['bash', '-c', $script], [1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes, null, $env);
         $this->assertIsResource($process);
