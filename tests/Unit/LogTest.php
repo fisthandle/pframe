@@ -59,6 +59,22 @@ class LogTest extends TestCase {
         $this->assertNotEmpty(glob($this->tmpDir . '/*custom.log'));
     }
 
+    public function testDefaultFilePeriodIsYearly(): void {
+        Log::error('yearly');
+
+        $this->assertFileExists($this->tmpDir . '/' . date('Y') . '_app.log');
+    }
+
+    public function testFilePeriodControlsLogFilePrefix(): void {
+        Log::init($this->tmpDir, 1, 'y.m');
+        Log::error('monthly');
+        Log::toFile('perf.jsonl', '{}', prefixTimestamp: false, daily: true);
+
+        $this->assertFileExists($this->tmpDir . '/' . date('y.m') . '_app.log');
+        $this->assertFileDoesNotExist($this->tmpDir . '/' . date('Y') . '_app.log');
+        $this->assertFileExists($this->tmpDir . '/' . date('Ymd') . '_perf.jsonl');
+    }
+
     public function testToFileRejectsPathTraversal(): void {
         $this->expectException(\InvalidArgumentException::class);
         Log::toFile('../../etc/evil.log', 'pwned');
@@ -124,5 +140,6 @@ class LogTest extends TestCase {
     private function restoreLogState(?string $basePath, int $minLevel): void {
         (new \ReflectionProperty(Log::class, 'basePath'))->setValue(null, $basePath);
         (new \ReflectionProperty(Log::class, 'minLevel'))->setValue(null, $minLevel);
+        (new \ReflectionProperty(Log::class, 'filePeriod'))->setValue(null, 'Y');
     }
 }

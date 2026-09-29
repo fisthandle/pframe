@@ -195,6 +195,10 @@ Aggregate query count, total time and fetched rows are always available through
 analysis and slowest-query details remain opt-in through `db.log_queries=true`; this avoids retaining
 parameters and growing a per-request SQL log in production.
 
+`Log::init($dir, $minLevel, $filePeriod)` writes framework messages to `<period>_app.log`. The period
+is a `date()` format and defaults to `Y` (one file per year); pass `'y.m'` for monthly files, for
+example to share one file with an application logger that rotates monthly.
+
 Set `performance.trace=true` to append one JSON record per request to `YYYYMMDD_perf.jsonl` in the
 directory configured with `Log::init()` (or to PHP's error log if no directory was configured).
 Each record contains method, path, status, matched route pattern/name/controller/action, resource

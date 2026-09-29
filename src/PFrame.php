@@ -3817,9 +3817,13 @@ namespace PFrame {
 
         private static int $minLevel = 5;
 
-        public static function init(string $basePath, int $minLevel = 5): void {
+        private static string $filePeriod = 'Y';
+
+        /** @param string $filePeriod date() format of the log file prefix, e.g. 'y.m' for monthly files */
+        public static function init(string $basePath, int $minLevel = 5, string $filePeriod = 'Y'): void {
             self::$basePath = rtrim($basePath, '/');
             self::$minLevel = $minLevel;
+            self::$filePeriod = $filePeriod;
         }
 
         /** @param array<string, mixed> $ctx */
@@ -3860,7 +3864,7 @@ namespace PFrame {
                 @mkdir(self::$basePath, 0755, true);
             }
 
-            $path = self::$basePath . '/' . date($daily ? 'Ymd' : 'Y') . '_' . $filename;
+            $path = self::$basePath . '/' . date($daily ? 'Ymd' : self::$filePeriod) . '_' . $filename;
             $written = @file_put_contents($path, ($prefixTimestamp ? date('[Y-m-d H:i:s] ') : '') . $message . "\n", FILE_APPEND | LOCK_EX);
             if ($written === false) {
                 error_log('[PFrame] Log write failed (' . $path . '): ' . $message);
