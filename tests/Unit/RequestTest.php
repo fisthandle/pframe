@@ -72,6 +72,70 @@ class RequestTest extends TestCase {
         $this->assertSame('203.0.113.5', $req->ip);
     }
 
+    public function testTrustedProxyHostnameCacheServesKnownRemoteAddress(): void {
+        $key = $this->trustedProxyCacheKey(['localhost']);
+        apcu_store($key, ['localhost' => ['10.9.9.9']], 60);
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/';
+        $_SERVER['REMOTE_ADDR'] = '10.9.9.9';
+        $_SERVER['HTTP_X_FORWARDED_FOR'] = '203.0.113.5';
+
+        $req = Request::fromGlobalsWithProxies(['localhost']);
+
+        $this->assertSame('203.0.113.5', $req->ip);
+        $this->assertSame(['10.9.9.9'], $req->trustedProxies);
+        $this->assertSame(['192.0.2.1', '10.9.9.9'], Request::resolveTrustedProxies(['192.0.2.1', 'localhost'], '192.0.2.1'));
+    }
+
+    public function testTrustedProxyHostnameCacheIgnoresMalformedEntry(): void {
+        $key = $this->trustedProxyCacheKey(['localhost']);
+        apcu_store($key, ['127.0.0.1'], 60);
+
+        $this->assertSame(['127.0.0.1'], Request::resolveTrustedProxies(['localhost'], '127.0.0.1'));
+        $this->assertSame(['localhost' => ['127.0.0.1']], apcu_fetch($key));
+    }
+
+    public function testResolveTrustedProxiesKeepsConfiguredOrderAndSkipsBlanks(): void {
+        $this->assertSame(
+            ['127.0.0.1', '192.0.2.1'],
+            Request::resolveTrustedProxies([' localhost ', '', '192.0.2.1', '127.0.0.1', 'invalid host!']),
+        );
+        $this->assertSame(
+            ['192.0.2.1', '127.0.0.1'],
+            Request::resolveTrustedProxies(['192.0.2.1', 'localhost']),
+        );
+    }
+
+    public function testTrustedProxyHostnameCacheIsRefreshedForUnknownRemoteAddress(): void {
+        $key = $this->trustedProxyCacheKey(['localhost']);
+        apcu_store($key, ['localhost' => ['10.9.9.9']], 60);
+
+        $this->assertSame(['127.0.0.1'], Request::resolveTrustedProxies(['localhost'], '127.0.0.1'));
+        $this->assertSame(['localhost' => ['127.0.0.1']], apcu_fetch($key));
+
+        apcu_store($key, ['localhost' => ['10.9.9.9']], 60);
+        $this->assertSame(['127.0.0.1'], Request::resolveTrustedProxies(['localhost'], '198.51.100.7'));
+        $this->assertSame(['localhost' => ['127.0.0.1']], apcu_fetch($key));
+    }
+
+    public function testTrustedProxyHostnameCacheIsSkippedWithoutRemoteAddress(): void {
+        $key = $this->trustedProxyCacheKey(['localhost']);
+        apcu_store($key, ['localhost' => ['10.9.9.9']], 60);
+
+        $this->assertSame(['127.0.0.1'], Request::resolveTrustedProxies(['localhost']));
+        $this->assertSame(['localhost' => ['10.9.9.9']], apcu_fetch($key));
+    }
+
+    /** @param list<string> $hosts */
+    private function trustedProxyCacheKey(array $hosts): string {
+        if (!function_exists('apcu_enabled') || !apcu_enabled()) {
+            $this->markTestSkipped('Trusted proxy cache requires APCu (apc.enable_cli=1).');
+        }
+        apcu_clear_cache();
+
+        return 'pframe:trusted_proxies:' . md5(implode("\0", $hosts));
+    }
+
     public function testFromGlobalsUntrustedProxyIgnoresForwardedFor(): void {
         $_SERVER['REQUEST_METHOD'] = 'GET';
         $_SERVER['REQUEST_URI'] = '/';

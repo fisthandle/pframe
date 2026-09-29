@@ -103,7 +103,7 @@ jobs:
       - name: Install dependencies
         run: composer install --no-interaction --no-progress --prefer-dist
 
-      - name: Run APCu cache and tick contracts
+      - name: Run APCu cache, tick and trusted proxy contracts
         env:
           PFRAME_EXPECT_CACHE_BACKEND: apcu
         run: |
@@ -113,4 +113,8 @@ jobs:
           php -d apc.enable_cli=1 vendor/bin/phpunit \
             tests/Unit/TickTest.php \
             --filter testApcuMissUsesAndWarmsPersistedLastRunFile \
+            --do-not-cache-result
+          php -d apc.enable_cli=1 vendor/bin/phpunit \
+            tests/Unit/RequestTest.php \
+            --filter TrustedProx \
             --do-not-cache-result

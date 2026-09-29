@@ -50,6 +50,7 @@ namespace PFrame {
     /** @phpstan-consistent-constructor */
     class Request {
         public const DEFAULT_MAX_BODY_BYTES = 8_388_608;
+        private const PROXY_CACHE_SECONDS = 60;
 
         /** @var array<string, mixed> */
         private array $params = [];
@@ -110,7 +111,7 @@ namespace PFrame {
             ?int $maxMultipartBodyBytes = null,
         ): static {
             $headers = self::parseServerHeaders($_SERVER);
-            $trustedProxies = self::resolveTrustedProxies($trustedProxies);
+            $trustedProxies = self::resolveTrustedProxies($trustedProxies, self::serverString($_SERVER, 'REMOTE_ADDR'));
             return self::buildFromGlobals(
                 self::resolveIp($_SERVER, $trustedProxies),
                 $headers,
@@ -122,26 +123,86 @@ namespace PFrame {
         }
 
         /**
+         * Z podanym `$remoteAddr` i włączonym APCu adresy nazw hostów są pamiętane przez 60 s.
+         *
          * @param list<string> $trustedProxies
          * @return list<string>
          */
-        public static function resolveTrustedProxies(array $trustedProxies): array {
-            $resolved = [];
+        public static function resolveTrustedProxies(array $trustedProxies, ?string $remoteAddr = null): array {
+            $entries = [];
+            $hosts = [];
+            $remoteIsLiteral = false;
             foreach ($trustedProxies as $proxy) {
                 $proxy = trim($proxy);
                 if ($proxy === '') {
                     continue;
                 }
-                if (filter_var($proxy, FILTER_VALIDATE_IP)) {
-                    $resolved[$proxy] = true;
-                    continue;
+                $entries[] = $proxy;
+                if (!filter_var($proxy, FILTER_VALIDATE_IP)) {
+                    $hosts[] = $proxy;
+                } elseif ($proxy === $remoteAddr) {
+                    $remoteIsLiteral = true;
                 }
-                foreach (self::resolveHostname($proxy) as $ip) {
+            }
+
+            $addresses = $hosts === [] ? [] : self::resolveHostnames($hosts, $remoteAddr, $remoteIsLiteral);
+            $resolved = [];
+            foreach ($entries as $proxy) {
+                foreach ($addresses[$proxy] ?? [$proxy] as $ip) {
                     $resolved[$ip] = true;
                 }
             }
 
             return array_keys($resolved);
+        }
+
+        /**
+         * Zapamiętane adresy obowiązują tylko wtedy, gdy zawierają `$remoteAddr` (albo jest on literalnym IP z konfiguracji).
+         * Każdy inny adres wymusza świeże zapytanie DNS, więc zmiana IP proxy działa od pierwszego żądania.
+         *
+         * @param non-empty-list<string> $hosts
+         * @return array<array-key, list<string>> adresy według nazwy hosta
+         */
+        private static function resolveHostnames(array $hosts, ?string $remoteAddr, bool $remoteIsLiteral): array {
+            $cacheKey = $remoteAddr !== null && function_exists('apcu_enabled') && apcu_enabled()
+                ? 'pframe:trusted_proxies:' . md5(implode("\0", $hosts))
+                : null;
+            if ($cacheKey !== null) {
+                $cached = self::cachedHostAddresses(apcu_fetch($cacheKey), $hosts);
+                if ($cached !== null && ($remoteIsLiteral || in_array($remoteAddr, array_merge(...array_values($cached)), true))) {
+                    return $cached;
+                }
+            }
+
+            $addresses = [];
+            foreach ($hosts as $host) {
+                $addresses[$host] = array_values(array_unique(self::resolveHostname($host)));
+            }
+            if ($cacheKey !== null) {
+                apcu_store($cacheKey, $addresses, self::PROXY_CACHE_SECONDS);
+            }
+
+            return $addresses;
+        }
+
+        /**
+         * @param non-empty-list<string> $hosts
+         * @return array<array-key, list<string>>|null
+         */
+        private static function cachedHostAddresses(mixed $cached, array $hosts): ?array {
+            if (!is_array($cached)) {
+                return null;
+            }
+            $addresses = [];
+            foreach ($hosts as $host) {
+                $ips = $cached[$host] ?? null;
+                if (!is_array($ips)) {
+                    return null;
+                }
+                $addresses[$host] = array_values(array_filter($ips, 'is_string'));
+            }
+
+            return $addresses;
         }
 
         /**
@@ -907,8 +968,14 @@ namespace PFrame {
         /** @var array<string, mixed> */
         private array $configData = [];
 
-        /** @var array<int, array{methods: list<string>, pattern: string, regex: string, paramNames: list<string>, controller: string, action: string, middleware: array<callable>, name: ?string, ajax: bool}> */
+        /** @var array<int, array{methods: list<string>, pattern: string, prefix: ?string, controller: string, action: string, middleware: array<callable>, name: ?string, ajax: bool}> */
         private array $routes = [];
+
+        /** @var array<int, array{regex: string, paramNames: list<string>}> */
+        private array $compiledRoutes = [];
+
+        /** @var array<string, list<string>> */
+        private array $methodLists = [];
 
         /** @var array<string, array<int, int>> */
         private array $routesByMethod = [];
@@ -1211,33 +1278,17 @@ namespace PFrame {
                 throw new \RuntimeException('Duplicate route name: ' . $name);
             }
 
-            $methodList = array_values(array_filter(array_map('trim', explode('|', strtoupper($methods)))));
-            $paramNames = [];
-            $parts = preg_split('/(\{\w+\}|\*)/', $pattern, -1, PREG_SPLIT_DELIM_CAPTURE);
-            if ($parts === false) {
-                throw new \RuntimeException('Failed to parse route pattern: ' . $pattern);
-            }
-            $regex = '';
-            foreach ($parts as $part) {
-                if (preg_match('/^\{(\w+)\}$/', $part, $matches)) {
-                    $paramNames[] = $matches[1];
-                    $regex .= '([^/]+)';
-                    continue;
-                }
-                if ($part === '*') {
-                    $paramNames[] = '*';
-                    $regex .= '(.*)';
-                    continue;
-                }
-                $regex .= preg_quote($part, '#');
-            }
+            $methodList = $this->methodLists[$methods]
+                ??= array_values(array_filter(array_map('trim', explode('|', strtoupper($methods)))));
+            // Regex trasy powstaje dopiero przy dopasowaniu; literalny prefiks ASCII pozwala odrzucić trasę bez regexu.
+            $prefixLength = strcspn($pattern, '{*');
+            $prefix = substr($pattern, 0, $prefixLength);
 
             $index = count($this->routes);
             $this->routes[] = [
                 'methods' => $methodList,
                 'pattern' => $pattern,
-                'regex' => '#^' . $regex . '/?$#ui',
-                'paramNames' => $paramNames,
+                'prefix' => mb_check_encoding($prefix, 'ASCII') ? $prefix : null,
                 'controller' => $controller,
                 'action' => $action,
                 'middleware' => $middleware,
@@ -1252,7 +1303,7 @@ namespace PFrame {
                 $this->routesByMethod[$method][] = $index;
             }
 
-            if (!str_contains($pattern, '{') && !str_contains($pattern, '*')) {
+            if ($prefixLength === strlen($pattern)) {
                 $normalizedPattern = $this->normalizeStaticPath($pattern);
                 foreach ($methodList as $method) {
                     $this->staticRoutesByMethod[$method][$normalizedPattern][] = $index;
@@ -1455,33 +1506,70 @@ namespace PFrame {
          */
         private function matchRouteIndexes(array $indexes, string $path, bool $isAjax, bool $staticRoute = false): ?array {
             $ajaxPreference = $isAjax ? [true, false] : [false];
+            // Dla ścieżki ASCII porównanie prefiksu jest równoważne dopasowaniu regexu z flagami `ui`.
+            $asciiPath = !$staticRoute && mb_check_encoding($path, 'ASCII');
             foreach ($ajaxPreference as $ajax) {
                 foreach ($indexes as $i) {
                     $route = $this->routes[$i];
                     if ($route['ajax'] !== $ajax) {
                         continue;
                     }
+                    if ($staticRoute) {
+                        return $this->buildMatchedRoute($route, []);
+                    }
 
-                    $matches = [];
-                    if (!$staticRoute && !preg_match($route['regex'], $path, $matches)) {
+                    $prefix = $route['prefix'];
+                    if ($asciiPath && $prefix !== null && strncasecmp($path, $prefix, strlen($prefix)) !== 0) {
                         continue;
                     }
 
-                    return $this->buildMatchedRoute($route, $matches);
+                    $compiled = $this->compiledRoutes[$i] ??= $this->compileRoute($route['pattern']);
+                    $matches = [];
+                    if (!preg_match($compiled['regex'], $path, $matches)) {
+                        continue;
+                    }
+
+                    return $this->buildMatchedRoute($route, $compiled['paramNames'], $matches);
                 }
             }
 
             return null;
         }
 
+        /** @return array{regex: string, paramNames: list<string>} */
+        private function compileRoute(string $pattern): array {
+            $paramNames = [];
+            $parts = preg_split('/(\{\w+\}|\*)/', $pattern, -1, PREG_SPLIT_DELIM_CAPTURE);
+            if ($parts === false) {
+                throw new \RuntimeException('Failed to parse route pattern: ' . $pattern);
+            }
+            $regex = '';
+            foreach ($parts as $part) {
+                if (preg_match('/^\{(\w+)\}$/', $part, $matches)) {
+                    $paramNames[] = $matches[1];
+                    $regex .= '([^/]+)';
+                    continue;
+                }
+                if ($part === '*') {
+                    $paramNames[] = '*';
+                    $regex .= '(.*)';
+                    continue;
+                }
+                $regex .= preg_quote($part, '#');
+            }
+
+            return ['regex' => '#^' . $regex . '/?$#ui', 'paramNames' => $paramNames];
+        }
+
         /**
-         * @param array{methods: list<string>, pattern: string, regex: string, paramNames: list<string>, controller: string, action: string, middleware: array<callable>, name: ?string, ajax: bool} $route
+         * @param array{methods: list<string>, pattern: string, prefix: ?string, controller: string, action: string, middleware: array<callable>, name: ?string, ajax: bool} $route
+         * @param list<string> $paramNames
          * @param array<int, string> $matches
          * @return array{pattern: string, name: ?string, controller: string, action: string, params: array<string, string>, middleware: array<callable>}
          */
-        private function buildMatchedRoute(array $route, array $matches = []): array {
+        private function buildMatchedRoute(array $route, array $paramNames, array $matches = []): array {
             $params = [];
-            foreach ($route['paramNames'] as $paramIndex => $name) {
+            foreach ($paramNames as $paramIndex => $name) {
                 $params[$name] = $matches[$paramIndex + 1] ?? '';
             }
 
@@ -1894,6 +1982,8 @@ namespace PFrame {
         }
 
         private function isFromTrustedProxy(Request $request): bool {
+            $remoteValue = $request->server['REMOTE_ADDR'] ?? '';
+            $remote = is_string($remoteValue) ? $remoteValue : '';
             if ($request->trustedProxiesResolved) {
                 $trusted = $request->trustedProxies;
             } else {
@@ -1902,10 +1992,8 @@ namespace PFrame {
                     return false;
                 }
                 $trusted = array_values(array_filter($trusted, static fn(mixed $ip): bool => is_string($ip) && $ip !== ''));
-                $trusted = Request::resolveTrustedProxies($trusted);
+                $trusted = Request::resolveTrustedProxies($trusted, $remote);
             }
-            $remoteValue = $request->server['REMOTE_ADDR'] ?? '';
-            $remote = is_string($remoteValue) ? $remoteValue : '';
             return $remote !== '' && in_array($remote, $trusted, true);
         }
 
@@ -2563,12 +2651,12 @@ namespace PFrame {
             if (!array_is_list($rows)) {
                 throw new \RuntimeException('PDO returned an invalid result list.');
             }
-            foreach ($rows as $row) {
-                if (!is_array($row)) {
-                    throw new \RuntimeException('PDO returned an invalid associative row.');
-                }
-                self::assertAssociativeRow($row);
+            // Wiersze jednego zapytania mają te same nazwy kolumn, więc wystarczy sprawdzić pierwszy.
+            $first = $rows[0] ?? [];
+            if (!is_array($first)) {
+                throw new \RuntimeException('PDO returned an invalid associative row.');
             }
+            self::assertAssociativeRow($first);
         }
 
         /**
@@ -3003,6 +3091,8 @@ namespace PFrame {
 
     class Session implements \SessionHandlerInterface, \SessionUpdateTimestampHandlerInterface {
         public const INTENDED_URL_KEY = '_intended_url';
+        // Niezmieniona sesja odświeża `stamp` najwyżej raz na tyle sekund (i nie rzadziej niż co 1/10 czasu życia).
+        private const STAMP_REFRESH_SECONDS = 60;
         private ?string $lockName = null;
         private ?string $lockedSessionId = null;
         private bool $lockAcquired = false;
@@ -3012,6 +3102,8 @@ namespace PFrame {
         private $fileLockHandle = null;
         private string $initialData = '';
         private bool $initialDataLoaded = false;
+        private ?string $stampSessionId = null;
+        private int $stamp = 0;
         private readonly ?Performance $performance;
 
         public function __construct(
@@ -3080,6 +3172,7 @@ namespace PFrame {
             $this->releaseLock();
             $this->initialData = '';
             $this->initialDataLoaded = false;
+            $this->stampSessionId = null;
             return true;
         }
 
@@ -3089,13 +3182,17 @@ namespace PFrame {
             }
 
             try {
-                $data = $this->db->var(
-                    'SELECT data FROM sessions WHERE session_id = ? AND stamp >= ?',
+                $row = $this->db->row(
+                    'SELECT data, stamp FROM sessions WHERE session_id = ? AND stamp >= ?',
                     [$id, $this->sessionCutoff()],
                 );
+                $data = $row['data'] ?? null;
+                $stamp = $row['stamp'] ?? null;
                 $result = is_string($data) ? $data : '';
                 $this->initialData = $result;
                 $this->initialDataLoaded = true;
+                $this->stampSessionId = is_numeric($stamp) ? $id : null;
+                $this->stamp = is_numeric($stamp) ? (int) $stamp : 0;
                 return $result;
             } catch (\Throwable $e) {
                 $this->releaseLock();
@@ -3163,6 +3260,7 @@ namespace PFrame {
             } finally {
                 $this->initialData = '';
                 $this->initialDataLoaded = false;
+                $this->stampSessionId = null;
                 $this->releaseLock();
             }
             return true;
@@ -3230,7 +3328,12 @@ namespace PFrame {
         }
 
         private function refreshTimestamp(string $id, string $data): bool {
-            $updated = $this->db->exec('UPDATE sessions SET stamp = ? WHERE session_id = ?', [time(), $id]);
+            $now = time();
+            if ($this->stampSessionId === $id && $now - $this->stamp < $this->stampRefreshSeconds()) {
+                return true;
+            }
+
+            $updated = $this->db->exec('UPDATE sessions SET stamp = ? WHERE session_id = ?', [$now, $id]);
             $missing = $updated === 0
                 && $this->db->var('SELECT 1 FROM sessions WHERE session_id = ?', [$id]) === null;
             if ($missing) {
@@ -3238,13 +3341,23 @@ namespace PFrame {
             } else {
                 $this->initialData = $data;
                 $this->initialDataLoaded = true;
+                $this->stampSessionId = $id;
+                $this->stamp = $now;
             }
 
             return true;
         }
 
+        private function sessionLifetime(): int {
+            return max(0, (int) ini_get('session.gc_maxlifetime'));
+        }
+
         private function sessionCutoff(): int {
-            return time() - max(0, (int) ini_get('session.gc_maxlifetime'));
+            return time() - $this->sessionLifetime();
+        }
+
+        private function stampRefreshSeconds(): int {
+            return min(self::STAMP_REFRESH_SECONDS, intdiv($this->sessionLifetime(), 10));
         }
 
         private function persist(string $id, string $data): void {
@@ -3269,6 +3382,8 @@ namespace PFrame {
 
             $this->initialData = $data;
             $this->initialDataLoaded = true;
+            $this->stampSessionId = $id;
+            $this->stamp = $stamp;
         }
 
         private function sessionLabel(string $id): string {
@@ -4341,6 +4456,7 @@ namespace PFrame {
             $stderr = '';
             $stdoutTruncated = false;
             $stderrTruncated = false;
+            $pollMicroseconds = 1_000;
 
             while (true) {
                 $status = proc_get_status($process);
@@ -4358,7 +4474,9 @@ namespace PFrame {
                     proc_close($process);
                     return ['success' => false, 'error' => "Timeout after {$this->cmdTimeout}s"];
                 }
-                usleep(50_000); // 50ms poll
+                // Krótkie polecenia kończą się w milisekundach; odstęp rośnie do 50 ms dla długich.
+                usleep($pollMicroseconds);
+                $pollMicroseconds = min(50_000, $pollMicroseconds * 2);
             }
 
             $this->appendCommandOutput($stdout, stream_get_contents($pipes[1]) ?: '', $stdoutTruncated);

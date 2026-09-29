@@ -64,7 +64,8 @@ class DebugBarTest extends TestCase {
 
         $this->assertSame(3, $data['db_count']);
         $this->assertSame(1, $data['db_rows']);
-        $this->assertGreaterThan(0, $data['db_ms']);
+        $this->assertGreaterThan(0.0, $app->db()->totalQueryTime());
+        $this->assertSame(round(round($app->db()->totalQueryTime() * 1000, 2), 1), $data['db_ms']);
         $this->assertCount(3, $data['queries']);
         $this->assertStringContainsString('CREATE TABLE', $data['queries'][0]['sql']);
         $this->assertGreaterThanOrEqual(0, $data['queries'][0]['ms']);

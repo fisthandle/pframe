@@ -62,11 +62,7 @@ run_step() {
 }
 
 run_php_lint() {
-    local file
-
-    while IFS= read -r -d '' file; do
-        php -l "$file" > /dev/null
-    done < <(find src tests -type f -name '*.php' -print0)
+    find src tests -type f -name '*.php' -print0 | xargs -0 -n 1 -P 4 php -l > /dev/null
 }
 
 run_quick() {

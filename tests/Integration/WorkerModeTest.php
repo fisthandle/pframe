@@ -186,7 +186,9 @@ class WorkerModeTest extends TestCase {
                 $trace = json_decode($line, true, flags: JSON_THROW_ON_ERROR);
                 $sql = array_column(array_column(array_filter($trace['events'], static fn(array $event): bool => $event['name'] === 'sql'), 'details'), 'sql');
                 $this->assertContains('session_close', array_column($trace['events'], 'name'));
-                $expectedPrefix = $index === 0 ? 'INSERT OR REPLACE INTO sessions' : 'UPDATE sessions SET stamp';
+                // Drugie żądanie nie zmienia sesji o świeżym stampie, więc tylko ją odczytuje.
+                $expectedPrefix = $index === 0 ? 'INSERT OR REPLACE INTO sessions' : 'SELECT data, stamp FROM sessions';
+                $this->assertSame($index === 0, (bool) array_filter($sql, static fn(string $query): bool => !str_starts_with($query, 'SELECT')));
                 $this->assertTrue((bool) array_filter($sql, static fn(string $query): bool => str_starts_with($query, $expectedPrefix)));
             }
         } finally {

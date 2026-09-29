@@ -290,7 +290,7 @@ $session->register();
 $app->startSession();
 ```
 
-- **Lazy-write**: when session data is unchanged between `read()` and `write()`, only the timestamp is updated (lightweight `UPDATE` instead of full `INSERT OR REPLACE`)
+- **Lazy-write**: when session data is unchanged between `read()` and `write()`, only the timestamp is updated (lightweight `UPDATE` instead of full `INSERT OR REPLACE`), and at most once per 60 seconds (or per 1/10 of `session.gc_maxlifetime` when that is shorter). A request that does not change the session therefore usually writes nothing, and `stamp` can lag the last activity by up to that interval
 - **Strict IDs**: unknown or expired client-supplied IDs are rejected through `SessionUpdateTimestampHandlerInterface::validateId()` and PHP generates a fresh ID
 - **Idle expiry**: `read()` and `validateId()` check `stamp` against `session.gc_maxlifetime` even before garbage collection removes the row. A positive cookie `lifetime` also sets this limit; `lifetime=0` creates a browser-session cookie and preserves the configured GC lifetime.
 - **Locking**: with the MySQL driver, advisory locking uses one `GET_LOCK` call; other drivers use `flock` file locks. The optional `lockDir` constructor argument selects the directory for file locks.
@@ -366,6 +366,9 @@ return [
 ```
 
 CIDR ranges are not supported. Hostnames are resolved to their current IPv4 addresses.
+With APCu enabled the resolved addresses are cached for 60 seconds. The cached set is used only when
+it contains the request's `REMOTE_ADDR`; any other address triggers a fresh DNS lookup, so a proxy that
+changes its IP is trusted again from its first request. Without APCu hostnames are resolved on every request.
 
 ### Worker Mode (FrankenPHP)
 

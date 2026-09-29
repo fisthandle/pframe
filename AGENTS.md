@@ -26,6 +26,7 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 - `db/sessions.sql` — schemat sesji (MySQL/MariaDB)
 - `db/sessions.sqlite.sql` — schemat sesji (SQLite)
 - Session handler wspiera SQLite (INSERT OR REPLACE) i MySQL (ON DUPLICATE KEY)
+- Niezmieniona sesja odświeża `stamp` najwyżej raz na 60 s (przy krótkim `session.gc_maxlifetime` co 1/10 czasu życia), więc zwykłe żądanie nie zapisuje nic do tabeli `sessions`, a `stamp` może być starszy od ostatniej aktywności o ten odstęp
 - `Db::trans()` zwraca status aktywnej transakcji
 - SQLite: `begin('immediate')` bierze blokadę zapisu na początku transakcji; `transaction($callback, 'immediate')` robi commit lub rollback i przekazuje `Db` do callbacka. Tryb immediate jest odrzucany przy zagnieżdżeniu i poza SQLite; `begin()` bez argumentów zachowuje dotychczasowy tryb.
 - Oczekiwanie na `BEGIN IMMEDIATE` jest mierzone osobnym spanem `db.begin`, bez zwiększania `db_count`
@@ -61,6 +62,7 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 
 - Globalny handler: ostrzeżenia → 500, fatale łapane przez shutdown handler
 - Router zwraca `405 Method Not Allowed` z nagłówkiem `Allow`
+- Regex trasy jest kompilowany dopiero przy dopasowaniu; trasy o innym literalnym prefiksie ASCII są odrzucane bez regexu
 - `App::addSecurityHeaders()` — CSP, HSTS, XFO, XCTO, Referrer-Policy, Permissions-Policy
 - `Request::fromGlobalsWithProxies()` + `trusted_proxies` — bezpieczne IP za proxy
 - `max_request_body_bytes` ogranicza buforowane, zwykłe body; `max_multipart_body_bytes`
@@ -175,6 +177,7 @@ Każdy konsument musi mieć skrypt `composer test`.
 - `TickTask::command()` uruchamia przez shell — `;` i `&&` wykonywane, wymaga allowlisty/escaping
 - CSP: `style-src 'unsafe-inline'` wymagane (error pages, DebugBar); scripts bez `unsafe-inline`
 - `trusted_proxies` = exact IPs lub resolvable hostnames (np. `infra_caddy`), nie CIDR
+- Adresy nazw hostów z `trusted_proxies` są pamiętane w APCu przez 60 s i używane tylko wtedy, gdy zawierają `REMOTE_ADDR` żądania; inny adres wymusza świeże zapytanie DNS. Bez APCu nazwa jest rozwiązywana przy każdym żądaniu
 - Cache: jeden backend per request (APCu-only gdy dostępny, file-only bez APCu); file backend ma trwałe, ograniczone stripe locki, których `clear()` nie usuwa
 - `Cache::pruneExpired(1000)` uruchamiaj okresowo przez `Tick`/cron, bo nieodczytywane wygasłe pliki nie sprzątają się same
 - OPcache preload: `require_once`, nie `opcache_compile_file`

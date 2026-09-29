@@ -207,6 +207,7 @@ class SessionTest extends TestCase {
         $session->read('test-lazy');
         $session->write('test-lazy', 'data|s:5:"hello";');
 
+        $db->exec('UPDATE sessions SET stamp = ? WHERE session_id = ?', [time() - 600, 'test-lazy']);
         $db->resetRequestState();
         $session->read('test-lazy');
         $session->write('test-lazy', 'data|s:5:"hello";');
@@ -215,6 +216,65 @@ class SessionTest extends TestCase {
         $lastQuery = end($log);
         $this->assertIsArray($lastQuery);
         $this->assertStringContainsString('UPDATE', $lastQuery['sql'], 'Unchanged data should only UPDATE stamp');
+    }
+
+    public function testUnchangedSessionWithFreshStampIssuesNoWrite(): void {
+        $db = new Db(['dsn' => 'sqlite::memory:', 'log_queries' => true]);
+        $db->pdo()->exec('CREATE TABLE sessions (session_id TEXT PRIMARY KEY, data TEXT, ip TEXT, agent TEXT, stamp INTEGER)');
+        $session = new Session($db, advisory: false);
+        $session->open('', '');
+        $session->read('fresh');
+        $session->write('fresh', 'payload');
+        $db->exec('UPDATE sessions SET stamp = ? WHERE session_id = ?', [time() - 5, 'fresh']);
+        $stamp = $db->var('SELECT stamp FROM sessions WHERE session_id = ?', ['fresh']);
+
+        foreach (['write', 'updateTimestamp'] as $method) {
+            $session->open('', '');
+            $db->resetRequestState();
+            $this->assertSame('payload', $session->read('fresh'));
+            $this->assertTrue($session->{$method}('fresh', 'payload'));
+            $this->assertSame(
+                ['SELECT data, stamp FROM sessions WHERE session_id = ? AND stamp >= ?'],
+                array_map(
+                    static fn(array $entry): string => (string) preg_replace('/\'[^\']*\'|\d+$/', '?', $entry['sql']),
+                    $db->queryLog(),
+                ),
+                $method,
+            );
+        }
+        $this->assertSame($stamp, $db->var('SELECT stamp FROM sessions WHERE session_id = ?', ['fresh']));
+    }
+
+    public function testStampRefreshIntervalShrinksWithShortLifetime(): void {
+        $previous = ini_get('session.gc_maxlifetime');
+        ini_set('session.gc_maxlifetime', '100');
+        try {
+            $session = new Session($this->db, advisory: false);
+            $session->write('short', 'payload');
+            $this->db->exec('UPDATE sessions SET stamp = ? WHERE session_id = ?', [time() - 10, 'short']);
+            $session->open('', '');
+            $session->read('short');
+            $this->assertTrue($session->write('short', 'payload'));
+
+            $this->assertGreaterThanOrEqual(
+                time() - 1,
+                (int) $this->db->var('SELECT stamp FROM sessions WHERE session_id = ?', ['short']),
+            );
+        } finally {
+            if (is_string($previous)) {
+                ini_set('session.gc_maxlifetime', $previous);
+            }
+        }
+    }
+
+    public function testFreshStampOfOneSessionDoesNotSkipWriteOfAnother(): void {
+        $session = new Session($this->db, advisory: false);
+        $session->write('first', 'payload');
+        $session->open('', '');
+        $this->assertSame('payload', $session->read('first'));
+
+        $this->assertTrue($session->write('second', 'payload'));
+        $this->assertSame('payload', $this->db->var('SELECT data FROM sessions WHERE session_id = ?', ['second']));
     }
 
     public function testWriteRefreshesStampWhenDataUnchanged(): void {
@@ -240,7 +300,7 @@ class SessionTest extends TestCase {
     public function testMysqlZeroUpdateDoesNotPersistWhenSessionRowExists(): void {
         $db = $this->getMockBuilder(Db::class)
             ->disableOriginalConstructor()
-            ->onlyMethods(['driver', 'exec', 'var'])
+            ->onlyMethods(['driver', 'exec', 'var', 'row'])
             ->getMock();
         $db->method('driver')->willReturn('mysql');
         $db->expects($this->once())
@@ -250,17 +310,12 @@ class SessionTest extends TestCase {
                 $this->callback(static fn(array $params): bool => $params[1] === 'same-second'),
             )
             ->willReturn(0);
+        $db->expects($this->once())
+            ->method('row')
+            ->with('SELECT data, stamp FROM sessions WHERE session_id = ? AND stamp >= ?', $this->anything())
+            ->willReturn(['data' => 'payload', 'stamp' => time() - 600]);
         $db->method('var')->willReturnCallback(
-            static function (string $sql): mixed {
-                if ($sql === 'SELECT data FROM sessions WHERE session_id = ? AND stamp >= ?') {
-                    return 'payload';
-                }
-                if ($sql === 'SELECT 1 FROM sessions WHERE session_id = ?') {
-                    return 1;
-                }
-
-                return null;
-            },
+            static fn(string $sql): mixed => $sql === 'SELECT 1 FROM sessions WHERE session_id = ?' ? 1 : null,
         );
 
         $session = new Session($db, advisory: false);
@@ -272,6 +327,7 @@ class SessionTest extends TestCase {
     public function testUpdateTimestampRestoresRowDeletedAfterRead(): void {
         $session = new Session($this->db, advisory: false);
         $session->write('gc-race', 'payload');
+        $this->db->exec('UPDATE sessions SET stamp = ? WHERE session_id = ?', [time() - 600, 'gc-race']);
         $session->open('', '');
         $this->assertSame('payload', $session->read('gc-race'));
         $this->db->exec('DELETE FROM sessions WHERE session_id = ?', ['gc-race']);
@@ -318,9 +374,6 @@ class SessionTest extends TestCase {
                 if (str_starts_with($sql, 'SELECT GET_LOCK')) {
                     return 1;
                 }
-                if (str_starts_with($sql, 'SELECT data FROM sessions')) {
-                    return 'payload';
-                }
                 if (str_starts_with($sql, 'SELECT RELEASE_LOCK')) {
                     return 1;
                 }
@@ -328,6 +381,7 @@ class SessionTest extends TestCase {
                 return null;
             }
         );
+        $db->method('row')->willReturn(['data' => 'payload', 'stamp' => time()]);
 
         $session = new Session($db, advisory: true, lockTimeout: 5);
         $session->open('', '');
@@ -345,7 +399,7 @@ class SessionTest extends TestCase {
         $calls = [];
         $db = $this->getMockBuilder(Db::class)
             ->disableOriginalConstructor()
-            ->onlyMethods(['driver', 'pdo', 'var', 'exec'])
+            ->onlyMethods(['driver', 'pdo', 'var', 'row', 'exec'])
             ->getMock();
         $db->method('driver')->willReturn('mysql');
         $db->method('pdo')->willReturn($pdo);
@@ -355,12 +409,10 @@ class SessionTest extends TestCase {
                 if (str_starts_with($sql, 'SELECT GET_LOCK')) {
                     return 0; // timeout
                 }
-                if (str_starts_with($sql, 'SELECT data FROM sessions')) {
-                    return 'existing-data';
-                }
                 return null;
             }
         );
+        $db->method('row')->willReturn(['data' => 'existing-data', 'stamp' => time()]);
         $db->expects($this->never())->method('exec');
 
         $session = new Session($db, advisory: true, lockTimeout: 1);
@@ -389,9 +441,6 @@ class SessionTest extends TestCase {
                 if (str_starts_with($sql, 'SELECT GET_LOCK')) {
                     return 1;
                 }
-                if (str_starts_with($sql, 'SELECT data FROM sessions')) {
-                    return 'payload';
-                }
                 if (str_starts_with($sql, 'SELECT RELEASE_LOCK')) {
                     return 1;
                 }
@@ -399,6 +448,7 @@ class SessionTest extends TestCase {
                 return null;
             }
         );
+        $db->method('row')->willReturn(['data' => 'payload', 'stamp' => time()]);
 
         $session = new Session($db, advisory: true, lockTimeout: 5);
         $session->open('', '');
@@ -468,7 +518,7 @@ class SessionTest extends TestCase {
         $pdo = new \PDO('sqlite::memory:');
         $db = $this->getMockBuilder(Db::class)
             ->disableOriginalConstructor()
-            ->onlyMethods(['driver', 'pdo', 'var', 'exec'])
+            ->onlyMethods(['driver', 'pdo', 'var', 'row', 'exec'])
             ->getMock();
         $db->method('driver')->willReturn('mysql');
         $db->method('pdo')->willReturn($pdo);
@@ -477,12 +527,10 @@ class SessionTest extends TestCase {
                 if (str_starts_with($sql, 'SELECT GET_LOCK')) {
                     throw new \PDOException('MySQL gone away');
                 }
-                if (str_starts_with($sql, 'SELECT data FROM sessions')) {
-                    return 'data-after-error';
-                }
                 return null;
             }
         );
+        $db->method('row')->willReturn(['data' => 'data-after-error', 'stamp' => time()]);
         $db->expects($this->never())->method('exec');
 
         $session = new Session($db, advisory: true, lockTimeout: 1);
@@ -497,7 +545,7 @@ class SessionTest extends TestCase {
         $calls = [];
         $db = $this->getMockBuilder(Db::class)
             ->disableOriginalConstructor()
-            ->onlyMethods(['driver', 'pdo', 'var', 'exec'])
+            ->onlyMethods(['driver', 'pdo', 'var', 'row', 'exec'])
             ->getMock();
         $db->method('driver')->willReturn('mysql');
         $db->method('pdo')->willReturn($pdo);
@@ -507,15 +555,13 @@ class SessionTest extends TestCase {
                 if (str_starts_with($sql, 'SELECT GET_LOCK')) {
                     return 1;
                 }
-                if (str_starts_with($sql, 'SELECT data FROM sessions')) {
-                    return 'orig';
-                }
                 if (str_starts_with($sql, 'SELECT RELEASE_LOCK')) {
                     return 1;
                 }
                 return null;
             }
         );
+        $db->method('row')->willReturn(['data' => 'orig', 'stamp' => time()]);
         $db->expects($this->once())
             ->method('exec')
             ->with(
@@ -540,7 +586,7 @@ class SessionTest extends TestCase {
         $pdo = new \PDO('sqlite::memory:');
         $db = $this->getMockBuilder(Db::class)
             ->disableOriginalConstructor()
-            ->onlyMethods(['driver', 'pdo', 'var', 'exec'])
+            ->onlyMethods(['driver', 'pdo', 'var', 'row', 'exec'])
             ->getMock();
         $db->method('driver')->willReturn('mysql');
         $db->method('pdo')->willReturn($pdo);
@@ -549,12 +595,10 @@ class SessionTest extends TestCase {
                 if (str_starts_with($sql, 'SELECT GET_LOCK')) {
                     return 0; // timeout
                 }
-                if (str_starts_with($sql, 'SELECT data FROM sessions')) {
-                    return 'active-session';
-                }
                 return null;
             }
         );
+        $db->method('row')->willReturn(['data' => 'active-session', 'stamp' => time()]);
         $db->expects($this->never())->method('exec');
 
         $session = new Session($db, advisory: true, lockTimeout: 1);

@@ -55,6 +55,69 @@ class AppTest extends TestCase {
         $this->assertSame('POST', $response->headers['Allow']);
     }
 
+    public function testUnicodeCaseFoldingStillMatchesAsciiAndNonAsciiPatterns(): void {
+        $app = new App();
+        $app->get('/kurs/{name}', HelloStub::class, 'greet');
+        $app->get('/Żółć/{name}', HelloStub::class, 'greet');
+        $app->get("/\u{212A}elvin/{name}", HelloStub::class, 'greet');
+
+        $kelvinPattern = $app->handle(new Request(method: 'GET', path: '/kelvin/Bob'));
+        $this->assertSame('Hello Bob', $kelvinPattern->body);
+        $kelvinSign = $app->handle(new Request(method: 'GET', path: "/\u{212A}urs/Joe"));
+        $polish = $app->handle(new Request(method: 'GET', path: '/żÓłć/Ann'));
+        $invalidUtf8 = $app->handle(new Request(method: 'GET', path: "/kurs/\xFF"));
+
+        $this->assertSame('Hello Joe', $kelvinSign->body);
+        $this->assertSame('Hello Ann', $polish->body);
+        $this->assertSame(404, $invalidUtf8->status);
+    }
+
+    public function testRouteMatchingEqualsFirstMatchingRegexInRegistrationOrder(): void {
+        $patterns = [
+            '/', '/a', '/a/', '/A/b', '/a/{id}', '/a/{id}/edit', '/a/b/{id}', '/ab/{id}', '/a{x}', '/{x}', '/{x}/b',
+            '/files/*', '/files/{name}/*', '/ź/{id}', '/a.b/{id}', '/a+b/{id}', '/a/{id}.json', '*',
+        ];
+        $paths = [
+            '/', '', '/a', '/A', '/a/', '/a//', '/a/b', '/A/B/', '/a/5', '/a/5/', '/a/5/edit', '/A/5/EDIT', '/a/b/5',
+            '/ab/5', '/ab', '/ax', '/aX/', '/x', '/x/b', '/files/', '/files/a/b/c', '/FILES/n/rest', '/ź/5', '/Ź/5',
+            '/a.b/5', '/aXb/5', '/a+b/5', '/a/5.json', '/a/5.JSON', '/zzz/yyy/xxx', "/a/\xFF", '/a/5?x',
+        ];
+        $app = new App();
+        foreach ($patterns as $pattern) {
+            $app->get($pattern, HelloStub::class, 'index');
+        }
+        $regexes = [];
+        foreach ($patterns as $pattern) {
+            $pattern = str_starts_with($pattern, '/') ? $pattern : '/' . $pattern;
+            $quoted = preg_replace(['/\\\\\{\w+\\\\\}/', '/\\\\\*/'], ['([^/]+)', '(.*)'], preg_quote($pattern, '#'));
+            $regexes[$pattern] = '#^' . $quoted . '/?$#ui';
+        }
+        $matched = new \ReflectionProperty(App::class, 'matchedRoute');
+
+        foreach ($paths as $path) {
+            $normalized = strtolower(rtrim($path, '/')) ?: '/';
+            $expected = null;
+            foreach (array_keys($regexes) as $pattern) {
+                $static = !str_contains($pattern, '{') && !str_contains($pattern, '*');
+                if ($static && (strtolower(rtrim($pattern, '/')) ?: '/') === $normalized) {
+                    $expected = $pattern;
+                    break;
+                }
+            }
+            foreach ($expected === null ? $regexes : [] as $pattern => $regex) {
+                if (preg_match($regex, $path) === 1) {
+                    $expected = $pattern;
+                    break;
+                }
+            }
+
+            $response = $app->handle(new Request(method: 'GET', path: $path));
+
+            $this->assertSame($expected === null ? 404 : 200, $response->status, $path);
+            $this->assertSame($expected, $matched->getValue($app)['pattern'] ?? null, $path);
+        }
+    }
+
     public function testStaticRouteMatchesWithTrailingSlash(): void {
         $app = new App();
         $app->get('/about/', StaticRouteStub::class, 'index');
