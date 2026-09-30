@@ -429,6 +429,41 @@ class TickTest extends TestCase {
         }
     }
 
+    public function testDueCheckIsProtectedAgainstCompetingDispatch(): void {
+        $tick = new Tick($this->cacheDir);
+        $competitor = new Tick($this->cacheDir);
+        $runs = 0;
+        $callback = static function () use (&$runs): void { $runs++; };
+        $competitor->task('race')->every(86400)->run($callback);
+        $this->setLastRunTimestamp($this->cacheDir, 'race', time() - 86401);
+
+        $task = new class('race', $competitor) extends TickTask {
+            private bool $interleaved = false;
+
+            public function __construct(string $name, private Tick $competitor) {
+                parent::__construct($name);
+            }
+
+            public function getInterval(): int {
+                if (!$this->interleaved) {
+                    $this->interleaved = true;
+                    // Drugi dispatcher wchodzi po odczycie last-run, przed decyzją o uruchomieniu.
+                    $this->competitor->dispatch(forceRun: true);
+                }
+                return parent::getInterval();
+            }
+        };
+        $task->every(86400)->run($callback);
+        (new \ReflectionProperty(Tick::class, 'tasks'))->setValue($tick, ['race' => $task]);
+
+        $tick->dispatch(forceRun: true);
+
+        self::assertSame(1, $runs, 'Two dispatchers must execute a due task only once');
+        $this->setLastRunTimestamp($this->cacheDir, 'race', time() - 86401);
+        self::assertTrue($competitor->dispatch(forceRun: true)['race']['success'], 'The task lock must also be released');
+        self::assertSame(2, $runs);
+    }
+
     public function testUnlockKeepsSingleLockInode(): void {
         $tick = new Tick($this->cacheDir);
         $ref = new \ReflectionClass($tick);

@@ -252,7 +252,9 @@ $count = P1::db()->count(); // last affected/returned row count
 $sqlLog = P1::db()->log();  // "(X.XXms) SQL" lines
 ```
 
-`row()`, `results()` and SELECT `exec()` validate column names without rebuilding the fetched rows.
+`exec()` returns associative rows when the executed statement has result columns, otherwise the
+affected row count. This includes CTEs and `RETURNING`; a PRAGMA without result columns returns a count.
+`row()`, `results()` and row-returning `exec()` validate column names without rebuilding the fetched rows.
 The array-returning methods still load the entire result; use bounded SQL queries and `col()` or
 `var()` when only one column or value is needed. Alias numeric expressions used in associative results.
 

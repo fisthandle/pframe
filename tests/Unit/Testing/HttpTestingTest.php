@@ -116,6 +116,16 @@ class HttpTestingTest extends TestCase {
         $this->assertForbidden();
     }
 
+    public function testPostJsonPreservesExplicitCsrfHeaderRegardlessOfCase(): void {
+        foreach (['X-Csrf-Token', 'x-csrf-token', 'X-CSRF-TOKEN'] as $header) {
+            $this->withHeaders([$header => 'wrong-token'])->postJson('/json', ['name' => 'Joe']);
+            $this->assertForbidden();
+
+            $this->withHeaders([$header => Csrf::token()])->postJson('/json', ['name' => 'Joe']);
+            $this->assertOk();
+        }
+    }
+
     public function testWithHeadersSendsCustomHeaders(): void {
         $this->withHeaders(['X-Custom' => 'test'])->get('/inspect');
         $this->assertOk();

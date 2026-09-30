@@ -127,6 +127,17 @@ class AppTest extends TestCase {
         $this->assertSame('about', $response->body);
     }
 
+    public function testStaticRouteMethodNotAllowedUsesTrailingSlashNormalization(): void {
+        $app = new App();
+        $app->get('/about/', StaticRouteStub::class, 'index');
+
+        foreach (['/about', '/about/', '/ABOUT'] as $path) {
+            $response = $app->handle(new Request(method: 'POST', path: $path));
+            $this->assertSame(405, $response->status, $path);
+            $this->assertSame('GET, HEAD', $response->headers['Allow'] ?? null, $path);
+        }
+    }
+
     public function test404(): void {
         $app = new App();
         $response = $app->handle(new Request(method: 'GET', path: '/nope'));

@@ -74,16 +74,28 @@ for name in "${SELECTED[@]}"; do
     lib_dir="${LIB_DIRS[$name]}"
     files=("$lib_dir/PFrame.php")
     [[ -f "$lib_dir/PFrameTesting.php" ]] && files+=("$lib_dir/PFrameTesting.php")
+    repo="$(git -C "$lib_dir" rev-parse --show-toplevel)"
     outdated=0
     for file in "${files[@]}"; do
         cmp -s "$PFRAME_DIR/src/$(basename "$file")" "$file" || outdated=1
     done
     if [[ $outdated -eq 0 ]]; then
+        if [[ $PUSH -eq 1 ]]; then
+            if ! upstream="$(git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"; then
+                echo "== $name: POMINIĘTY — gałąź bez upstreamu, publikacji release nie można potwierdzić"
+                failed+=("$name")
+                continue
+            fi
+            if ! git -C "$repo" merge-base --is-ancestor HEAD "$upstream"; then
+                echo "== $name: POMINIĘTY — lokalny HEAD nie jest opublikowany; push pominięty"
+                failed+=("$name")
+                continue
+            fi
+        fi
         echo "== $name: aktualny"
         continue
     fi
 
-    repo="$(git -C "$lib_dir" rev-parse --show-toplevel)"
     if [[ -n "$(git -C "$repo" status --porcelain)" ]]; then
         echo "== $name: POMINIĘTY — niezacommitowane zmiany w $repo"
         failed+=("$name")

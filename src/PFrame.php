@@ -1029,6 +1029,7 @@ namespace PFrame {
         private bool $traceStarted = false;
         private bool $traceDeferred = false;
         private bool $traceWritten = false;
+        private bool $workerRequestActive = false;
 
         private Performance $performance;
 
@@ -1586,11 +1587,13 @@ namespace PFrame {
         /** @return list<string> */
         private function allowedMethodsForPath(string $method, string $path, bool $isAjax): array {
             $allowed = [];
+            $normalizedPath = $this->normalizeStaticPath($path);
             foreach ($this->routesByMethod as $httpMethod => $indexes) {
                 if ($httpMethod === $method) {
                     continue;
                 }
-                if ($this->matchRouteIndexes($indexes, $path, $isAjax) !== null) {
+                if ($this->matchRouteIndexes($this->staticRoutesByMethod[$httpMethod][$normalizedPath] ?? [], $path, $isAjax, true) !== null
+                    || $this->matchRouteIndexes($indexes, $path, $isAjax) !== null) {
                     $allowed[] = $httpMethod;
                 }
             }
@@ -2121,9 +2124,16 @@ namespace PFrame {
 
         /**
          * Zapisuje sesję i zwalnia jej blokadę przed wysyłką, aby wolny klient nie blokował kolejnych żądań użytkownika.
+         * W workerze najpierw cofa pozostawioną transakcję, aby nie objęła zapisu sesji.
          * Zapisy do $_SESSION po tym momencie (callback SSE, shutdown) nie są utrwalane.
          */
         public function releaseSession(): void {
+            if ($this->workerRequestActive) {
+                $db = $this->dbIfInitialized();
+                if ($db !== null && $db->trans()) {
+                    $db->rollbackAll();
+                }
+            }
             if (session_status() !== PHP_SESSION_ACTIVE) {
                 return;
             }
@@ -2149,6 +2159,7 @@ namespace PFrame {
             $this->prepareWorkerRequest();
 
             $this->traceDeferred = $this->performance->traceEnabled();
+            $this->workerRequestActive = true;
 
             try {
                 if ($startSession && session_status() !== PHP_SESSION_ACTIVE) {
@@ -2162,22 +2173,38 @@ namespace PFrame {
                 $this->traceError ??= $e::class;
                 throw $e;
             } finally {
-                $this->finishWorkerRequest();
+                try {
+                    $this->finishWorkerRequest();
+                } finally {
+                    $this->workerRequestActive = false;
+                }
             }
         }
 
         private function prepareWorkerRequest(): void {
+            $db = $this->dbIfInitialized();
+            if ($db !== null && $db->trans()) {
+                try {
+                    $db->rollbackAll();
+                } catch (\Throwable $e) {
+                    if (session_status() === PHP_SESSION_ACTIVE) {
+                        try {
+                            session_abort();
+                        } catch (\Throwable $sessionError) { // @phpstan-ignore catch.neverThrown (session_abort() wywołuje close() własnego handlera, który może rzucić wyjątek.)
+                            error_log('[PFrame] Stale worker session cleanup also failed: ' . $sessionError->getMessage());
+                        }
+                    }
+                    throw $e;
+                }
+            }
+
             if (session_status() === PHP_SESSION_ACTIVE) {
                 if (!session_write_close()) {
                     throw new \RuntimeException('Failed to close stale worker session.');
                 }
             }
 
-            $db = $this->dbIfInitialized();
             if ($db !== null) {
-                if ($db->trans()) {
-                    $db->rollbackAll();
-                }
                 $db->resetRequestState();
             }
 
@@ -2383,7 +2410,7 @@ namespace PFrame {
          * @param callable(\PDOStatement): T $consume
          * @return T
          */
-        private function executeQuery(string $sql, array|string|null $params, bool $fetchesRows, callable $consume): mixed {
+        private function executeQuery(string $sql, array|string|null $params, ?bool $fetchesRows, callable $consume): mixed {
             $start = hrtime(true);
             $norm = is_string($params) ? [$params] : $params;
             $executeEnd = null;
@@ -2392,10 +2419,11 @@ namespace PFrame {
                 $stmt = $this->pdo->prepare($sql);
                 $stmt->execute($norm);
                 $executeEnd = hrtime(true);
+                $fetchesRows ??= $stmt->columnCount() > 0;
                 return $consume($stmt);
             } finally {
                 $end = hrtime(true);
-                $this->recordQuery($sql, $norm, $start, $executeEnd ?? $end, $end, $fetchesRows && $executeEnd !== null);
+                $this->recordQuery($sql, $norm, $start, $executeEnd ?? $end, $end, $fetchesRows === true && $executeEnd !== null);
             }
         }
 
@@ -2555,15 +2583,13 @@ namespace PFrame {
          * @return int|list<array<string, mixed>>
          */
         public function exec(string $sql, array|string|null $params = null): int|array {
-            if ($this->isSelectQuery($sql)) {
-                return $this->executeQuery($sql, $params, true, function (\PDOStatement $stmt): array {
+            return $this->executeQuery($sql, $params, null, function (\PDOStatement $stmt): int|array {
+                if ($stmt->columnCount() > 0) {
                     $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
                     self::assertAssociativeRows($rows);
                     $this->lastRowCount = count($rows);
                     return $rows;
-                });
-            }
-            return $this->executeQuery($sql, $params, false, function (\PDOStatement $stmt): int {
+                }
                 $this->lastRowCount = $stmt->rowCount();
                 return $this->lastRowCount;
             });
@@ -2701,8 +2727,14 @@ namespace PFrame {
                 throw new \InvalidArgumentException('Invalid insert mode: ' . $mode);
             }
 
-            $quoteIdentifier = static fn(string $identifier): string => '`' . str_replace('`', '``', $identifier) . '`';
             $colCount = count($columns);
+            foreach ($rows as $row) {
+                if (count($row) !== $colCount) {
+                    throw new \InvalidArgumentException('Each insert row must match the number of columns.');
+                }
+            }
+
+            $quoteIdentifier = static fn(string $identifier): string => '`' . str_replace('`', '``', $identifier) . '`';
             $colList = implode(', ', array_map($quoteIdentifier, $columns));
             $quotedTable = $quoteIdentifier($table);
             $rowPlaceholder = '(' . implode(',', array_fill(0, $colCount, '?')) . ')';
@@ -2843,127 +2875,6 @@ namespace PFrame {
             if (!$this->pdo->inTransaction()) {
                 $this->savepointLevel = 0;
             }
-        }
-
-        private function isSelectQuery(string $sql): bool {
-            $sql = $this->stripLeadingComments($sql);
-            if ($sql === '') {
-                return false;
-            }
-            if (preg_match('/^(SELECT|PRAGMA|SHOW|DESCRIBE|EXPLAIN)\b/i', $sql)) {
-                return true;
-            }
-            if (!preg_match('/^WITH\b/i', $sql)) {
-                return false;
-            }
-            $statement = $this->statementAfterWith($sql);
-            return $statement !== null && in_array($statement, ['SELECT', 'PRAGMA', 'SHOW', 'DESCRIBE', 'EXPLAIN'], true);
-        }
-
-        private function stripLeadingComments(string $sql): string {
-            $s = ltrim($sql);
-            while (true) {
-                if (str_starts_with($s, '--') || str_starts_with($s, '#')) {
-                    $pos = strpos($s, "\n");
-                    if ($pos === false) {
-                        return '';
-                    }
-                    $s = ltrim(substr($s, $pos + 1));
-                    continue;
-                }
-                if (str_starts_with($s, '/*')) {
-                    $pos = strpos($s, '*/');
-                    if ($pos === false) {
-                        return '';
-                    }
-                    $s = ltrim(substr($s, $pos + 2));
-                    continue;
-                }
-                break;
-            }
-            return $s;
-        }
-
-        private function statementAfterWith(string $sql): ?string {
-            $len = strlen($sql);
-            $offset = 0;
-            if (preg_match('/^\s*WITH\b/i', $sql, $match)) {
-                $offset = strlen($match[0]);
-            }
-
-            $depth = 0;
-            $seenCte = false;
-            $inSingle = false;
-            $inDouble = false;
-            $inBacktick = false;
-
-            for ($i = $offset; $i < $len; $i++) {
-                $ch = $sql[$i];
-                if ($inSingle) {
-                    if ($ch === "'" && ($i === 0 || $sql[$i - 1] !== '\\')) {
-                        $inSingle = false;
-                    }
-                    continue;
-                }
-                if ($inDouble) {
-                    if ($ch === '"' && ($i === 0 || $sql[$i - 1] !== '\\')) {
-                        $inDouble = false;
-                    }
-                    continue;
-                }
-                if ($inBacktick) {
-                    if ($ch === '`') {
-                        $inBacktick = false;
-                    }
-                    continue;
-                }
-
-                if ($ch === "'") {
-                    $inSingle = true;
-                    continue;
-                }
-                if ($ch === '"') {
-                    $inDouble = true;
-                    continue;
-                }
-                if ($ch === '`') {
-                    $inBacktick = true;
-                    continue;
-                }
-                if ($ch === '(') {
-                    $depth++;
-                    continue;
-                }
-                if ($ch === ')') {
-                    if ($depth > 0) {
-                        $depth--;
-                    }
-                    if ($depth === 0) {
-                        $seenCte = true;
-                    }
-                    continue;
-                }
-
-                if ($seenCte && $depth === 0 && $ch === ',') {
-                    $seenCte = false;
-                    continue;
-                }
-
-                if ($seenCte && $depth === 0 && ctype_alpha($ch)) {
-                    $start = $i;
-                    while ($i < $len && ctype_alpha($sql[$i])) {
-                        $i++;
-                    }
-                    $word = strtoupper(substr($sql, $start, $i - $start));
-                    if ($word === 'RECURSIVE' || $word === 'AS') {
-                        $seenCte = false;
-                        continue;
-                    }
-                    return $word;
-                }
-            }
-
-            return null;
         }
     }
 
@@ -4595,11 +4506,14 @@ namespace PFrame {
 
             $results = [];
             foreach ($this->tasks as $name => $task) {
-                if (!$this->isDue($task) || !$this->tryLock($name)) {
+                if (!$this->tryLock($name)) {
                     continue;
                 }
 
                 try {
+                    if (!$this->isDue($task)) {
+                        continue;
+                    }
                     $results[$name] = $task->execute();
                     if ($results[$name]['success']) {
                         $this->setLastRun($name, time());

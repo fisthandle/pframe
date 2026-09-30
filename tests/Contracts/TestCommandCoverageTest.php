@@ -21,6 +21,10 @@ class TestCommandCoverageTest extends TestCase {
         $this->runner = $this->tmpDir . '/bin/test';
         copy($sourceRunner, $this->runner);
         chmod($this->runner, 0755);
+        $binDir = dirname(__DIR__, 2) . '/bin';
+        copy($binDir . '/check-consumers.sh', $this->tmpDir . '/bin/check-consumers.sh');
+        copy($binDir . '/consumers.sh', $this->tmpDir . '/bin/consumers.sh');
+        chmod($this->tmpDir . '/bin/check-consumers.sh', 0755);
 
         $fakeComposer = $this->tmpDir . '/fake-bin/composer';
         file_put_contents($fakeComposer, <<<'SH'
@@ -52,6 +56,43 @@ SH);
             ['test:unit', 'test:integration', 'test:contracts', 'phpstan'],
             $this->loggedCommands(),
         );
+    }
+
+    public function testFullFailsForStaleTrackedNestedConsumerBeyondPreviousDepthLimit(): void {
+        $consumerRoot = $this->tmpDir . '/mono';
+        $this->createTrackedConsumer($consumerRoot, 'apps/publisher/lib/PFrame.php');
+
+        $result = $this->runRunner('full', ['PFRAME_CONSUMER_ROOT' => $this->tmpDir]);
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertStringContainsString('Some consumers are outdated.', $result['output']);
+        $this->assertSame(['test:unit', 'test:integration', 'test:contracts'], $this->loggedCommands());
+    }
+
+    public function testContractsChecksConsumerWhenRootIsItsGitRepository(): void {
+        $consumerRoot = $this->tmpDir . '/mono';
+        $this->createTrackedConsumer($consumerRoot, 'lib/PFrame.php');
+
+        $result = $this->runRunner('contracts', ['PFRAME_CONSUMER_ROOT' => $consumerRoot]);
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertStringContainsString('Some consumers are outdated.', $result['output']);
+        $this->assertSame(['test:contracts'], $this->loggedCommands());
+    }
+
+    public function testContractsIgnoresIgnoredUntrackedConsumerCopy(): void {
+        $repo = $this->tmpDir . '/mono';
+        mkdir($repo . '/lib', 0777, true);
+        file_put_contents($repo . '/.gitignore', "lib/PFrame.php\n");
+        file_put_contents($repo . '/lib/PFrame.php', "<?php // stale\n");
+        exec('git init --quiet ' . escapeshellarg($repo), $output, $exit);
+        $this->assertSame(0, $exit, implode("\n", $output));
+
+        $result = $this->runRunner('contracts', ['PFRAME_CONSUMER_ROOT' => $this->tmpDir]);
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertStringContainsString('No external consumer copies found', $result['output']);
+        $this->assertSame(['test:contracts'], $this->loggedCommands());
     }
 
     public function testRunnerStopsAndFailsWhenACommandFails(): void {
@@ -252,5 +293,16 @@ PHP);
             }
         }
         rmdir($path);
+    }
+
+    private function createTrackedConsumer(string $repo, string $relativeCopyPath): void {
+        mkdir(dirname($repo . '/' . $relativeCopyPath), 0777, true);
+        file_put_contents($this->tmpDir . '/src/PFrame.php', "<?php // canonical\n");
+        file_put_contents($repo . '/' . $relativeCopyPath, "<?php // stale\n");
+
+        exec('git init --quiet ' . escapeshellarg($repo), $output, $exit);
+        $this->assertSame(0, $exit, implode("\n", $output));
+        exec('git -C ' . escapeshellarg($repo) . ' add -- ' . escapeshellarg($relativeCopyPath), $output, $exit);
+        $this->assertSame(0, $exit, implode("\n", $output));
     }
 }

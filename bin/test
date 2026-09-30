@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+# shellcheck source=consumers.sh
+source "$ROOT_DIR/bin/consumers.sh"
 
 PROFILE="${1:-quick}"
 
@@ -72,14 +74,13 @@ run_quick() {
 }
 
 consumer_copy_present() {
-    local consumer_root="$1"
+    local consumer_root="$1" lib_dir
 
-    find "$consumer_root" \
-        -mindepth 3 \
-        -maxdepth 4 \
-        -type f \
-        \( -path '*/lib/PFrame.php' -o -path '*/app/lib/PFrame.php' \) \
-        -print -quit | grep -q .
+    while IFS= read -r -d '' lib_dir; do
+        return 0
+    done < <(pframe_consumer_lib_dirs "$consumer_root")
+
+    return 1
 }
 
 run_consumer_check() {

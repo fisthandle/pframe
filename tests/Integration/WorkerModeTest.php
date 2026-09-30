@@ -341,6 +341,57 @@ PHP;
         $this->assertSame(1, array_values($controllerEvents)[0]['details']['incomplete']);
     }
 
+    public function testLegacySendAndExitRollsBackOnlyInWorkerModeBeforeSavingSession(): void {
+        $script = <<<'PHP'
+require $argv[1];
+class LegacyWorkerSessionCtrl {
+    public function run(): never {
+        $db = \PFrame\App::instance()->db();
+        $db->begin();
+        $db->begin();
+        $db->exec('INSERT INTO items (name) VALUES (?)', ['uncommitted']);
+        $_SESSION['legacy'] = 'saved';
+        (new class extends \PFrame\Response {
+            public function send(): void {
+                $db = \PFrame\App::instance()->db();
+                echo json_encode([$db->trans(), session_status(), $db->var('SELECT COUNT(*) FROM sessions'), $db->var('SELECT COUNT(*) FROM items')], JSON_THROW_ON_ERROR);
+            }
+        })->sendAndExit();
+    }
+}
+ini_set('session.use_cookies', '0');
+$app = new \PFrame\App();
+$app->setConfig('db', ['dsn' => 'sqlite::memory:']);
+$app->db()->pdo()->exec(file_get_contents($argv[2]));
+$app->db()->exec('CREATE TABLE items (name TEXT)');
+session_set_save_handler(new \PFrame\Session($app->db(), advisory: false), false);
+session_id(bin2hex(random_bytes(8)));
+$app->get('/legacy', LegacyWorkerSessionCtrl::class, 'run');
+$_SERVER['REQUEST_METHOD'] = 'GET';
+$_SERVER['REQUEST_URI'] = '/legacy';
+if ($argv[3] === 'worker') {
+    $app->runWorkerRequest(startSession: true);
+} else {
+    $app->startSession();
+    $app->run();
+}
+PHP;
+        foreach (['worker' => [false, PHP_SESSION_NONE, 1, 0], 'regular' => [true, PHP_SESSION_NONE, 1, 1]] as $mode => $expected) {
+            $process = proc_open(
+                [PHP_BINARY, '-r', $script, dirname(__DIR__, 2) . '/vendor/autoload.php', dirname(__DIR__, 2) . '/db/sessions.sqlite.sql', $mode],
+                [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+                $pipes,
+            );
+            $this->assertIsResource($process);
+            $stdout = (string) stream_get_contents($pipes[1]);
+            $stderr = (string) stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $this->assertSame(0, proc_close($process), $stderr);
+            $this->assertSame($expected, json_decode($stdout, true, flags: JSON_THROW_ON_ERROR), $mode);
+        }
+    }
+
     public function testTraceForRegularRunIsWrittenAtShutdownAfterSessionClose(): void {
         $script = <<<'PHP'
 require $argv[1];
@@ -480,6 +531,92 @@ PHP;
         $this->assertSame(0, (int) $db->var('SELECT COUNT(*) FROM worker_counts'));
     }
 
+    public function testWorkerPreflightRollsBackBeforeSavingStaleDatabaseSession(): void {
+        $app = new App();
+        $app->setConfig('db', ['dsn' => 'sqlite::memory:']);
+        $db = $app->db();
+        $db->pdo()->exec((string) file_get_contents(dirname(__DIR__, 2) . '/db/sessions.sqlite.sql'));
+        $db->exec('CREATE TABLE worker_counts (name TEXT)');
+        session_set_save_handler(new \PFrame\Session($db, advisory: false), false);
+        session_id(bin2hex(random_bytes(8)));
+        $app->startSession();
+        $_SESSION['stale'] = 'saved';
+        $db->begin();
+        $db->exec('INSERT INTO worker_counts (name) VALUES (?)', ['stale']);
+        $app->get('/worker-count', WorkerCountCtrl::class, 'index');
+        $this->primeGlobals('GET', '/worker-count');
+
+        ob_start();
+        try {
+            $app->runWorkerRequest(startSession: true);
+            $this->assertSame('0', (string) ob_get_contents());
+            $this->assertSame(1, $db->var('SELECT COUNT(*) FROM sessions'));
+            $this->assertTrue(session_start());
+            $this->assertSame('saved', $_SESSION['stale'] ?? null);
+        } finally {
+            ob_end_clean();
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
+            }
+            session_set_save_handler(new \SessionHandler(), false);
+        }
+    }
+
+    public function testWorkerPreflightAbortsSessionWhenStaleRollbackFails(): void {
+        foreach ([false, true] as $closeThrows) {
+            $failure = new \RuntimeException('stale rollback failed');
+            $db = $this->getMockBuilder(Db::class)
+                ->disableOriginalConstructor()
+                ->onlyMethods(['trans', 'rollbackAll', 'resetRequestState'])
+                ->getMock();
+            $db->method('trans')->willReturn(true);
+            $db->expects($this->once())->method('rollbackAll')->willThrowException($failure);
+            $db->expects($this->never())->method('resetRequestState');
+            $closeCalls = 0;
+            $handler = $this->createMock(\SessionHandlerInterface::class);
+            $handler->method('open')->willReturn(true);
+            $handler->method('read')->willReturn('');
+            $handler->expects($this->never())->method('write');
+            $handler->expects($this->once())->method('close')->willReturnCallback(static function () use (&$closeCalls, $closeThrows): bool {
+                $closeCalls++;
+                if ($closeThrows) {
+                    throw new \RuntimeException('stale session close failed');
+                }
+                return true;
+            });
+            session_set_save_handler($handler, false);
+            session_id(bin2hex(random_bytes(8)));
+            $this->assertTrue(session_start());
+            $_SESSION['stale'] = 'must-not-be-written';
+            $app = new App();
+            $app->setDb($db);
+            $app->get('/must-not-run', WorkerMustNotRunCtrl::class, 'index');
+            WorkerMustNotRunCtrl::$runs = 0;
+            $this->primeGlobals('GET', '/must-not-run');
+
+            $error = null;
+            ob_start();
+            try {
+                try {
+                    $app->runWorkerRequest(startSession: true);
+                } catch (\RuntimeException $e) {
+                    $error = $e;
+                }
+                $this->assertSame($failure, $error);
+                $this->assertSame('', (string) ob_get_contents());
+                $this->assertSame(0, WorkerMustNotRunCtrl::$runs);
+                $this->assertSame(1, $closeCalls, 'Preflight failure must release the stale session');
+                $this->assertSame(PHP_SESSION_NONE, session_status());
+            } finally {
+                ob_end_clean();
+                if (session_status() === PHP_SESSION_ACTIVE) {
+                    session_abort();
+                }
+                session_set_save_handler(new \SessionHandler(), false);
+            }
+        }
+    }
+
     public function testRunWorkerRequestDoesNotDispatchWhenSessionStartFails(): void {
         $app = new App();
         $app->get('/must-not-run', WorkerMustNotRunCtrl::class, 'index');
@@ -511,7 +648,7 @@ PHP;
             ->disableOriginalConstructor()
             ->onlyMethods(['trans', 'rollbackAll', 'resetRequestState'])
             ->getMock();
-        $db->method('trans')->willReturnOnConsecutiveCalls(false, true);
+        $db->method('trans')->willReturnOnConsecutiveCalls(false, false, true);
         $db->expects($this->once())
             ->method('rollbackAll')
             ->willThrowException(new \RuntimeException('cleanup rollback failed'));
@@ -536,6 +673,37 @@ PHP;
         $this->assertInstanceOf(\RuntimeException::class, $error);
         $this->assertSame('cleanup rollback failed', $error->getMessage());
         $this->assertSame(PHP_SESSION_NONE, session_status(), 'Session must close even when database cleanup fails');
+        $this->assertFalse((new \ReflectionProperty(App::class, 'workerRequestActive'))->getValue($app));
+    }
+
+    public function testWorkerClosesSessionAndResetsModeWhenRollbackBeforeSendFails(): void {
+        $failure = new \RuntimeException('rollback before send failed');
+        $db = $this->getMockBuilder(Db::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['trans', 'rollbackAll', 'resetRequestState'])
+            ->getMock();
+        $db->method('trans')->willReturnOnConsecutiveCalls(false, true, true, true);
+        $db->expects($this->exactly(3))->method('rollbackAll')->willThrowException($failure);
+        $app = new App();
+        $app->setDb($db);
+        $app->get('/rollback-before-send', WorkerNoopCtrl::class, 'index');
+        $this->primeGlobals('GET', '/rollback-before-send');
+        session_id(bin2hex(random_bytes(8)));
+
+        $error = null;
+        ob_start();
+        try {
+            $app->runWorkerRequest(startSession: true);
+        } catch (\RuntimeException $e) {
+            $error = $e;
+        } finally {
+            $output = (string) ob_get_clean();
+        }
+
+        $this->assertSame('', $output, 'Response must not be sent before rollback succeeds');
+        $this->assertSame($failure, $error);
+        $this->assertSame(PHP_SESSION_NONE, session_status());
+        $this->assertFalse((new \ReflectionProperty(App::class, 'workerRequestActive'))->getValue($app));
     }
 
     public function testRunWorkerRequestCanManageSessionLifecycle(): void {
@@ -582,6 +750,43 @@ PHP;
             $this->assertSame(1, $db->var('SELECT COUNT(*) FROM sessions'));
         } finally {
             ob_end_clean();
+            session_set_save_handler(new \SessionHandler(), false);
+        }
+    }
+
+    public function testWorkerRollsBackBeforeDatabaseSessionSaveAndResponseSend(): void {
+        $app = new App();
+        $app->setConfig('db', ['dsn' => 'sqlite::memory:']);
+        $db = $app->db();
+        $db->pdo()->exec((string) file_get_contents(dirname(__DIR__, 2) . '/db/sessions.sqlite.sql'));
+        $db->exec('CREATE TABLE worker_session_items (name TEXT)');
+        session_set_save_handler(new \PFrame\Session($db, advisory: false), false);
+        session_id(bin2hex(random_bytes(8)));
+        $app->get('/database-session/{outcome}', WorkerDatabaseSessionLeakCtrl::class, 'index');
+        $app->setErrorPageHandler(static fn(\PFrame\HttpException $e): Response => new WorkerDatabaseSessionResponse('error', $e->statusCode));
+
+        try {
+            foreach (['ok' => 200, 'http' => 403, 'runtime' => 500] as $outcome => $status) {
+                $this->primeGlobals('GET', '/database-session/' . $outcome);
+                ob_start();
+                try {
+                    $app->runWorkerRequest(startSession: true);
+                } finally {
+                    ob_end_clean();
+                }
+
+                $this->assertSame($status, http_response_code());
+                $this->assertSame([false, PHP_SESSION_NONE, 0], WorkerDatabaseSessionResponse::$stateAtSend, $outcome);
+                $this->assertSame(0, $db->var('SELECT COUNT(*) FROM worker_session_items'));
+                $this->assertSame(1, $db->var('SELECT COUNT(*) FROM sessions'));
+                $this->assertTrue(session_start());
+                $this->assertSame($outcome, $_SESSION['database_session'] ?? null);
+                session_write_close();
+            }
+        } finally {
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
+            }
             session_set_save_handler(new \SessionHandler(), false);
         }
     }
@@ -673,6 +878,35 @@ class WorkerSessionCtrl extends Controller {
         $_SESSION['worker_test'] = 'ok';
 
         return new Response(body: 'session-ok');
+    }
+}
+
+class WorkerDatabaseSessionLeakCtrl extends Controller {
+    public function index(\PFrame\Request $request): Response {
+        $outcome = $request->param('outcome');
+        $_SESSION['database_session'] = $outcome;
+        $db = App::instance()->db();
+        $db->begin();
+        $db->begin();
+        $db->exec('INSERT INTO worker_session_items (name) VALUES (?)', ['uncommitted']);
+
+        if ($outcome === 'http') {
+            throw \PFrame\HttpException::forbidden();
+        }
+        if ($outcome === 'runtime') {
+            throw new \RuntimeException('worker session error');
+        }
+        return new WorkerDatabaseSessionResponse('ok');
+    }
+}
+
+class WorkerDatabaseSessionResponse extends Response {
+    public static array $stateAtSend = [];
+
+    public function send(): void {
+        $db = App::instance()->db();
+        self::$stateAtSend = [$db->trans(), session_status(), $db->var('SELECT COUNT(*) FROM worker_session_items')];
+        parent::send();
     }
 }
 

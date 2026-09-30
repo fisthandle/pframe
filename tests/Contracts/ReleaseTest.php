@@ -66,6 +66,10 @@ class ReleaseTest extends TestCase {
         $this->assertSame(0, $current['exit'], $current['output']);
         $this->assertStringContainsString('good: aktualny', $current['output']);
 
+        $currentPush = $this->sh("'{$this->devDir}/pframe/bin/release' --push good");
+        $this->assertSame(1, $currentPush['exit'], $currentPush['output']);
+        $this->assertStringContainsString('bez upstreamu', $currentPush['output']);
+
         $unknown = $this->sh("'{$this->devDir}/pframe/bin/release' broken missing");
         $this->assertSame(1, $unknown['exit'], $unknown['output']);
         $this->assertStringContainsString('Nie znaleziono konsumenta: missing', $unknown['output']);
@@ -106,6 +110,33 @@ class ReleaseTest extends TestCase {
         $this->assertSame(1, $result['exit'], $result['output']);
         $this->assertStringContainsString('bez upstreamu', $result['output']);
         $this->assertStringEqualsFile($this->devDir . '/good/lib/PFrame.php', "<?php // v1\n");
+    }
+
+    public function testRepeatedPushAfterRejectedReleaseDoesNotReportSuccessOrPushAnything(): void {
+        $this->sh(<<<SH
+            set -e
+            git init --quiet --bare '{$this->devDir}/good-origin.git'
+            git -C '{$this->devDir}/good' remote add origin '{$this->devDir}/good-origin.git'
+            git -C '{$this->devDir}/good' push --quiet --set-upstream origin HEAD
+            printf '#!/bin/sh\\nexit 1\\n' > '{$this->devDir}/good-origin.git/hooks/pre-receive'
+            chmod +x '{$this->devDir}/good-origin.git/hooks/pre-receive'
+            SH);
+
+        $failedPush = $this->sh("'{$this->devDir}/pframe/bin/release' --push good");
+        $this->assertSame(1, $failedPush['exit'], $failedPush['output']);
+        $this->assertStringContainsString('BŁĄD push', $failedPush['output']);
+
+        $releaseHead = trim($this->sh("git -C '{$this->devDir}/good' rev-parse HEAD")['output']);
+        $publishedHead = trim($this->sh("git -C '{$this->devDir}/good' rev-parse '@{u}'")['output']);
+        $this->assertNotSame($publishedHead, $releaseHead);
+        $this->sh("rm '{$this->devDir}/good-origin.git/hooks/pre-receive'");
+
+        $repeat = $this->sh("'{$this->devDir}/pframe/bin/release' --push good");
+
+        $this->assertSame(1, $repeat['exit'], $repeat['output']);
+        $this->assertStringContainsString('lokalny HEAD nie jest opublikowany', $repeat['output']);
+        $this->assertSame('1', trim($this->sh("git -C '{$this->devDir}/good' rev-list --count '@{u}..HEAD'")['output']));
+        $this->assertSame($publishedHead, trim($this->sh("git -C '{$this->devDir}/good' rev-parse '@{u}'")['output']));
     }
 
     public function testRefusesUnpushedPframeCommit(): void {

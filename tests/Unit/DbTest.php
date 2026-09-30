@@ -180,6 +180,44 @@ class DbTest extends TestCase {
         $this->assertCount(2, $rows);
     }
 
+    public function testExecCteWithCommentsReturnsRowsAndRecordsFetch(): void {
+        $this->db->resetRequestState();
+        $this->db->startQueryLog();
+        $rows = $this->db->exec("WITH cte AS (SELECT name FROM users) /* final query */ -- comment\nSELECT * FROM cte ORDER BY name");
+
+        $this->assertSame([['name' => 'Ann'], ['name' => 'Joe']], $rows);
+        $this->assertSame(2, $this->db->count());
+        $this->assertSame(1, $this->db->totalQueryCount());
+        $this->assertSame(2, $this->db->totalFetchedRows());
+        $this->assertSame(2, $this->db->queryLog()[0]['rows']);
+
+        $this->assertSame(1, $this->db->exec('WITH cte AS (SELECT id FROM users WHERE id = 1) UPDATE users SET name = ? WHERE id IN (SELECT id FROM cte)', ['Bob']));
+        $this->assertSame(1, $this->db->count());
+        $this->assertSame(2, $this->db->totalFetchedRows());
+
+        $columns = $this->db->exec('PRAGMA table_info(users)');
+        $this->assertCount(3, $columns);
+        $this->assertSame(3, $this->db->count());
+        $this->assertSame(5, $this->db->totalFetchedRows());
+    }
+
+    public function testExecPragmaWithoutResultSetReturnsAffectedCountWithoutFetch(): void {
+        $performance = new Performance();
+        $db = new Db(['dsn' => 'sqlite::memory:'], $performance);
+
+        $this->assertSame(0, $db->exec('PRAGMA foreign_keys = ON'));
+        $this->assertSame(0, $db->count());
+        $this->assertSame(1, $db->totalQueryCount());
+        $this->assertSame(0, $db->totalFetchedRows());
+        $this->assertArrayNotHasKey('db_fetch', $performance->snapshot()['spans']);
+
+        $this->assertSame([['foreign_keys' => 1]], $db->exec('PRAGMA foreign_keys'));
+        $this->assertSame(1, $db->count());
+        $this->assertSame(2, $db->totalQueryCount());
+        $this->assertSame(1, $db->totalFetchedRows());
+        $this->assertSame(1, $performance->snapshot()['spans']['db_fetch']['count']);
+    }
+
     public function testExecSelectWithMultipleCtes(): void {
         $rows = $this->db->exec('WITH a AS (SELECT * FROM users), b AS (SELECT * FROM a) SELECT * FROM b');
         $this->assertIsArray($rows);
@@ -824,10 +862,35 @@ class DbTest extends TestCase {
     }
 
     public function testBatchInsertRowTooLongThrows(): void {
-        $this->expectException(\PDOException::class);
+        $this->expectException(\InvalidArgumentException::class);
         $this->db->batchInsert('users', ['name', 'email'], [
             ['Joe', 'j@x.com', 'extra'],
         ]);
+    }
+
+    public function testBatchInsertRejectsRowsWhoseWidthsBalanceOut(): void {
+        $this->db->resetRequestState();
+        try {
+            $this->db->batchInsert('users', ['name', 'email'], [['short'], ['long', 'l@x.com', 'extra']]);
+            $this->fail('Expected invalid row width');
+        } catch (\InvalidArgumentException) {
+            $this->assertSame(0, $this->db->totalQueryCount());
+            $this->assertSame(2, (int) $this->db->var('SELECT COUNT(*) FROM users'));
+        }
+    }
+
+    public function testBatchInsertRejectsMalformedLaterChunkBeforeAnyInsert(): void {
+        $rows = array_fill(0, 500, ['valid', 'v@x.com']);
+        $rows[] = ['short'];
+        $this->db->resetRequestState();
+
+        try {
+            $this->db->batchInsert('users', ['name', 'email'], $rows);
+            $this->fail('Expected invalid row width');
+        } catch (\InvalidArgumentException) {
+            $this->assertSame(0, $this->db->totalQueryCount());
+            $this->assertSame(2, (int) $this->db->var('SELECT COUNT(*) FROM users'));
+        }
     }
 
     public function testBatchInsertRejectsInvalidMode(): void {

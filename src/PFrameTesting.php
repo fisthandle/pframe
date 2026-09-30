@@ -227,7 +227,9 @@ trait HttpTesting {
     }
 
     protected function withHeaders(array $headers): static {
-        $this->extraHeaders = array_merge($this->extraHeaders, $headers);
+        foreach ($headers as $name => $value) {
+            $this->extraHeaders[ucwords(strtolower((string) $name), '-')] = $value;
+        }
         return $this;
     }
 
