@@ -4830,7 +4830,7 @@ namespace PFrame {
                         $id,
                         'slow',
                         $slowRows,
-                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+                        'margin:0;font:inherit;white-space:pre;overflow-x:scroll',
                     );
             }
 
@@ -4848,7 +4848,7 @@ namespace PFrame {
                         $id,
                         'dups',
                         $dupsRows,
-                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+                        'margin:0;font:inherit;white-space:pre;overflow-x:scroll',
                     );
             }
 
@@ -4930,7 +4930,7 @@ namespace PFrame {
                 $id,
                 'queries',
                 $queryRows,
-                'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+                'margin:0;font:inherit;white-space:pre;overflow-x:scroll',
             );
             $insightsBox = $this->renderInsightsBox($d, $id);
             $sqlStyles = '<style>#' . $id . ' .sql-toggle-section .sql-line{white-space:pre;overflow:hidden;text-overflow:ellipsis}'
