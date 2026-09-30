@@ -4735,35 +4735,30 @@ namespace PFrame {
          * @template T of array<string, mixed>
          * @param list<T> $rows
          * @param callable(T, int): array{prefix: string, sql: string} $formatter
-         * @return array{short: string, full: string}
+         * @return string
          */
-        private function buildSqlViews(array $rows, int $shortLimit, callable $formatter): array {
-            $shortRows = '';
-            $fullRows = '';
+        private function buildSqlRows(array $rows, callable $formatter): string {
+            $sqlRows = '';
             foreach ($rows as $i => $row) {
                 $line = $formatter($row, $i);
                 $sql = (string) preg_replace('/\s+/', ' ', trim($line['sql']));
-                $shortSql = mb_strlen($sql) > $shortLimit ? mb_substr($sql, 0, $shortLimit) . '…' : $sql;
                 $prefix = $line['prefix'] === '' ? '' : $line['prefix'] . ' ';
-                $shortRows .= '<div>' . $prefix . h($shortSql) . '</div>';
-                $fullRows .= '<div>' . $prefix . h($sql) . '</div>';
+                $sqlRows .= '<div class="sql-line">' . $prefix . h($sql) . '</div>';
             }
 
-            return ['short' => $shortRows, 'full' => $fullRows];
+            return $sqlRows;
         }
 
         private function renderSqlToggleSection(
             string $id,
             string $suffix,
-            string $shortRows,
-            string $fullRows,
-            string $shortStyle,
-            string $fullStyle,
+            string $rows,
+            string $style,
         ): string {
-            return '<pre style="' . $shortStyle . '" id="' . $id . '-' . $suffix . '-short">'
-                . $shortRows
-                . '</pre><details style="margin-top:4px"><summary style="cursor:pointer">toggle</summary><pre style="'
-                . $fullStyle . '" id="' . $id . '-' . $suffix . '-full">' . $fullRows . '</pre></details>';
+            $toggleId = $id . '-' . $suffix . '-toggle';
+            return '<div class="sql-toggle-section"><input type="checkbox" class="sql-toggle" id="' . $toggleId . '">'
+                . '<label for="' . $toggleId . '" style="cursor:pointer">toggle</label>'
+                . '<pre style="' . $style . '" id="' . $id . '-' . $suffix . '-rows">' . $rows . '</pre></div>';
         }
 
         /**
@@ -4823,9 +4818,8 @@ namespace PFrame {
         private function renderInsightsBox(array $d, string $id): string {
             $slowSection = '';
             if ($d['db_count'] >= 10 && $d['slowest'] !== []) {
-                $slowViews = $this->buildSqlViews(
+                $slowRows = $this->buildSqlRows(
                     $d['slowest'],
-                    100,
                     static fn($s, int $_): array => [
                         'prefix' => '<b>' . $s['ms'] . 'ms</b>',
                         'sql' => (string) $s['sql'],
@@ -4835,18 +4829,15 @@ namespace PFrame {
                     . $this->renderSqlToggleSection(
                         $id,
                         'slow',
-                        $slowViews['short'],
-                        $slowViews['full'],
-                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+                        $slowRows,
                         'margin:0;font:inherit;white-space:pre;overflow-x:auto',
                     );
             }
 
             $dupsSection = '';
             if ($d['duplicates'] !== []) {
-                $dupsViews = $this->buildSqlViews(
+                $dupsRows = $this->buildSqlRows(
                     $d['duplicates'],
-                    90,
                     static fn($dup, int $_): array => [
                         'prefix' => '<b>' . $dup['count'] . '×</b> (' . $dup['total_ms'] . 'ms)',
                         'sql' => (string) ($dup['pattern'] ?? ''),
@@ -4856,9 +4847,7 @@ namespace PFrame {
                     . $this->renderSqlToggleSection(
                         $id,
                         'dups',
-                        $dupsViews['short'],
-                        $dupsViews['full'],
-                        'margin:0;font:inherit;white-space:pre;overflow-x:auto',
+                        $dupsRows,
                         'margin:0;font:inherit;white-space:pre;overflow-x:auto',
                     );
             }
@@ -4921,15 +4910,12 @@ namespace PFrame {
             $id = 'pf-dbg-' . mt_rand(1000, 9999);
             $qs = $d['queries'];
 
-            $queryViews = ['short' => '', 'full' => ''];
             if ($qs === []) {
                 $message = $d['db_count'] === 0 ? 'Brak zapytań.' : 'Szczegóły SQL są wyłączone.';
-                $queryViews['short'] = '<div>' . $message . '</div>';
-                $queryViews['full'] = $queryViews['short'];
+                $queryRows = '<div>' . $message . '</div>';
             } else {
-                $queryViews = $this->buildSqlViews(
+                $queryRows = $this->buildSqlRows(
                     $qs,
-                    120,
                     static fn($q, int $i): array => [
                         'prefix' => ($i + 1) . '. (' . $q['ms'] . 'ms; exec ' . $q['execute_ms']
                             . ' + fetch ' . $q['fetch_ms'] . '; rows ' . $q['rows'] . ')',
@@ -4943,16 +4929,16 @@ namespace PFrame {
             $querySection = $this->renderSqlToggleSection(
                 $id,
                 'queries',
-                $queryViews['short'],
-                $queryViews['full'],
-                'margin:0;font:inherit;white-space:pre-wrap',
+                $queryRows,
                 'margin:0;font:inherit;white-space:pre;overflow-x:auto',
             );
             $insightsBox = $this->renderInsightsBox($d, $id);
+            $sqlStyles = '<style>#' . $id . ' .sql-toggle-section .sql-line{white-space:pre;overflow:hidden;text-overflow:ellipsis}'
+                . '#' . $id . ' .sql-toggle-section input.sql-toggle:checked~pre .sql-line{overflow:visible;text-overflow:clip}</style>';
 
             return <<<HTML
             <div id="{$id}" style="background:#e8e8e8;color:#333;font-family:monospace;font-size:14px;padding:10px 14px;border-top:1px solid #ccc;margin-top:2rem;line-height:1.6">
-            {$querySection}{$insightsBox}
+            {$sqlStyles}{$querySection}{$insightsBox}
             <div style="margin-top:6px">{$summary}</div>
             <details style="margin-top:6px"><summary style="cursor:pointer">toggle files</summary><pre style="margin:0;font:inherit;white-space:pre;overflow-x:auto;margin-top:6px;font-size:12px;color:#555" id="{$id}-files">{$files['list']}</pre></details>
             </div>

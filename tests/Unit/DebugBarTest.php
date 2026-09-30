@@ -98,6 +98,9 @@ class DebugBarTest extends TestCase {
         $this->assertStringContainsString('fetch:', $html);
         $this->assertStringContainsString('Mem:', $html);
         $this->assertStringContainsString('toggle', $html);
+        $this->assertStringContainsString('<input type="checkbox" class="sql-toggle"', $html);
+        $this->assertStringContainsString('-queries-rows', $html);
+        $this->assertStringContainsString('text-overflow:ellipsis', $html);
         $this->assertStringNotContainsString('<script>', $html);
         $this->assertStringContainsString('<details', $html);
         $this->assertStringContainsString('CREATE TABLE', $html);
@@ -133,9 +136,10 @@ class DebugBarTest extends TestCase {
         $bar = new DebugBar($app);
         $html = $bar->render();
 
-        // Short version should have ellipsis
-        $this->assertStringContainsString('…', $html);
-        // Full version should have full SQL
+        // The same single SQL row is clipped until the checkbox is selected.
+        $this->assertSame(1, substr_count($html, 'class="sql-line"'));
+        $this->assertSame(1, substr_count($html, 'CREATE TABLE t'));
+        $this->assertStringContainsString(':checked~pre .sql-line', $html);
         $this->assertStringContainsString('col12', $html);
     }
 
@@ -202,9 +206,12 @@ class DebugBarTest extends TestCase {
         $this->assertStringNotContainsString('Top slow:', $html);
         $this->assertStringContainsString('N+1 candidates:', $html);
         $this->assertStringContainsString('2×', $html);
-        $this->assertStringContainsString('-dups-short', $html);
-        $this->assertStringContainsString('-dups-full', $html);
+        $this->assertStringContainsString('.sql-toggle-section input.sql-toggle:checked~pre .sql-line', $html);
+        $this->assertStringContainsString('-dups-toggle', $html);
+        $this->assertStringContainsString('-dups-rows', $html);
         $this->assertStringContainsString('<details', $html);
+        $this->assertSame(2, substr_count($html, 'class="sql-toggle-section"'));
+        $this->assertSame(4, substr_count($html, 'class="sql-line"'));
         $this->assertStringContainsString('Files:', $html);
     }
 
@@ -233,5 +240,8 @@ class DebugBarTest extends TestCase {
         $html = $bar->render();
 
         $this->assertStringContainsString('Top slow:', $html);
+        $this->assertStringContainsString('-slow-toggle', $html);
+        $this->assertStringContainsString('-slow-rows', $html);
+        $this->assertSame(3, substr_count($html, 'class="sql-toggle-section"'));
     }
 }
