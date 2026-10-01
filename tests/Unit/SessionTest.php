@@ -5,6 +5,7 @@ namespace PFrame\Tests\Unit;
 
 use PFrame\Db;
 use PFrame\Session;
+use PFrame\SessionLockException;
 use PHPUnit\Framework\TestCase;
 
 class SessionTest extends TestCase {
@@ -418,7 +419,13 @@ class SessionTest extends TestCase {
         $session = new Session($db, advisory: true, lockTimeout: 1);
         $session->open('', '');
 
-        $this->assertFalse($session->read('sid-timeout'));
+        try {
+            $session->read('sid-timeout');
+            $this->fail('Lock timeout must throw SessionLockException');
+        } catch (SessionLockException $e) {
+            $this->assertSame(503, $e->statusCode);
+            $this->assertSame(['Retry-After' => '3'], $e->headers);
+        }
         $this->assertFalse($session->write('sid-timeout', 'new-data'));
 
         // close completes cleanly
@@ -603,7 +610,11 @@ class SessionTest extends TestCase {
 
         $session = new Session($db, advisory: true, lockTimeout: 1);
         $session->open('', '');
-        $this->assertFalse($session->read('sid-destroy'));
+        try {
+            $session->read('sid-destroy');
+            $this->fail('Lock timeout must throw SessionLockException');
+        } catch (SessionLockException) {
+        }
         $this->assertFalse($session->destroy('sid-destroy'));
     }
 
@@ -764,6 +775,7 @@ require {$source};
 
 use PFrame\\Db;
 use PFrame\\Session;
+use PFrame\\SessionLockException;
 
 [, \$role, \$dbPath, \$lockDir, \$stateDir] = \$argv;
 ini_set('log_errors', '1');
@@ -787,7 +799,11 @@ if (\$role === 'a') {
     exit(0);
 }
 
-\$data = \$session->read('shared-sid');
+try {
+    \$data = \$session->read('shared-sid');
+} catch (SessionLockException) {
+    \$data = false;
+}
 if (\$data === false) {
     touch(\$stateDir . '/b-blocked');
     while (!is_file(\$stateDir . '/a-done')) {

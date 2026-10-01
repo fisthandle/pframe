@@ -71,6 +71,7 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 - limit aplikacyjny nie zastępuje limitów serwera WWW ani `post_max_size` / `upload_max_filesize`, szczególnie dla form i uploadów parsowanych przed kodem aplikacji
 - `Session::regenerate()` — po logowaniu
 - handler sesji implementuje `validateId()`; bez tego `session.use_strict_mode=1` nie odrzuca obcego ID
+- timeout blokady sesji: `Session::read()` rzuca `SessionLockException` (503 + `Retry-After`), sesja w DB zostaje nietknięta. `App::startSession()` przed `handle()` zwraca `false` i odkłada 503 do najbliższego `handle()` (przed middleware, więc bez 403 z CSRF); w trakcie `handle()` rzuca wyjątek dalej. AJAX/`Accept: application/json` dostaje JSON `{success:false,message}`
 - `Response::redirect()` blokuje external URL gdy HTTP_HOST ustawiony
 - `View::renderFile()` chroni przed path traversal
 

@@ -165,6 +165,7 @@ Layout:
 | `DebugBar` | Request/resource timing + SQL execution/fetch debug overlay renderer |
 | `Base` | Static facade for app/db/config access |
 | `HttpException` | HTTP error responses (401, 403, 404, 405) |
+| `SessionLockException` | `HttpException(503)` with `Retry-After` for a session lock timeout |
 
 `Cache` constructor: `new \PFrame\Cache(?string $dir = null)`.  
 When APCu is available, `dir` is optional. Without APCu, provide an existing cache directory (constructor fails fast if missing).
@@ -300,7 +301,8 @@ $app->startSession();
 - **Strict IDs**: unknown or expired client-supplied IDs are rejected through `SessionUpdateTimestampHandlerInterface::validateId()` and PHP generates a fresh ID
 - **Idle expiry**: `read()` and `validateId()` check `stamp` against `session.gc_maxlifetime` even before garbage collection removes the row. A positive cookie `lifetime` also sets this limit; `lifetime=0` creates a browser-session cookie and preserves the configured GC lifetime.
 - **Locking**: with the MySQL driver, advisory locking uses one `GET_LOCK` call; other drivers use `flock` file locks. The optional `lockDir` constructor argument selects the directory for file locks.
-- **Fail-closed lock failure**: if the lock cannot be acquired (timeout or lock error), `read()`, `write()` and `destroy()` return `false`; the caller must handle the failed operation instead of treating it as successful.
+- **Fail-closed lock failure**: if the lock cannot be acquired, `write()`, `updateTimestamp()` and `destroy()` return `false`; the caller must handle the failed operation instead of treating it as successful. `read()` returns `false` on a lock error and throws `SessionLockException` on a lock timeout, so `session_start()` aborts without an empty session and without writing the stored row.
+- **Lock timeout response**: `App::startSession()` before `handle()` (front controller bootstrap, `runWorkerRequest(startSession: true)`) returns `false` and the next `handle()` responds `503 Service Unavailable` with `Retry-After: 3` before any middleware (so CSRF does not turn it into `403`). Called during `handle()` (e.g. reopening after `releaseSession()`), it throws `SessionLockException`; uncaught, it becomes the same `503`. HTML clients get the default error page with the message, AJAX or `Accept: application/json` clients get `{"success": false, "message": "..."}`, unless a custom error page handler returns its own response.
 - **Intended URL**: `Session::pullIntendedUrl(string $default = '/')` retrieves and clears the URL stored by `Middleware::auth()`
 
 `Flash` stores identical type/text pairs only once and keeps its serialized message list within
@@ -340,7 +342,7 @@ After login, retrieve the intended URL with `\PFrame\Session::pullIntendedUrl()`
 `App` has a built-in 4-stage error pipeline:
 1. `3xx` `HttpException` passthrough (redirect-style responses are returned directly)
 2. optional custom error handler
-3. AJAX fallback (`text/plain`)
+3. AJAX fallback (`text/plain`; `SessionLockException` uses JSON for AJAX or `Accept: application/json`)
 4. default inline HTML error page (`text/html; charset=UTF-8`)
 
 Register a custom handler:

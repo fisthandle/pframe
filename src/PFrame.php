@@ -47,6 +47,20 @@ namespace PFrame {
         }
     }
 
+    /** Timeout blokady sesji: 503 z Retry-After zamiast pracy na pustej sesji. */
+    class SessionLockException extends HttpException {
+        public const RETRY_AFTER_SECONDS = 3;
+
+        public static function timeout(): static {
+            return new static(
+                503,
+                'Serwer jest zajęty innym żądaniem tej sesji, spróbuj ponownie.',
+                null,
+                ['Retry-After' => (string) self::RETRY_AFTER_SECONDS],
+            );
+        }
+    }
+
     /** @phpstan-consistent-constructor */
     class Request {
         public const DEFAULT_MAX_BODY_BYTES = 8_388_608;
@@ -1030,6 +1044,8 @@ namespace PFrame {
         private bool $traceDeferred = false;
         private bool $traceWritten = false;
         private bool $workerRequestActive = false;
+        private bool $handling = false;
+        private ?SessionLockException $pendingSessionLock = null;
 
         private Performance $performance;
 
@@ -1101,6 +1117,7 @@ namespace PFrame {
             $this->traceStarted = false;
             $this->traceDeferred = false;
             $this->traceWritten = false;
+            $this->pendingSessionLock = null;
         }
 
         public function loadConfig(string $path): void {
@@ -1357,7 +1374,12 @@ namespace PFrame {
             $this->middleware[] = $middleware;
         }
 
-        /** @param array<string, mixed> $options */
+        /**
+         * Timeout blokady sesji: w trakcie handle() rzuca SessionLockException (503), a przed nim
+         * (bootstrap front controllera, worker) zwraca false i odkłada 503 do najbliższego handle().
+         *
+         * @param array<string, mixed> $options
+         */
         public function startSession(array $options = []): bool {
             if ($this->performance->traceEnabled()) {
                 $this->traceStarted = true;
@@ -1370,6 +1392,15 @@ namespace PFrame {
                     'session.start',
                     static fn(): bool => session_start($options),
                 );
+            } catch (SessionLockException $e) {
+                if ($this->performance->traceEnabled()) {
+                    $this->traceError = 'session.lock';
+                }
+                if ($this->handling) {
+                    throw $e;
+                }
+                $this->pendingSessionLock = $e;
+                return false;
             } catch (\Throwable $e) {
                 if ($this->performance->traceEnabled()) {
                     $this->traceError = 'session.start:' . $e::class;
@@ -1394,6 +1425,14 @@ namespace PFrame {
             return $this->withErrorHandler(function () use ($request): Response {
                 $response = $this->performance->measure('dispatch', function () use ($request): Response {
                     try {
+                        if ($this->pendingSessionLock !== null) {
+                            $sessionLock = $this->pendingSessionLock;
+                            $this->pendingSessionLock = null;
+                            if ($this->performance->traceEnabled()) {
+                                $this->traceError = 'session.lock';
+                            }
+                            throw $sessionLock;
+                        }
                         if ($request->bodyTooLarge) {
                             throw new HttpException(413, 'Payload Too Large');
                         }
@@ -1717,6 +1756,13 @@ namespace PFrame {
                 }
             }
 
+            if ($e instanceof SessionLockException
+                && ($request->isAjax() || str_contains(strtolower($request->header('Accept') ?? ''), 'application/json'))) {
+                $response = Response::json(['success' => false, 'message' => $e->getMessage()], $e->statusCode);
+                $response->headers = array_merge($e->headers, $response->headers);
+                return $response;
+            }
+
             $debug = self::intValue($this->config('debug', 0), 0);
             if ($request->isAjax()) {
                 $body = $debug >= 3
@@ -1748,7 +1794,7 @@ namespace PFrame {
             $status = self::HTTP_STATUS_TEXT[$code] ?? 'Error';
             $debug = self::intValue($this->config('debug', 0), 0);
             $message = $e->getMessage();
-            $showMessage = $debug >= 1 || in_array($code, [400, 422, 429], true);
+            $showMessage = $debug >= 1 || in_array($code, [400, 422, 429], true) || $e instanceof SessionLockException;
             $msgHtml = ($showMessage && $message !== '')
                 ? '<p style="color:#666;margin:1rem 0 0;">' . htmlspecialchars($message, ENT_QUOTES | ENT_HTML5, 'UTF-8') . '</p>'
                 : '';
@@ -2007,10 +2053,13 @@ namespace PFrame {
                 }
                 throw new \ErrorException($message, 0, $severity, $file, $line);
             });
+            $wasHandling = $this->handling;
+            $this->handling = true;
 
             try {
                 return $callback();
             } finally {
+                $this->handling = $wasHandling;
                 restore_error_handler();
             }
         }
@@ -2163,7 +2212,8 @@ namespace PFrame {
 
             try {
                 if ($startSession && session_status() !== PHP_SESSION_ACTIVE) {
-                    if (!$this->startSession()) {
+                    // Timeout blokady nie przerywa workera: run() odpowie odłożonym 503.
+                    if (!$this->startSession() && $this->pendingSessionLock === null) {
                         throw new \RuntimeException('Failed to start worker session.');
                     }
                 }
@@ -3007,6 +3057,7 @@ namespace PFrame {
         private ?string $lockName = null;
         private ?string $lockedSessionId = null;
         private bool $lockAcquired = false;
+        private bool $lockTimedOut = false;
         private readonly bool $useAdvisoryLock;
         private readonly ?string $fileLockDir;
         /** @var resource|null */
@@ -3089,6 +3140,10 @@ namespace PFrame {
 
         public function read(string $id): string|false {
             if (!$this->ensureLock($id)) {
+                // Timeout blokady nie może skończyć się pustą sesją (utrata CSRF/logowania); session_start() przerywa się bez zapisu.
+                if ($this->lockTimedOut) {
+                    throw SessionLockException::timeout();
+                }
                 return false;
             }
 
@@ -3205,6 +3260,7 @@ namespace PFrame {
                 $this->releaseLock();
             }
 
+            $this->lockTimedOut = false;
             $acquire = fn(): bool => $this->useAdvisoryLock
                 ? $this->acquireAdvisoryLock($id)
                 : $this->acquireFileLock($id);
@@ -3230,6 +3286,7 @@ namespace PFrame {
 
                 error_log('[SESSION] Advisory lock timeout for ' . $this->lockName);
                 $this->lockName = null;
+                $this->lockTimedOut = true;
             } catch (\Throwable $e) {
                 error_log('[SESSION] Advisory lock error for ' . ($this->lockName ?? 'unknown') . ': ' . $e->getMessage());
                 $this->lockName = null;
@@ -3331,6 +3388,7 @@ namespace PFrame {
 
             fclose($handle);
             error_log('[SESSION] File lock timeout for session ' . hash('sha256', $id));
+            $this->lockTimedOut = true;
             return false;
         }
 
