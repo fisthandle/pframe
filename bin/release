@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Wydaje bieżący commit PFrame do konsumentów: kopiuje src/PFrame.php (i PFrameTesting.php,
-# jeśli konsument go używa), uruchamia `composer test` konsumenta i commituje kopię.
-# Przy błędzie testów kopia jest cofana. Deploy konsumentów pozostaje ich własną procedurą.
+# jeśli konsument go używa), zapisuje wydany SHA w lib/PFRAME_VERSION, uruchamia bramkę
+# konsumenta (`composer test:pframe`, a bez takiego skryptu `composer test`) i commituje kopię.
+# Przy błędzie bramki kopia jest cofana. Deploy konsumentów pozostaje ich własną procedurą.
 set -euo pipefail
 
 PFRAME_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -62,8 +63,15 @@ done
 # Kopia w toku jest cofana przy każdym przerwaniu: błąd testów, hook commita, Ctrl-C.
 pending_repo=""
 pending_files=()
+pending_new_file=""
 rollback() {
-    [[ -n "$pending_repo" ]] && git -C "$pending_repo" checkout -- "${pending_files[@]}"
+    if [[ -n "$pending_repo" ]]; then
+        git -C "$pending_repo" checkout HEAD -- "${pending_files[@]}"
+        if [[ -n "$pending_new_file" ]]; then
+            git -C "$pending_repo" rm --quiet --cached --ignore-unmatch -- "$pending_new_file"
+            rm -f "$pending_new_file"
+        fi
+    fi
     pending_repo=""
 }
 trap 'rollback; exit 130' INT TERM
@@ -107,20 +115,35 @@ for name in "${SELECTED[@]}"; do
         continue
     fi
 
-    echo "== $name: kopia $SHA i testy"
+    gate="test"
+    if php -r 'exit(isset(json_decode((string) file_get_contents($argv[1]), true)["scripts"]["test:pframe"]) ? 0 : 1);' \
+        "$repo/composer.json" 2>/dev/null; then
+        gate="test:pframe"
+    fi
+    version_file="$lib_dir/PFRAME_VERSION"
+
+    echo "== $name: kopia $SHA i bramka composer $gate"
     pending_repo="$repo"
     pending_files=("${files[@]}")
+    pending_new_file="$version_file"
+    if git -C "$repo" ls-files --error-unmatch -- "$version_file" >/dev/null 2>&1; then
+        pending_files+=("$version_file")
+        pending_new_file=""
+    fi
     for file in "${files[@]}"; do
         cp "$PFRAME_DIR/src/$(basename "$file")" "$file"
     done
+    git -C "$PFRAME_DIR" rev-parse HEAD > "$version_file"
+    files+=("$version_file")
     log="$(mktemp -t "pframe-release-${name//\//-}-XXXX.log")"
-    if ! (cd "$repo" && composer test) >"$log" 2>&1; then
+    if ! (cd "$repo" && composer "$gate") >"$log" 2>&1; then
         rollback
-        echo "   BŁĄD testów, kopia cofnięta; log: $log"
+        echo "   BŁĄD testów ($gate), kopia cofnięta; log: $log"
         failed+=("$name")
         continue
     fi
-    if ! git -C "$repo" commit --quiet -m "Update PFrame to $SHA" -m "$SUBJECT" -- "${files[@]}" >>"$log" 2>&1; then
+    if ! git -C "$repo" add -- "$version_file" >>"$log" 2>&1 \
+        || ! git -C "$repo" commit --quiet -m "Update PFrame to $SHA" -m "$SUBJECT" -- "${files[@]}" >>"$log" 2>&1; then
         rollback
         echo "   BŁĄD commita (hook?), kopia cofnięta; log: $log"
         failed+=("$name")

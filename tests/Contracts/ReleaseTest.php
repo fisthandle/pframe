@@ -50,11 +50,18 @@ class ReleaseTest extends TestCase {
         $sha = trim($this->sh("git -C '{$this->devDir}/pframe' rev-parse --short HEAD")['output']);
         $this->assertStringEqualsFile($this->devDir . '/good/lib/PFrame.php', "<?php // v2\n");
         $this->assertSame("Update PFrame to {$sha}\n", $this->sh("git -C '{$this->devDir}/good' log -1 --format=%s")['output']);
+        $fullSha = $this->sh("git -C '{$this->devDir}/pframe' rev-parse HEAD")['output'];
+        $this->assertStringEqualsFile($this->devDir . '/good/lib/PFRAME_VERSION', $fullSha);
+        $this->assertSame(
+            "lib/PFRAME_VERSION\nlib/PFrame.php\n",
+            $this->sh("git -C '{$this->devDir}/good' show --format= --name-only HEAD")['output'],
+        );
         $this->assertSame('', $this->sh("git -C '{$this->devDir}/good' status --porcelain")['output']);
 
         foreach (['broken', 'dirty'] as $consumer) {
             $this->assertStringEqualsFile($this->devDir . "/{$consumer}/lib/PFrame.php", "<?php // v1\n");
             $this->assertSame("init\n", $this->sh("git -C '{$this->devDir}/{$consumer}' log -1 --format=%s")['output']);
+            $this->assertFileDoesNotExist($this->devDir . "/{$consumer}/lib/PFRAME_VERSION");
         }
         $this->assertSame('', $this->sh("git -C '{$this->devDir}/broken' status --porcelain")['output']);
     }
@@ -93,6 +100,24 @@ class ReleaseTest extends TestCase {
         $this->assertSame('', $this->sh("git -C '{$this->devDir}/mono' status --porcelain")['output']);
     }
 
+    public function testConsumerGateScriptReplacesComposerTestAndItsFailureRollsBack(): void {
+        $this->sh(<<<SH
+            set -e
+            cd '{$this->devDir}/good'
+            echo '{"scripts":{"test":"true","test:pframe":"false"}}' > composer.json
+            echo stale > lib/PFRAME_VERSION
+            git add -A && git commit --quiet -m gate
+            SH);
+
+        $result = $this->sh("'{$this->devDir}/pframe/bin/release' good");
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertStringContainsString('BŁĄD testów (test:pframe)', $result['output']);
+        $this->assertStringEqualsFile($this->devDir . '/good/lib/PFrame.php', "<?php // v1\n");
+        $this->assertStringEqualsFile($this->devDir . '/good/lib/PFRAME_VERSION', "stale\n");
+        $this->assertSame('', $this->sh("git -C '{$this->devDir}/good' status --porcelain")['output']);
+    }
+
     public function testRejectedCommitHookRollsBackCopy(): void {
         $this->sh("printf '#!/bin/sh\\nexit 1\\n' > '{$this->devDir}/good/.git/hooks/pre-commit' && chmod +x '{$this->devDir}/good/.git/hooks/pre-commit'");
 
@@ -101,6 +126,7 @@ class ReleaseTest extends TestCase {
         $this->assertSame(1, $result['exit'], $result['output']);
         $this->assertStringContainsString('BŁĄD commita', $result['output']);
         $this->assertStringEqualsFile($this->devDir . '/good/lib/PFrame.php', "<?php // v1\n");
+        $this->assertFileDoesNotExist($this->devDir . '/good/lib/PFRAME_VERSION');
         $this->assertSame('', $this->sh("git -C '{$this->devDir}/good' status --porcelain")['output']);
     }
 

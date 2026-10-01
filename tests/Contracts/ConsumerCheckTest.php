@@ -25,6 +25,7 @@ class ConsumerCheckTest extends TestCase {
     public function testCurrentConsumersInAllSupportedLayoutsPass(): void {
         $this->copyConsumer('first/lib');
         $this->copyConsumer('second/app/lib');
+        file_put_contents($this->tmpDir . '/second/app/lib/PFRAME_VERSION', str_repeat('a', 40) . "\n");
         $this->copyConsumer('third/apps/publisher/lib');
 
         $result = $this->runCheck();
@@ -32,6 +33,8 @@ class ConsumerCheckTest extends TestCase {
         $this->assertSame(0, $result['exit'], $result['output']);
         $this->assertStringContainsString('All consumers up to date.', $result['output']);
         $this->assertSame(6, substr_count($result['output'], 'CURRENT'));
+        $this->assertSame(1, substr_count($result['output'], str_repeat('a', 40)));
+        $this->assertSame(2, substr_count($result['output'], '(not recorded)'));
     }
 
     public function testOutdatedConsumerFails(): void {

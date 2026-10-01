@@ -64,6 +64,12 @@ while IFS= read -r -d '' lib_dir; do
     echo -e "${BOLD}$(pframe_consumer_name "$DEV_DIR" "$lib_dir")${NC}"
     check_file "$SRC_PFRAME" "$lib_dir/PFrame.php" "PFrame.php"
     check_file "$SRC_TESTING" "$lib_dir/PFrameTesting.php" "PFrameTesting.php"
+    # Ślad wydania zapisany przez bin/release; informacyjny, rozjazd wykazuje porównanie plików.
+    if [[ -f "$lib_dir/PFRAME_VERSION" ]]; then
+        printf "  %-22s %s\n" "PFRAME_VERSION" "$(head -c 40 "$lib_dir/PFRAME_VERSION")"
+    else
+        printf "  %-22s ${GRAY}(not recorded)${NC}\n" "PFRAME_VERSION"
+    fi
     echo ""
 done < <(pframe_consumer_lib_dirs "$DEV_DIR")
 

@@ -158,10 +158,13 @@ Wydanie zmiany do konsumentów (bez ręcznego kopiowania):
 ./bin/release [--push] [konsument ...]   # bez nazw: wszyscy nieaktualni
 ```
 Wymaga czystego drzewa i HEAD obecnego w `origin/main`, uruchamia `bin/test quick` i PHPStan
-PFrame, a u każdego nieaktualnego konsumenta z czystym drzewem kopiuje pliki, uruchamia jego
-`composer test` i commituje „Update PFrame to <sha>”. Błąd testów, odrzucenie commita przez hook lub
+PFrame, a u każdego nieaktualnego konsumenta z czystym drzewem kopiuje pliki, zapisuje pełny SHA
+wydanego commita w `lib/PFRAME_VERSION`, uruchamia bramkę konsumenta i commituje „Update PFrame to
+<sha>”. Bramką jest `composer test:pframe`, jeśli konsument ma taki skrypt (Brazar: cały backend),
+a w przeciwnym razie `composer test`. Błąd testów, odrzucenie commita przez hook lub
 przerwanie cofa kopię; konsument z niezacommitowanymi zmianami (a przy `--push` bez upstreamu) jest pomijany. Deploy każdego konsumenta wykonuje się jego własną procedurą.
-Każdy konsument musi mieć skrypt `composer test`.
+Każdy konsument musi mieć skrypt `composer test` albo `composer test:pframe`. `check-consumers.sh`
+wypisuje zapisany `PFRAME_VERSION` informacyjnie; rozjazd nadal wykazuje wyłącznie porównanie plików.
 
 ## Gotchas
 
@@ -194,7 +197,7 @@ Każdy konsument musi mieć skrypt `composer test`.
 - Zachowuj 1TBS/K&R (otwierający nawias w tej samej linii) oraz polskie komunikaty użytkowe.
 - Null-safe wrappery na funkcje PHP mają sufiks `S` (`trimS`, `countS`, `strtotimeS`). Nie twórz równoległej konwencji.
 - `src/PFrame.php` jest źródłem prawdy. Przy zmianie SQL zaktualizuj testy, które celowo asertują literalne zapytania; po nieudanym patchu najpierw przeczytaj świeży diff i bieżący fragment pliku.
-- Producentami kopii konsumenckich są `src/PFrame.php` i `src/PFrameTesting.php`; checker rekurencyjnie znajduje katalogi `lib/`, także w aplikacjach zagnieżdżonych w monorepozytoriach, bez ręcznych list, hashy ani statusów synchronizacji.
+- Producentami kopii konsumenckich są `src/PFrame.php` i `src/PFrameTesting.php`; checker rekurencyjnie znajduje katalogi `lib/`, także w aplikacjach zagnieżdżonych w monorepozytoriach, bez ręcznych list ani hashy sterujących synchronizacją (`lib/PFRAME_VERSION` jest tylko śladem wydania).
 - `example/` jest ignorowane przez Git. Jeśli świadomie zmieniasz demo, waliduj je osobno i nie zakładaj, że pojawi się w `git status`.
 
 ## Wiedza i stan pracy
