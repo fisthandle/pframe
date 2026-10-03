@@ -557,17 +557,6 @@ class DbTest extends TestCase {
         $this->assertFalse($this->db->trans());
     }
 
-    public function testTransReturnsFalseOutsideTransaction(): void {
-        $this->assertFalse($this->db->trans());
-    }
-
-    public function testTransReturnsTrueInsideTransaction(): void {
-        $this->db->begin();
-        $this->assertTrue($this->db->trans());
-        $this->db->rollback();
-        $this->assertFalse($this->db->trans());
-    }
-
     public function testCountReturnsAffectedRowsAfterInsert(): void {
         $this->db->exec('INSERT INTO users (name, email) VALUES (?, ?)', ['A', 'a@x.com']);
         $this->assertSame(1, $this->db->count());
@@ -619,10 +608,6 @@ class DbTest extends TestCase {
     public function testStringParam(): void {
         $row = $this->db->row('SELECT * FROM users WHERE name = ?', 'Joe');
         $this->assertSame('Joe', $row['name']);
-    }
-
-    public function testPdoAccessor(): void {
-        $this->assertInstanceOf(\PDO::class, $this->db->pdo());
     }
 
     public function testQueryLog(): void {

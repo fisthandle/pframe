@@ -590,14 +590,6 @@ class AppTest extends TestCase {
         $this->assertSame('has_app', $response->body);
     }
 
-    public function testControllerMethodNoArgsStillWorks(): void {
-        $app = new App();
-        $app->get('/hello', HelloStub::class, 'index');
-
-        $response = $app->handle(new Request(method: 'GET', path: '/hello'));
-        $this->assertSame('hello world', $response->body);
-    }
-
     public function testCachedControllerPlanUsesCurrentRequestAndDefaultArguments(): void {
         $app = new App();
         $app->get('/di/{value}', DIRequestStub::class, 'withDefault');

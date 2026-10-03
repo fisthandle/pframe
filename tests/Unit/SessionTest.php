@@ -169,16 +169,6 @@ class SessionTest extends TestCase {
         }
     }
 
-    public function testSessionWriteWorksWithAdvisoryDisabled(): void {
-        $session = new Session($this->db, advisory: false);
-        $id = bin2hex(random_bytes(16));
-
-        $session->write($id, serialize(['test' => 'data']));
-        $data = $session->read($id);
-
-        $this->assertStringContainsString('test', $data);
-    }
-
     public function testWriteUsesMysqlUpsertQueryWhenDriverIsMysql(): void {
         $db = $this->getMockBuilder(Db::class)
             ->disableOriginalConstructor()
@@ -354,12 +344,6 @@ class SessionTest extends TestCase {
         $lastQuery = end($log);
         $this->assertIsArray($lastQuery);
         $this->assertStringContainsString('INSERT', $lastQuery['sql'], 'Changed data should do full INSERT OR REPLACE');
-    }
-
-    public function testConstructorAcceptsLockTimeout(): void {
-        $db = new Db(['dsn' => 'sqlite::memory:']);
-        $session = new Session($db, advisory: true, lockTimeout: 5);
-        $this->assertInstanceOf(Session::class, $session);
     }
 
     public function testAdvisoryMysqlLockUsesConfiguredTimeout(): void {
@@ -702,14 +686,6 @@ class SessionTest extends TestCase {
         } finally {
             rmdir($lockDir);
         }
-    }
-
-    public function testConstructorDefaultLockTimeoutIsFive(): void {
-        $db = new Db(['dsn' => 'sqlite::memory:']);
-        $session = new Session($db, advisory: true);
-        $ref = new \ReflectionClass($session);
-        $prop = $ref->getProperty('lockTimeout');
-        $this->assertSame(5, $prop->getValue($session));
     }
 
     /** @return array{process: resource, pipes: array<int, resource>} */

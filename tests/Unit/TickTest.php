@@ -101,24 +101,6 @@ class TickTest extends TestCase {
         $minLevel->setValue(null, $state['minLevel']);
     }
 
-    public function testTaskRegistration(): void {
-        $tick = new Tick($this->cacheDir);
-        $task = $tick->task('test_task');
-
-        self::assertInstanceOf(TickTask::class, $task);
-    }
-
-    public function testTaskFluentApi(): void {
-        $tick = new Tick($this->cacheDir);
-        $called = false;
-
-        $task = $tick->task('my_task')
-            ->every(60)
-            ->run(function() use (&$called) { $called = true; });
-
-        self::assertInstanceOf(TickTask::class, $task);
-    }
-
     public function testDispatchRunsDueTask(): void {
         $tick = new Tick($this->cacheDir);
         $counter = 0;

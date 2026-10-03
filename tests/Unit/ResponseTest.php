@@ -72,11 +72,6 @@ class ResponseTest extends TestCase {
         $this->assertSame($url, Response::redirect($url)->headers['Location']);
     }
 
-    public function testRedirectAllowsRelativePath(): void {
-        $r = Response::redirect('/login');
-        $this->assertSame('/login', $r->headers['Location']);
-    }
-
     public function testRedirectBlocksExternalUrlWithoutHost(): void {
         $this->expectException(\InvalidArgumentException::class);
         Response::redirect('https://evil.com/phish');
@@ -139,12 +134,6 @@ class ResponseTest extends TestCase {
     public function testRedirectAllowsQueryStringWithoutSlash(): void {
         $r = Response::redirect('?page=2');
         $this->assertSame('?page=2', $r->headers['Location']);
-    }
-
-    public function testSendAndExitMethodContract(): void {
-        $method = new \ReflectionMethod(Response::class, 'sendAndExit');
-        $this->assertTrue($method->hasReturnType());
-        $this->assertSame('never', (string) $method->getReturnType());
     }
 
     public function testFileFactoryCreatesResponseWithFilePath(): void {

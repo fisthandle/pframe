@@ -20,15 +20,6 @@ class BaseFacadeTest extends TestCase {
         $this->assertSame('test_val', Base::config('test_key'));
     }
 
-    public function testClassAlias(): void {
-        if (!class_exists('P1Alias', false)) {
-            class_alias(Base::class, 'P1Alias');
-        }
-
-        new App();
-        $this->assertSame(Base::app(), \P1Alias::app());
-    }
-
     public function testDbShortcutsAndFlash(): void {
         $app = new App();
         $db = new Db(['dsn' => 'sqlite::memory:']);

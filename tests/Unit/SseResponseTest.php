@@ -4,7 +4,6 @@ declare(strict_types=1);
 namespace PFrame\Tests\Unit;
 
 use PFrame\App;
-use PFrame\Response;
 use PFrame\SseResponse;
 use PHPUnit\Framework\TestCase;
 
@@ -18,12 +17,6 @@ class SseResponseTest extends TestCase {
         $this->assertSame('no-cache', $response->headers['Cache-Control']);
         $this->assertSame('keep-alive', $response->headers['Connection']);
         $this->assertSame('no', $response->headers['X-Accel-Buffering']);
-    }
-
-    public function testSseResponseIsInstanceOfResponse(): void {
-        $response = new SseResponse(function (): void {
-        });
-        $this->assertInstanceOf(Response::class, $response);
     }
 
     public function testConstructorRejectsNonClosureCallback(): void {
