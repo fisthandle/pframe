@@ -201,6 +201,71 @@ class SessionLockTimeoutTest extends TestCase {
         $this->assertSame(1, SessionLockCountingCtrl::$runs);
         session_write_close();
     }
+
+    public function testRegenerateMovesDataAndLockToNewIdAndInvalidatesOldId(): void {
+        $this->assertTrue($this->app()->startSession());
+        $_SESSION['role'] = 'admin';
+
+        $this->assertTrue($this->session->regenerate());
+
+        $newId = (string) session_id();
+        $this->assertNotSame(self::SID, $newId);
+        $this->assertSame(['user_id' => 42, 'role' => 'admin'], $_SESSION);
+        $this->assertFalse($this->lockIsFree($newId), 'Regenerated session must stay locked until it is written');
+        // 4096 współdzielonych blokad: gdy oba ID trafiają do tej samej, stara pozostaje zajęta przez nową sesję.
+        $this->assertSame($this->lockPath($newId) !== $this->lockPath(self::SID), $this->lockIsFree(self::SID));
+        session_write_close();
+
+        $this->assertTrue($this->lockIsFree($newId));
+        $this->assertSame(
+            [$newId => 'user_id|i:42;role|s:5:"admin";'],
+            array_column($this->db->results('SELECT session_id, data FROM sessions'), 'data', 'session_id'),
+        );
+
+        session_id($newId);
+        $this->assertTrue($this->app()->startSession());
+        $this->assertSame(['user_id' => 42, 'role' => 'admin'], $_SESSION);
+        session_write_close();
+
+        // Stare ID (fiksacja sesji) nie wznawia danych: strict mode wydaje świeże, puste ID.
+        session_id(self::SID);
+        $this->assertTrue($this->app()->startSession());
+        $this->assertNotSame(self::SID, session_id());
+        $this->assertSame([], $_SESSION);
+    }
+
+    public function testRegenerateWithoutDeleteKeepsOldSessionRow(): void {
+        $this->assertTrue($this->app()->startSession());
+
+        $this->assertTrue($this->session->regenerate(false));
+
+        $newId = (string) session_id();
+        $this->assertNotSame(self::SID, $newId);
+        session_write_close();
+        $this->assertSame(
+            [self::SID => 'user_id|i:42;', $newId => 'user_id|i:42;'],
+            array_column(
+                $this->db->results('SELECT session_id, data FROM sessions ORDER BY session_id = ? DESC', [self::SID]),
+                'data',
+                'session_id',
+            ),
+        );
+    }
+
+    private function lockPath(string $sessionId): string {
+        return (string) (new \ReflectionMethod($this->session, 'fileLockPath'))->invoke($this->session, $sessionId);
+    }
+
+    private function lockIsFree(string $sessionId): bool {
+        $handle = fopen($this->lockPath($sessionId), 'c');
+        $this->assertIsResource($handle);
+        try {
+            return flock($handle, LOCK_EX | LOCK_NB);
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+        }
+    }
 }
 
 class SessionLockCountingCtrl extends Controller {

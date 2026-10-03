@@ -101,4 +101,63 @@ class CacheBackendContractTest extends TestCase {
             rmdir($dir);
         }
     }
+
+    public function testRateLimitIsNotExceededByConcurrentProcesses(): void {
+        $dir = sys_get_temp_dir() . '/pframe_cache_rate_race_' . bin2hex(random_bytes(6));
+        mkdir($dir, 0777, true);
+        // Plikowy backend jest jedynym współdzielonym między procesami CLI; APCu w CLI ma pamięć per proces.
+        $script = <<<'PHP'
+require $argv[1];
+$cache = new \PFrame\Cache($argv[2]);
+while (!is_file($argv[2] . '/go')) {
+    usleep(500);
+    clearstatcache();
+}
+$allowed = 0;
+for ($attempt = 0; $attempt < 200; $attempt++) {
+    if ($cache->rateCheck('race', 'subject', 400, 600) === null) {
+        $allowed++;
+    }
+}
+echo $allowed;
+PHP;
+        $processes = [];
+        $pipes = [];
+
+        try {
+            for ($index = 0; $index < 4; $index++) {
+                $process = proc_open(
+                    [PHP_BINARY, '-d', 'apc.enable_cli=0', '-r', $script, dirname(__DIR__, 2) . '/vendor/autoload.php', $dir],
+                    [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+                    $pipes[$index],
+                );
+                $this->assertIsResource($process);
+                $processes[$index] = $process;
+            }
+            touch($dir . '/go');
+
+            $allowed = [];
+            foreach ($processes as $index => $process) {
+                $output = (string) stream_get_contents($pipes[$index][1]);
+                $error = (string) stream_get_contents($pipes[$index][2]);
+                fclose($pipes[$index][1]);
+                fclose($pipes[$index][2]);
+                unset($processes[$index]);
+                $this->assertSame(0, proc_close($process), $error);
+                $allowed[] = (int) $output;
+            }
+
+            // 800 prób przy limicie 400: utracona aktualizacja licznika przepuściłaby więcej niż limit.
+            $this->assertSame(400, array_sum($allowed), json_encode($allowed, JSON_THROW_ON_ERROR));
+        } finally {
+            foreach ($processes as $process) {
+                proc_terminate($process);
+                proc_close($process);
+            }
+            foreach (array_merge(glob($dir . '/*') ?: [], glob($dir . '/.pframe-cache-lock-*') ?: []) as $file) {
+                unlink($file);
+            }
+            rmdir($dir);
+        }
+    }
 }
