@@ -6,14 +6,14 @@ Single-file PHP 8.4+ micro-framework. Zero runtime dependencies, copy-paste depl
 
 ## Architektura
 
-- **Jeden plik:** `src/PFrame.php` — cały framework (~4300 LOC)
+- **Jeden plik:** `src/PFrame.php` — cały framework
 - **Namespace:** `PFrame` (klasy) + globalne helpery w `namespace {}`
 - **Brak mail:** do maili używamy PHPMailer (zewnętrznie)
 - **Fasada:** `PFrame\Base` — projekty definiują `class P1 extends \PFrame\Base`
 
 ## Klasy (PFrame namespace)
 
-HttpException, Request, Response, SseResponse, Performance, App, Db, View, Session, Csrf, Flash, Middleware, Controller, Log, Validator, Cache, TickTask, Tick, DebugBar, Base (fasada)
+HttpException, SessionLockException, Request, Response, SseResponse, Performance, App, Db, View, Session, Csrf, Flash, Middleware, Controller, Log, Validator, Cache, TickTask, Tick, DebugBar, Base (fasada)
 
 ## Globalne helpery
 
@@ -186,7 +186,6 @@ wypisuje zapisany `PFRAME_VERSION` informacyjnie; rozjazd nadal wykazuje wyłąc
 - `Cache::pruneExpired(1000)` uruchamiaj okresowo przez `Tick`/cron, bo nieodczytywane wygasłe pliki nie sprzątają się same
 - OPcache preload: `require_once`, nie `opcache_compile_file`
 - `Tick`: `tryLock()` = flock only; `between()` wspiera okna przez północ; `inTimeWindow(?string $now)` testowalny
-- PHPUnit 11.5 nie obsługuje `-v`; użyj zwykłego uruchomienia albo `--debug`.
 - Gdy PHPStan nie rozpoznaje globalnego helpera z `namespace {}`, preferuj
   punktowe `@phpstan-ignore-next-line` zamiast komplikowania parsera docblocków.
 - Test fallbacku `error_log()` musi snapshotować i przywracać statyczny stan
