@@ -114,7 +114,7 @@ class HomeController extends \PFrame\Controller {
 
 ## Templates
 
-Plain PHP with automatic escaping via `h()`:
+Plain PHP with explicit escaping via `h()`:
 
 ```php
 <?php $view->layout('layout.php', ['title' => 'Home']); ?>
