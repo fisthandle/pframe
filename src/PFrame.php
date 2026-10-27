@@ -1043,6 +1043,9 @@ namespace PFrame {
         private bool $traceStarted = false;
         private bool $traceDeferred = false;
         private bool $traceWritten = false;
+        private bool $eventDeferred = false;
+        private bool $eventWritten = false;
+        private ?string $eventException = null;
         private bool $workerRequestActive = false;
         private bool $handling = false;
         private ?SessionLockException $pendingSessionLock = null;
@@ -1117,6 +1120,9 @@ namespace PFrame {
             $this->traceStarted = false;
             $this->traceDeferred = false;
             $this->traceWritten = false;
+            $this->eventDeferred = false;
+            $this->eventWritten = false;
+            $this->eventException = null;
             $this->pendingSessionLock = null;
         }
 
@@ -1374,6 +1380,13 @@ namespace PFrame {
             $this->middleware[] = $middleware;
         }
 
+        public function trackRequestEvent(): void {
+            if (Events::enabled()) {
+                Events::beginRequest();
+                $this->eventDeferred = true;
+            }
+        }
+
         /**
          * Timeout blokady sesji: w trakcie handle() rzuca SessionLockException (503), a przed nim
          * (bootstrap front controllera, worker) zwraca false i odkłada 503 do najbliższego handle().
@@ -1381,6 +1394,7 @@ namespace PFrame {
          * @param array<string, mixed> $options
          */
         public function startSession(array $options = []): bool {
+            $this->trackRequestEvent();
             if ($this->performance->traceEnabled()) {
                 $this->traceStarted = true;
             }
@@ -1410,15 +1424,21 @@ namespace PFrame {
             if (!$started && $this->performance->traceEnabled()) {
                 $this->traceError = 'session.start';
             }
+            if ($started) {
+                Events::sessionStarted();
+            }
             return $started;
         }
 
         public function handle(Request $request): Response {
             $this->matchedRoute = null;
+            $this->traceRequest = $request;
+            $this->traceResponse = null;
+            $this->eventWritten = false;
+            $this->eventException = null;
+            Events::beginRequest();
             if ($this->performance->traceEnabled()) {
                 $this->traceStarted = true;
-                $this->traceRequest = $request;
-                $this->traceResponse = null;
                 $this->traceError = null;
                 $this->traceWritten = false;
             }
@@ -1731,6 +1751,9 @@ namespace PFrame {
             if ($e->statusCode >= 300 && $e->statusCode < 400) {
                 return new Response($e->getMessage(), $e->statusCode, $e->headers);
             }
+            if ($e->statusCode >= 500 || $e->getPrevious() !== null) {
+                $this->eventException = ($e->getPrevious() ?? $e)::class;
+            }
 
             if ($e->statusCode >= 500) {
                 $cause = $e->getPrevious() ?? $e;
@@ -1865,12 +1888,13 @@ namespace PFrame {
         }
 
         private function addPerformanceDiagnostics(Response $response, Request $request): Response {
-            if ($this->performance->traceEnabled()) {
-                $this->traceResponse = $response;
-            }
+            $this->traceResponse = $response;
             if ($response instanceof SseResponse) {
                 if (!$this->traceDeferred) {
                     $this->logRequestTrace();
+                }
+                if (!$this->eventDeferred) {
+                    $this->logRequestEvent();
                 }
                 return $response;
             }
@@ -1890,7 +1914,74 @@ namespace PFrame {
             if (!$this->traceDeferred) {
                 $this->logRequestTrace();
             }
+            if (!$this->eventDeferred) {
+                $this->logRequestEvent();
+            }
             return $response;
+        }
+
+        private function eventLocation(string $location): string {
+            $parts = parse_url($location);
+            $path = is_array($parts) ? (string) ($parts['path'] ?? '/') : '/';
+            if (is_array($parts) && isset($parts['host'])) {
+                return ($parts['scheme'] ?? 'https') . '://' . $parts['host'] . '/…';
+            }
+            $match = $this->matchRoute('GET', $path, false);
+            if ($match === null) {
+                $segments = explode('/', trim($path, '/'));
+                return '/' . $segments[0] . (count($segments) > 1 ? '/…' : '');
+            }
+            return $match['pattern'];
+        }
+
+        private function logRequestEvent(bool $fatal = false): void {
+            if ($this->eventWritten) {
+                return;
+            }
+            $this->eventWritten = true;
+            try {
+                $request = $this->traceRequest;
+                $response = $this->traceResponse;
+                $code = http_response_code();
+                $status = $fatal ? 500 : ($response->status ?? (is_int($code) ? $code : 200));
+                $location = null;
+                foreach ($response->headers ?? [] as $name => $value) {
+                    if (strcasecmp((string) $name, 'Location') === 0) {
+                        $location = $value;
+                    }
+                }
+                if ($response === null) {
+                    foreach (headers_list() as $header) {
+                        if (stripos($header, 'Location:') === 0) {
+                            $location = trim(substr($header, 9));
+                        }
+                    }
+                }
+                $location = $location === null ? null : $this->eventLocation($location);
+                $route = $this->matchedRoute['pattern'] ?? null;
+                $params = [];
+                if ($request !== null && $route !== null && preg_match_all('/\{(\w+)\}/', $route, $names) > 0) {
+                    foreach ($names[1] as $name) {
+                        $params[$name] = $request->param($name);
+                    }
+                }
+                $uri = $_SERVER['REQUEST_URI'] ?? '/';
+                Events::finishRequest([
+                    'method' => $request->method ?? (is_string($_SERVER['REQUEST_METHOD'] ?? null) ? $_SERVER['REQUEST_METHOD'] : 'UNKNOWN'),
+                    'path' => $request->path ?? (is_string($uri) ? (string) parse_url($uri, PHP_URL_PATH) : '/'),
+                    'route' => $route,
+                    'params' => $params,
+                    'query' => $request->query ?? [],
+                    'post' => $request->post ?? [],
+                    'files' => $request->files ?? [],
+                    'ajax' => $request?->isAjax() ?? false,
+                    'status' => $status,
+                    'location' => $location,
+                    'exception' => $fatal ? 'fatal' : $this->eventException,
+                ]);
+            } catch (\Throwable $e) {
+                error_log('[PFrame] Request event failed: ' . $e::class);
+            }
         }
 
         private function logRequestTrace(): void {
@@ -1950,7 +2041,7 @@ namespace PFrame {
             $db = $this->dbIfInitialized();
             Log::warn('Slow request', [
                 'method' => $request->method,
-                'path' => $request->path,
+                'route' => $this->matchedRoute['pattern'] ?? null,
                 'status' => $response->status,
                 'performance' => $snapshot,
                 'db_count' => $db?->totalQueryCount() ?? 0,
@@ -2094,6 +2185,7 @@ namespace PFrame {
                     echo $body;
                 }
                 self::$instance?->finishTraceAtShutdown($fatal ? $error['type'] : null);
+                self::$instance?->finishEventAtShutdown($fatal);
             });
 
             self::$shutdownRegistered = true;
@@ -2119,7 +2211,18 @@ namespace PFrame {
             $this->logRequestTrace();
         }
 
+        private function finishEventAtShutdown(bool $fatal): void {
+            if (!$this->eventDeferred || $this->eventWritten) {
+                return;
+            }
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
+            }
+            $this->logRequestEvent($fatal);
+        }
+
         public function run(): void {
+            $this->eventDeferred = Events::enabled();
             if ($this->performance->traceEnabled()) {
                 $this->traceDeferred = true;
                 $this->traceWritten = false;
@@ -2208,6 +2311,8 @@ namespace PFrame {
             $this->prepareWorkerRequest();
 
             $this->traceDeferred = $this->performance->traceEnabled();
+            $this->eventDeferred = Events::enabled();
+            Events::beginRequest(true);
             $this->workerRequestActive = true;
 
             try {
@@ -2295,6 +2400,7 @@ namespace PFrame {
                 $this->traceError ??= 'worker.cleanup:' . $cleanupError::class;
             }
             $this->logRequestTrace();
+            $this->logRequestEvent();
 
             if ($db !== null) {
                 try {
@@ -2470,7 +2576,9 @@ namespace PFrame {
                 $stmt->execute($norm);
                 $executeEnd = hrtime(true);
                 $fetchesRows ??= $stmt->columnCount() > 0;
-                return $consume($stmt);
+                $result = $consume($stmt);
+                Events::recordStatement(spl_object_id($this), $sql, $this->lastRowCount, fn(): string|false => $this->pdo->lastInsertId());
+                return $result;
             } finally {
                 $end = hrtime(true);
                 $this->recordQuery($sql, $norm, $start, $executeEnd ?? $end, $end, $fetchesRows === true && $executeEnd !== null);
@@ -2817,15 +2925,21 @@ namespace PFrame {
                 $nextLevel = $this->savepointLevel + 1;
                 $this->pdo->exec("SAVEPOINT sp_{$nextLevel}");
                 $this->savepointLevel = $nextLevel;
+                Events::transactionBegin(spl_object_id($this), "sp_{$nextLevel}");
                 return true;
             }
 
             $this->savepointLevel = 0;
             if ($mode === 'immediate') {
                 $begin = fn(): bool => $this->pdo->exec('BEGIN IMMEDIATE') !== false;
-                return $this->performance?->measure('db.begin', $begin) ?? $begin();
+                $started = $this->performance?->measure('db.begin', $begin) ?? $begin();
+            } else {
+                $started = $this->pdo->beginTransaction();
             }
-            return $this->pdo->beginTransaction();
+            if ($started) {
+                Events::transactionBegin(spl_object_id($this));
+            }
+            return $started;
         }
 
         /**
@@ -2860,22 +2974,30 @@ namespace PFrame {
         public function commit(): bool {
             if ($this->savepointLevel > 0) {
                 $this->pdo->exec("RELEASE SAVEPOINT sp_{$this->savepointLevel}");
+                Events::transactionCommit(spl_object_id($this), false, "sp_{$this->savepointLevel}");
                 $this->savepointLevel--;
                 return true;
             }
 
-            return $this->pdo->commit();
+            $committed = $this->pdo->commit();
+            if ($committed) {
+                Events::transactionCommit(spl_object_id($this), true);
+            }
+            return $committed;
         }
 
         public function rollback(): bool {
             if ($this->savepointLevel > 0) {
                 $this->pdo->exec("ROLLBACK TO SAVEPOINT sp_{$this->savepointLevel}");
                 $this->pdo->exec("RELEASE SAVEPOINT sp_{$this->savepointLevel}");
+                Events::transactionRollback(spl_object_id($this), false, "sp_{$this->savepointLevel}");
                 $this->savepointLevel--;
                 return true;
             }
 
-            return $this->pdo->rollBack();
+            $rolledBack = $this->pdo->rollBack();
+            Events::transactionRollback(spl_object_id($this), true);
+            return $rolledBack;
         }
 
         public function rollbackAll(): bool {
@@ -2888,6 +3010,7 @@ namespace PFrame {
             if ($rolledBack) {
                 $this->savepointLevel = 0;
             }
+            Events::transactionRollback(spl_object_id($this), true);
             return $rolledBack;
         }
 
@@ -3528,12 +3651,16 @@ namespace PFrame {
                 array_shift($messages);
             }
             $_SESSION[self::SESSION_KEY] = $messages;
+            Events::record('ui', 'flash_added', Events::flashContext($type, $text));
         }
 
         /** @return list<array{type: string, text: string}> */
         public function get(): array {
             $messages = $this->messages();
             unset($_SESSION[self::SESSION_KEY]);
+            foreach ($messages as $message) {
+                Events::record('ui', 'flash_rendered', Events::flashContext($message['type'], $message['text']), null, 'shown');
+            }
             return $messages;
         }
 
@@ -3614,6 +3741,7 @@ namespace PFrame {
             return function (Request $req, callable $next) use ($allowedMethods, $message): Response {
                 if (in_array($req->method, $allowedMethods, true)) {
                     if (!Csrf::validate(Csrf::requestToken($req))) {
+                        Events::record('auth', 'csrf_failed', [], null, 'rejected');
                         throw HttpException::forbidden($message);
                     }
                 }
@@ -3795,6 +3923,10 @@ namespace PFrame {
             self::$filePeriod = $filePeriod;
         }
 
+        public static function basePath(): ?string {
+            return self::$basePath;
+        }
+
         /** @param array<string, mixed> $ctx */
         public static function trace(string $msg, array $ctx = []): void {
             self::log('trace', $msg, $ctx);
@@ -3852,6 +3984,1031 @@ namespace PFrame {
             }
 
             self::toFile('app.log', $line);
+        }
+    }
+
+    class Events {
+        public const FILE = 'events.jsonl';
+        public const VERSION = 1;
+        public const SENSITIVE_KEY = '/(^|_)(pass|password|passwd|haslo|pesel|phone|telefon|token|tokens|secret|csrf|cookie|session|authorization|auth|hash|sig|signature|kod|apikey)($|_)|(^|_)(api|private|secret|access)_key$|^(code|code_verifier|key|state|ru|w|t|h)$/';
+        private const SLUG = '/^[a-z0-9]+(?:-[a-z0-9]+){2,}$/i';
+        private const DATE = '/^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/';
+        public const FREE_TEXT_PARAMS = ['q', 'query', 'search', 'szukaj', 'text', 'msg', 'message', 'to', 'from', 'p', 'u', 'email', 'tel', 'return_to'];
+        private const TOKEN = '/(?=[\w+=-]*\d)(?=[\w+=-]*[A-Za-z])[\w+=-]{16,}/';
+        private const MAX_STRING = 200;
+        private const MAX_IDS = 5;
+        private const POLL_PREFIX = 'pframe-events-poll:';
+        private const FORGET_FILE = 'events_forget.pending';
+
+        private static bool $active = false;
+        private static string $source = '';
+        private static string $runId = '';
+        private static float $runStart = 0.0;
+        private static int $emitted = 0;
+        /** @var array<string, array{rows: int, ids?: list<int>}> */
+        private static array $writes = [];
+        /** @var array<int, list<array<string, array{rows: int, ids?: list<int>}>>> */
+        private static array $transactions = [];
+        /** @var array<int, list<string|null>> */
+        private static array $savepoints = [];
+        /** @var array<int, list<list<array<string, mixed>>>> */
+        private static array $pending = [];
+        private static ?int $lastConnection = null;
+        private static int $rollbacks = 0;
+        /** @var array{start: float, actor: string, sid: string}|null */
+        private static ?array $request = null;
+        /** @var (callable(): string)|null */
+        private static $actorResolver = null;
+        /** @var (callable(): string)|null */
+        private static $sessionResolver = null;
+        private static ?string $prunedDay = null;
+        private static bool $warnedNoDir = false;
+        /** @var array<string, mixed>|null */
+        private static ?array $configured = null;
+
+        /** @param array<string, mixed>|null $config the `events.*` keys for processes without an App, null restores App config */
+        public static function configure(?array $config): void {
+            self::$configured = $config;
+        }
+
+        public static function enabled(): bool {
+            return self::config('enabled', false) === true;
+        }
+
+        public static function disable(): void {
+            self::$active = false;
+            self::$source = '';
+            self::$runId = '';
+            self::$request = null;
+            self::$writes = [];
+            self::$transactions = [];
+            self::$savepoints = [];
+            self::$pending = [];
+            self::$rollbacks = 0;
+            self::$emitted = 0;
+        }
+
+        /** @param callable(): string $resolver returns "type:id" or '' */
+        public static function setActorResolver(?callable $resolver): void {
+            self::$actorResolver = $resolver;
+        }
+
+        /** @param callable(): string $resolver returns a non-reversible session key or '' */
+        public static function setSessionResolver(?callable $resolver): void {
+            self::$sessionResolver = $resolver;
+        }
+
+        public static function beginRequest(bool $restart = false): void {
+            if (!$restart && self::$request !== null && self::$active && self::$source === 'web') {
+                return;
+            }
+            if (!self::enabled()) {
+                self::$active = false;
+                return;
+            }
+            self::reset('web', '');
+            self::$request = ['start' => microtime(true), 'actor' => self::actor(), 'sid' => self::sessionKey()];
+        }
+
+        /** @return array{type: string, text_id: string, length: int} */
+        public static function flashContext(string $type, string $text): array {
+            return ['type' => $type, 'text_id' => substr(hash('sha256', $text), 0, 10), 'length' => mb_strlen($text)];
+        }
+
+        public static function sessionStarted(): void {
+            if (self::$request !== null && self::$active && self::$source === 'web') {
+                self::$request['actor'] = self::actor();
+                self::$request['sid'] = self::sessionKey();
+            }
+        }
+
+        public static function runId(): string {
+            return self::$active && self::$source !== 'web' ? self::$runId : '';
+        }
+
+        /** @param array{method: string, path: string, route: ?string, params: array<string, mixed>, query: array<array-key, mixed>, post: array<array-key, mixed>, files: array<array-key, mixed>, ajax: bool, status: int, location: ?string, exception: ?string} $info */
+        public static function finishRequest(array $info): void {
+            $request = self::$request;
+            self::$request = null;
+            if ($request === null || !self::$active || self::$source !== 'web') {
+                return;
+            }
+            $actor = self::actor();
+            $route = $info['route'];
+            if ($route !== null && in_array($route, self::aggregateRoutes(), true)) {
+                $claimed = $actor !== '' ? $actor : (is_numeric($info['params']['userId'] ?? null) ? 'user:' . $info['params']['userId'] : '');
+                if (self::countPoll($route, $claimed, $info['status'])) {
+                    self::flushPolls();
+                    return;
+                }
+                if ($info['status'] < 400 && !self::hasApcu()) {
+                    return;
+                }
+            }
+            $ctx = ['method' => $info['method'], 'route' => $route, 'status' => $info['status']];
+            if ($route === null) {
+                $ctx['path'] = self::safePath($info['path']);
+            }
+            $ctx += array_filter([
+                'params' => self::safeParams($info['params']),
+                'query' => self::safeParams($info['query']),
+                'post' => array_slice(array_values(array_filter(array_map('strval', array_keys($info['post'])), static fn(string $name): bool => stripos($name, 'csrf') === false)), 0, 30),
+                'files' => array_map('strval', array_keys($info['files'])),
+                'ajax' => $info['ajax'] ? true : null,
+                'location' => $info['location'],
+                'exception' => $info['exception'],
+                'writes' => self::$writes,
+                'rollbacks' => self::$rollbacks,
+            ], static fn(mixed $value): bool => $value !== null && $value !== [] && $value !== 0);
+            $sid = self::sessionKey();
+            $line = self::envelope('http', 'request', $ctx, $actor, $request['sid'], null, self::outcome($info['status']));
+            $line['ts'] = self::timestamp($request['start']);
+            $line['duration_ms'] = (int) round((microtime(true) - $request['start']) * 1000);
+            if ($request['actor'] !== $actor) {
+                $line['actor_start'] = $request['actor'];
+            }
+            if ($sid !== $request['sid']) {
+                $line['sid_new'] = $sid;
+            }
+            self::write(array_filter($line, static fn(mixed $value): bool => $value !== '' && $value !== null));
+            self::flushPolls();
+        }
+
+        /** @return array{bool, string, string, float, int, array<string, array{rows: int, ids?: list<int>}>, array<int, list<array<string, array{rows: int, ids?: list<int>}>>>, int, array<int, list<string|null>>, array<int, list<list<array<string, mixed>>>>} */
+        public static function startRun(string $source, ?string $runId = null): array {
+            $previous = [self::$active, self::$source, self::$runId, self::$runStart, self::$emitted, self::$writes, self::$transactions, self::$rollbacks, self::$savepoints, self::$pending];
+            if (!self::enabled()) {
+                self::$active = false;
+                return $previous;
+            }
+            self::reset($source, $runId ?? bin2hex(random_bytes(8)));
+            return $previous;
+        }
+
+        /** @param array{bool, string, string, float, int, array<string, array{rows: int, ids?: list<int>}>, array<int, list<array<string, array{rows: int, ids?: list<int>}>>>, int, array<int, list<string|null>>, array<int, list<list<array<string, mixed>>>>} $previous */
+        public static function resume(array $previous): void {
+            [self::$active, self::$source, self::$runId, self::$runStart, self::$emitted, self::$writes, self::$transactions, self::$rollbacks, self::$savepoints, self::$pending] = $previous;
+        }
+
+        /** @param array<string, mixed> $ctx */
+        public static function finishRun(array $ctx = [], ?string $outcome = null, bool $onlyIfUsed = false): void {
+            if (!self::$active || self::$source === 'web') {
+                return;
+            }
+            if (!$onlyIfUsed || self::$writes !== [] || self::$emitted > 0) {
+                $ctx = self::redact($ctx) + array_filter(['writes' => self::$writes, 'rollbacks' => self::$rollbacks]);
+                $line = self::envelope('run', 'end', $ctx, '', '', null, $outcome);
+                $line['duration_ms'] = (int) round((microtime(true) - self::$runStart) * 1000);
+                self::write($line);
+            }
+            self::$writes = [];
+            self::$rollbacks = 0;
+            self::$emitted = 0;
+        }
+
+        public static function startCli(string $script): void {
+            $inherited = getenv('PFRAME_RUN_ID');
+            self::startRun('cli:' . basename($script), is_string($inherited) && $inherited !== '' ? $inherited : null);
+            register_shutdown_function(static fn() => self::finishRun([], null, true));
+        }
+
+        /** @param array<string, mixed> $ctx */
+        public static function record(string $category, string $action, array $ctx = [], ?string $subject = null, ?string $outcome = null): void {
+            if (!self::$active) {
+                return;
+            }
+            $line = self::line($category, $action, $ctx, $subject, $outcome);
+            if ($line !== null) {
+                self::write($line);
+            }
+        }
+
+        /** @param array<string, mixed> $ctx */
+        public static function recordOnCommit(string $category, string $action, array $ctx = [], ?string $subject = null, ?string $outcome = null): void {
+            $connection = self::$lastConnection;
+            if (!self::$active || $connection === null || (self::$transactions[$connection] ?? []) === []) {
+                self::record($category, $action, $ctx, $subject, $outcome);
+                return;
+            }
+            $line = self::line($category, $action, $ctx, $subject, $outcome);
+            if ($line !== null) {
+                self::$pending[$connection][count(self::$pending[$connection]) - 1][] = $line;
+            }
+        }
+
+        /**
+         * @param array<string, mixed> $ctx
+         * @return array<string, mixed>|null
+         */
+        private static function line(string $category, string $action, array $ctx, ?string $subject, ?string $outcome): ?array {
+            self::$emitted++;
+            try {
+                $web = self::$source === 'web';
+                return self::envelope($category, $action, self::redact($ctx), $web ? self::actor() : '', $web ? self::sessionKey() : '', $subject, $outcome);
+            } catch (\Throwable $e) {
+                error_log('[PFrame] Events record failed: ' . $e::class);
+                return null;
+            }
+        }
+
+        /** @param callable(): (string|false) $lastInsertId */
+        public static function recordStatement(int $connection, string $sql, int $rows, callable $lastInsertId): void {
+            if (!self::$active) {
+                return;
+            }
+            if (preg_match('/^\s*(BEGIN|START\s+TRANSACTION|SAVEPOINT|RELEASE|ROLLBACK(?:\s+(?:TRANSACTION|WORK))?\s+TO|ROLLBACK|COMMIT|END)\b(?:\s+SAVEPOINT)?\s*[`"]?(\w*)/i', $sql, $control) === 1) {
+                $verb = strtoupper((string) preg_replace('/\s+/', ' ', $control[1]));
+                $verb = str_starts_with($verb, 'ROLLBACK ') && str_ends_with($verb, ' TO') ? 'ROLLBACK TO' : $verb;
+                $name = in_array($verb, ['SAVEPOINT', 'RELEASE', 'ROLLBACK TO'], true) && $control[2] !== '' ? strtolower($control[2]) : null;
+                match ($verb) {
+                    'BEGIN', 'START TRANSACTION', 'SAVEPOINT' => self::transactionBegin($connection, $name),
+                    'RELEASE' => self::transactionCommit($connection, false, $name),
+                    'COMMIT', 'END' => self::transactionCommit($connection, true),
+                    'ROLLBACK TO' => self::transactionRollbackTo($connection, $name),
+                    default => self::transactionRollback($connection, true),
+                };
+                return;
+            }
+            $key = self::writeKey($sql);
+            if ($rows === 0 || $key === null || in_array(substr($key, strpos($key, ' ') + 1), self::ignoredTables(), true)) {
+                return;
+            }
+            $stack = self::$transactions[$connection] ?? [];
+            $writes = $stack === [] ? self::$writes : $stack[array_key_last($stack)];
+            $entry = $writes[$key] ?? ['rows' => 0];
+            $entry['rows'] += $rows;
+            if ($rows > 0 && str_starts_with($key, 'insert ') && count($entry['ids'] ?? []) < self::MAX_IDS) {
+                $id = (int) $lastInsertId();
+                if ($id > 0) {
+                    $entry['ids'][] = $id;
+                }
+            }
+            $writes[$key] = $entry;
+            if ($stack === []) {
+                self::$writes = $writes;
+                return;
+            }
+            $stack[array_key_last($stack)] = $writes;
+            self::$transactions[$connection] = $stack;
+        }
+
+        public static function transactionBegin(int $connection, ?string $savepoint = null): void {
+            if (self::$active) {
+                self::$transactions[$connection][] = [];
+                self::$savepoints[$connection][] = $savepoint;
+                self::$pending[$connection][] = [];
+                self::$lastConnection = $connection;
+            }
+        }
+
+        public static function transactionCommit(int $connection, bool $all = false, ?string $savepoint = null): void {
+            $frames = $all ? count(self::$transactions[$connection] ?? []) : self::framesAbove($connection, $savepoint);
+            for ($i = 0; $i < $frames; $i++) {
+                $stack = self::$transactions[$connection];
+                $frame = array_pop($stack) ?? [];
+                array_pop(self::$savepoints[$connection]);
+                $events = array_pop(self::$pending[$connection]) ?? [];
+                if ($stack === []) {
+                    self::$writes = self::merge(self::$writes, $frame);
+                    foreach ($events as $line) {
+                        self::write($line);
+                    }
+                } else {
+                    $last = array_key_last($stack);
+                    $stack[$last] = self::merge($stack[$last], $frame);
+                    self::$pending[$connection][$last] = array_merge(self::$pending[$connection][$last], $events);
+                }
+                self::$transactions[$connection] = $stack;
+            }
+        }
+
+        public static function transactionRollback(int $connection, bool $all = false, ?string $savepoint = null): void {
+            $count = count(self::$transactions[$connection] ?? []);
+            if ($count === 0) {
+                return;
+            }
+            self::dropFrames($connection, $all ? $count : self::framesAbove($connection, $savepoint));
+            self::$rollbacks++;
+        }
+
+        private static function transactionRollbackTo(int $connection, ?string $savepoint): void {
+            $frames = self::framesAbove($connection, $savepoint);
+            if ($frames === 0) {
+                return;
+            }
+            self::dropFrames($connection, $frames - 1);
+            $top = count(self::$transactions[$connection]) - 1;
+            self::$transactions[$connection][$top] = [];
+            self::$pending[$connection][$top] = [];
+            self::$rollbacks++;
+        }
+
+        private static function framesAbove(int $connection, ?string $savepoint): int {
+            $names = self::$savepoints[$connection] ?? [];
+            if ($names === []) {
+                return 0;
+            }
+            if ($savepoint !== null) {
+                for ($i = count($names) - 1; $i >= 0; $i--) {
+                    if ($names[$i] === $savepoint) {
+                        return count($names) - $i;
+                    }
+                }
+            }
+            return 1;
+        }
+
+        private static function dropFrames(int $connection, int $frames): void {
+            for ($i = 0; $i < $frames; $i++) {
+                array_pop(self::$transactions[$connection]);
+                array_pop(self::$savepoints[$connection]);
+                array_pop(self::$pending[$connection]);
+            }
+        }
+
+        public static function writeKey(string $sql): ?string {
+            if (preg_match('/^\s*(?:(INSERT|REPLACE)(?:\s+(?:OR\s+\w+|IGNORE|LOW_PRIORITY|DELAYED|HIGH_PRIORITY))*\s+(?:INTO\s+)?|(UPDATE)(?:\s+(?:OR\s+\w+|IGNORE|LOW_PRIORITY))*\s+|(DELETE)\b.*?\bFROM\s+)[`"]?(\w+)[`"]?/is', $sql, $match) !== 1) {
+                return null;
+            }
+            $verb = strtolower($match[1] !== '' ? $match[1] : ($match[2] !== '' ? $match[2] : $match[3]));
+            return ($verb === 'replace' ? 'insert' : $verb) . ' ' . $match[4];
+        }
+
+        public static function sensitiveKey(string $key): bool {
+            $normalized = strtolower(str_replace('-', '_', (string) preg_replace('/([a-z\d])([A-Z])/', '$1_$2', $key)));
+            return preg_match(self::SENSITIVE_KEY, $normalized) === 1;
+        }
+
+        public static function safeText(string $text): string {
+            $text = trim((string) preg_replace('/\s+/u', ' ', html_entity_decode(strip_tags(str_ireplace(['<br/>', '<br />', '<br>'], ' ', $text)), ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+            $text = (string) preg_replace_callback(self::TOKEN, static fn(array $match): string => preg_match(self::SLUG, $match[0]) === 1 ? $match[0] : '[tok]', $text);
+            $text = (string) preg_replace('/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/u', '[email]', $text);
+            $text = (string) preg_replace('/(?<![\d-])(?!\d{4}-\d{2}-\d{2})(?:\+?48[ -]?)?\d(?:[ -]?\d){8,10}(?![\d-])/', '[num]', $text);
+            return mb_substr($text, 0, self::MAX_STRING);
+        }
+
+        public static function safeValue(string $key, string $value): string {
+            $text = self::safeText($value);
+            if (preg_match('/(^|_)(title|label)$/', $key) === 1 || preg_match('/^[\p{L}\d_.:\/\\\\@#+=,\[\]-]{0,64}$/u', $text) === 1) {
+                return $text;
+            }
+            return '[text:' . mb_strlen($value) . ']';
+        }
+
+        public static function safePath(string $path): string {
+            $segments = array_map(static fn(string $segment): string => strlen($segment) >= 12 && preg_match('/\d/', $segment) === 1 ? '[x]' : $segment, explode('/', $path));
+            return self::safeText(implode('/', $segments));
+        }
+
+        /**
+         * @param array<array-key, mixed> $data
+         * @return array<string, mixed>
+         */
+        public static function redact(array $data, int $depth = 0): array {
+            $out = [];
+            foreach ($data as $key => $value) {
+                $key = (string) $key;
+                if (self::sensitiveKey($key)) {
+                    $out[$key] = '[x]';
+                    continue;
+                }
+                $out[$key] = match (true) {
+                    is_string($value) && self::isIdentifier($key, $value) => $value,
+                    is_array($value) => $depth < 2 ? self::redact($value, $depth + 1) : '[array]',
+                    is_string($value) => self::safeValue($key, $value),
+                    is_int($value), is_float($value), is_bool($value), $value === null => $value,
+                    default => get_debug_type($value),
+                };
+            }
+            return $out;
+        }
+
+        /** @param array<string, mixed> $line */
+        public static function concerns(array $line, string $actor): bool {
+            $ctx = self::ctx($line);
+            $shared = $ctx['actors'] ?? null;
+            return ($line['actor'] ?? '') === $actor
+                || ($line['actor_start'] ?? '') === $actor
+                || ($line['subject'] ?? '') === $actor
+                || ($ctx['user'] ?? '') === $actor
+                || (is_array($shared) && isset($shared[$actor]));
+        }
+
+        /**
+         * @param array<string, mixed> $line
+         * @return array<string, mixed>
+         */
+        private static function ctx(array $line): array {
+            return is_array($line['ctx'] ?? null) ? self::stringKeys($line['ctx']) : [];
+        }
+
+        /**
+         * @param array<array-key, mixed> $data
+         * @return array<string, mixed>
+         */
+        private static function stringKeys(array $data): array {
+            $out = [];
+            foreach ($data as $key => $value) {
+                $out[(string) $key] = $value;
+            }
+            return $out;
+        }
+
+        private static function str(mixed $value): string {
+            return is_scalar($value) ? (string) $value : '';
+        }
+
+        /** @return list<string> */
+        public static function files(string $from, string $to, string $name = self::FILE, ?string $dir = null): array {
+            $dir = self::dir($dir);
+            $files = [];
+            for ($day = strtotime($from); $day !== false && $day <= strtotime($to); $day = strtotime('+1 day', $day)) {
+                foreach (['', '.gz'] as $suffix) {
+                    $path = $dir . date('Ymd', $day) . '_' . $name . $suffix;
+                    if (is_file($path)) {
+                        $files[] = $path;
+                    }
+                }
+            }
+            return $files;
+        }
+
+        /**
+         * @param list<string> $files
+         * @return \Generator<int, array<string, mixed>>
+         */
+        public static function lines(array $files): \Generator {
+            foreach ($files as $file) {
+                $handle = gzopen($file, 'r');
+                if ($handle === false) {
+                    continue;
+                }
+                try {
+                    while (($raw = gzgets($handle)) !== false) {
+                        $line = json_decode($raw, true);
+                        if (is_array($line)) {
+                            yield self::stringKeys($line);
+                        }
+                    }
+                } finally {
+                    gzclose($handle);
+                }
+            }
+        }
+
+        /**
+         * @param list<string> $files
+         * @return list<array<string, mixed>>
+         */
+        public static function select(array $files, string $actor = '', string $requestId = ''): array {
+            $sids = [];
+            $requests = [];
+            $links = [];
+            foreach (self::lines($files) as $line) {
+                $sid = self::str($line['sid'] ?? '');
+                if (isset($line['sid_new']) && $sid !== '') {
+                    $links[self::str($line['sid_new'])][] = $sid;
+                }
+                $own = $requestId !== ''
+                    ? ($line['request_id'] ?? '') === $requestId
+                    : ($line['source'] ?? '') === 'web' && (($line['actor'] ?? '') === $actor || ($line['actor_start'] ?? '') === $actor);
+                if ($own) {
+                    if ($sid !== '' && $requestId === '') {
+                        $sids[$sid] = true;
+                    }
+                    if (isset($line['request_id'])) {
+                        $requests[self::str($line['request_id'])][$sid] = true;
+                    }
+                }
+            }
+            $queue = array_keys($sids);
+            while (($sid = array_pop($queue)) !== null) {
+                foreach ($links[$sid] ?? [] as $previous) {
+                    if (!isset($sids[$previous])) {
+                        $sids[$previous] = true;
+                        $queue[] = $previous;
+                    }
+                }
+            }
+            $out = [];
+            foreach (self::lines($files) as $line) {
+                $sid = self::str($line['sid'] ?? '');
+                $lineActor = self::str($line['actor'] ?? '');
+                $startActor = self::str($line['actor_start'] ?? '');
+                $rid = self::str($line['request_id'] ?? '');
+                $page = self::str(self::ctx($line)['page_request_id'] ?? '');
+                $sameRequest = isset($requests[$rid])
+                    && ($requestId !== '' || ($sid !== '' && isset($requests[$rid][$sid])) || ($lineActor !== '' && $lineActor === $actor));
+                $ownPage = $page !== '' && isset($requests[$page])
+                    && (($sid !== '' && isset($requests[$page][$sid])) || ($lineActor !== '' && $lineActor === $actor));
+                $anonymousSession = $requestId === '' && $page === '' && isset($sids[$sid])
+                    && in_array($lineActor, ['', $actor], true) && in_array($startActor, ['', $actor], true);
+                if ($sameRequest || $ownPage || $anonymousSession || ($requestId === '' && self::concerns($line, $actor))) {
+                    $out[] = $line;
+                }
+            }
+            return $out;
+        }
+
+        /** @param list<array<string, mixed>> $lines */
+        public static function render(array $lines): string {
+            usort($lines, static fn(array $a, array $b): int => strcmp(self::str($a['ts'] ?? ''), self::str($b['ts'] ?? '')));
+            $out = '';
+            foreach ($lines as $line) {
+                $ts = self::str($line['ts'] ?? '');
+                $ctx = self::ctx($line);
+                $text = self::str($line['actor'] ?? $line['actor_start'] ?? '') . (isset($line['subject']) ? ' → ' . self::str($line['subject']) : '');
+                if (($line['category'] ?? '') === 'http' && ($line['action'] ?? '') === 'request') {
+                    $text .= ' ' . self::str($ctx['method'] ?? '') . ' ' . self::str($ctx['path'] ?? $ctx['route'] ?? '') . ' ' . self::str($ctx['status'] ?? '') . (isset($ctx['location']) ? ' → ' . self::str($ctx['location']) : '');
+                    unset($ctx['method'], $ctx['route'], $ctx['path'], $ctx['status'], $ctx['location']);
+                }
+                $out .= sprintf("%s %s  %-22s %-16s %s%s\n", substr($ts, 0, 10), substr($ts, 11, 12), self::str($line['category'] ?? '') . '/' . self::str($line['action'] ?? ''), self::str($line['request_id'] ?? $line['run_id'] ?? ''), trim($text), $ctx === [] ? '' : ' ' . json_encode($ctx, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+            }
+            return $out;
+        }
+
+        /**
+         * @param list<string> $files
+         * @return array{lines: int, sources: array<string, int>, actions: array<string, int>, outcomes: array<string, int>, routes: list<array{route: string, count: int, failed: int, p95_ms: int}>, exceptions: array<string, int>}
+         */
+        public static function stats(array $files, int $top = 15): array {
+            $stats = ['lines' => 0, 'sources' => [], 'actions' => [], 'outcomes' => [], 'routes' => [], 'exceptions' => []];
+            $durations = [];
+            $failed = [];
+            foreach (self::lines($files) as $line) {
+                $stats['lines']++;
+                $source = (string) preg_replace('/:.*/', '', self::str($line['source'] ?? ''));
+                $stats['sources'][$source] = ($stats['sources'][$source] ?? 0) + 1;
+                $action = self::str($line['category'] ?? '') . '/' . self::str($line['action'] ?? '');
+                $stats['actions'][$action] = ($stats['actions'][$action] ?? 0) + 1;
+                $outcome = self::str($line['outcome'] ?? '');
+                if ($outcome !== '') {
+                    $stats['outcomes'][$outcome] = ($stats['outcomes'][$outcome] ?? 0) + 1;
+                }
+                $ctx = self::ctx($line);
+                if ($action === 'http/request') {
+                    $route = self::str($ctx['method'] ?? '') . ' ' . self::str($ctx['route'] ?? 'unmatched');
+                    $durations[$route][] = is_int($line['duration_ms'] ?? null) ? $line['duration_ms'] : 0;
+                    $failed[$route] = ($failed[$route] ?? 0) + (int) ($outcome === 'failed');
+                }
+                $exception = self::str($ctx['exception'] ?? '');
+                if ($exception !== '') {
+                    $stats['exceptions'][$exception] = ($stats['exceptions'][$exception] ?? 0) + 1;
+                }
+            }
+            foreach ($durations as $route => $values) {
+                sort($values);
+                $stats['routes'][] = ['route' => $route, 'count' => count($values), 'failed' => $failed[$route], 'p95_ms' => $values[max(0, (int) ceil(0.95 * count($values)) - 1)]];
+            }
+            usort($stats['routes'], static fn(array $a, array $b): int => $b['count'] <=> $a['count']);
+            $stats['routes'] = array_slice($stats['routes'], 0, $top);
+            foreach (['sources', 'actions', 'outcomes', 'exceptions'] as $key) {
+                arsort($stats[$key]);
+                $stats[$key] = array_slice($stats[$key], 0, $top, true);
+            }
+            return $stats;
+        }
+
+        public static function queueForget(string $actor, ?string $dir = null): void {
+            if (!self::withForgetQueue(self::dir($dir), static fn($handle): bool => fseek($handle, 0, SEEK_END) === 0 && fwrite($handle, $actor . '|' . date('Ymd') . "\n") !== false)) {
+                error_log('[PFrame] Events forget queue write failed for ' . $actor);
+            }
+        }
+
+        /** @param callable(resource): bool $operation */
+        private static function withForgetQueue(string $dir, callable $operation): bool {
+            if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+                return false;
+            }
+            $handle = @fopen($dir . self::FORGET_FILE, 'c+');
+            if ($handle === false) {
+                return false;
+            }
+            try {
+                return flock($handle, LOCK_EX) && $operation($handle);
+            } finally {
+                fflush($handle);
+                flock($handle, LOCK_UN);
+                fclose($handle);
+            }
+        }
+
+        public static function maintain(?string $today = null, ?string $dir = null): string {
+            if (!self::enabled()) {
+                return 'disabled';
+            }
+            $dir = self::dir($dir);
+            $today ??= date('Ymd');
+            $cutoff = date('Ymd', (int) strtotime($today . ' -' . self::retentionDays() . ' days'));
+            $deleted = $compressed = $forgotten = 0;
+            try {
+                [$forget, $keep, $entries] = self::pendingForgets($dir, $today);
+                foreach (glob($dir . '*_' . self::FILE . '*') ?: [] as $path) {
+                    $day = substr(basename($path), 0, 8);
+                    if ($day >= $today || str_ends_with($path, '.tmp')) {
+                        continue;
+                    }
+                    if ($day < $cutoff) {
+                        if (!@unlink($path) && file_exists($path)) {
+                            throw new \RuntimeException('Cannot delete expired events file ' . basename($path));
+                        }
+                        $deleted++;
+                        continue;
+                    }
+                    $plain = !str_ends_with($path, '.gz');
+                    if ($plain || ($forget !== [] && self::mentions($path, $forget))) {
+                        $forgotten += self::rewrite($path, $plain ? $path . '.gz' : $path, $forget);
+                        $compressed += (int) $plain;
+                    }
+                }
+            } catch (\Throwable $e) {
+                error_log('[PFrame] Events maintenance failed: ' . $e->getMessage());
+                return 'failed=' . $e::class;
+            }
+            $done = array_diff($entries, $keep);
+            try {
+                $stored = $done === [] || self::withForgetQueue($dir, static function ($handle) use ($done): bool {
+                    $left = array_values(array_diff(array_filter(explode("\n", (string) stream_get_contents($handle, -1, 0))), $done));
+                    $content = $left === [] ? '' : implode("\n", $left) . "\n";
+                    return rewind($handle) && fwrite($handle, $content) === strlen($content) && fflush($handle) && ftruncate($handle, strlen($content));
+                });
+            } catch (\Throwable $e) {
+                error_log('[PFrame] Events forget queue update failed: ' . $e->getMessage());
+                $stored = false;
+            }
+            return "deleted={$deleted} compressed={$compressed} forgotten_lines={$forgotten} forget_pending=" . count($keep) . ($stored ? '' : ' forget_queue=not_updated');
+        }
+
+        private static function reset(string $source, string $runId): void {
+            self::$active = true;
+            self::$source = $source;
+            self::$runId = $runId;
+            self::$runStart = microtime(true);
+            self::$emitted = 0;
+            self::$writes = [];
+            self::$transactions = [];
+            self::$savepoints = [];
+            self::$pending = [];
+            self::$rollbacks = 0;
+        }
+
+        private static function config(string $key, mixed $default): mixed {
+            if (self::$configured !== null) {
+                return self::$configured[$key] ?? $default;
+            }
+            return App::currentInstance()?->config('events.' . $key, $default) ?? $default;
+        }
+
+        private static function dir(?string $dir = null): string {
+            $configured = $dir ?? self::config('dir', null);
+            $base = is_string($configured) && $configured !== '' ? $configured : Log::basePath();
+            return rtrim((string) $base, '/') . '/';
+        }
+
+        private static function retentionDays(): int {
+            $days = self::config('retention_days', 90);
+            return is_int($days) && $days > 0 ? $days : 90;
+        }
+
+        /** @return list<string> */
+        private static function aggregateRoutes(): array {
+            $routes = self::config('aggregate_routes', []);
+            return is_array($routes) ? array_values(array_filter($routes, 'is_string')) : [];
+        }
+
+        /** @return list<string> */
+        private static function freeTextParams(): array {
+            $extra = self::config('mask_params', []);
+            return array_merge(self::FREE_TEXT_PARAMS, is_array($extra) ? array_values(array_filter($extra, 'is_string')) : []);
+        }
+
+        /** @return list<string> */
+        private static function ignoredTables(): array {
+            $tables = self::config('ignore_tables', ['sessions']);
+            return is_array($tables) ? array_values(array_filter($tables, 'is_string')) : ['sessions'];
+        }
+
+        private static function actor(): string {
+            if (self::$actorResolver !== null) {
+                return (self::$actorResolver)();
+            }
+            $user = $_SESSION['user'] ?? null;
+            $id = is_array($user) ? ($user['id'] ?? null) : null;
+            return is_int($id) || (is_string($id) && $id !== '') ? 'user:' . $id : '';
+        }
+
+        private static function sessionKey(): string {
+            if (self::$sessionResolver !== null) {
+                return (self::$sessionResolver)();
+            }
+            $id = session_id();
+            return $id === '' || $id === false ? '' : substr(hash('sha256', 'pframe-events|' . $id), 0, 16);
+        }
+
+        private static function outcome(int $status): string {
+            return $status >= 500 ? 'failed' : ($status >= 400 ? 'rejected' : 'ok');
+        }
+
+        /**
+         * @param array<string, mixed> $ctx
+         * @return array<string, mixed>
+         */
+        private static function envelope(string $category, string $action, array $ctx, string $actor, string $sid, ?string $subject, ?string $outcome): array {
+            $web = self::$source === 'web';
+            return array_filter([
+                'v' => self::VERSION,
+                'ts' => self::timestamp(microtime(true)),
+                'source' => self::$source,
+                'request_id' => $web ? App::currentInstance()?->requestId() : null,
+                'run_id' => $web ? null : self::$runId,
+                'actor' => $actor,
+                'sid' => $sid,
+                'category' => $category,
+                'action' => $action,
+                'subject' => $subject,
+                'outcome' => $outcome,
+                'ctx' => $ctx,
+            ], static fn(mixed $value): bool => $value !== null && $value !== '' && $value !== []);
+        }
+
+        /**
+         * @param array<array-key, mixed> $params
+         * @return array<string, string>
+         */
+        private static function safeParams(array $params): array {
+            $out = [];
+            foreach ($params as $key => $value) {
+                $key = (string) $key;
+                $freeText = self::freeTextParams();
+                if (self::sensitiveKey($key) || in_array('*', $freeText, true) || (in_array(strtolower($key), $freeText, true) && !(is_string($value) && preg_match(self::DATE, $value) === 1))) {
+                    $out[$key] = '[x]';
+                } elseif (is_string($value) && (self::isIdentifier($key, $value) || preg_match(self::DATE, $value) === 1)) {
+                    $out[$key] = $value;
+                } elseif (is_string($value) && preg_match('/^\+?\d[\d -]{7,16}\d$/', $value) === 1) {
+                    $out[$key] = '[num]';
+                } elseif (is_string($value) && preg_match('/^[\p{L}\d_.,:-]{0,40}$/u', $value) === 1) {
+                    $out[$key] = self::safeText($value);
+                } else {
+                    $out[$key] = is_array($value) ? '[array]' : '[…]';
+                }
+            }
+            return $out;
+        }
+
+        private static function isIdentifier(string $key, string $value): bool {
+            return preg_match('/(^id|_id|[a-z]Id)$/', $key) === 1 && preg_match('/^[\w.-]{1,64}$/', $value) === 1;
+        }
+
+        /**
+         * @param array<string, array{rows: int, ids?: list<int>}> $into
+         * @param array<string, array{rows: int, ids?: list<int>}> $from
+         * @return array<string, array{rows: int, ids?: list<int>}>
+         */
+        private static function merge(array $into, array $from): array {
+            foreach ($from as $key => $entry) {
+                $merged = $into[$key] ?? ['rows' => 0];
+                $merged['rows'] += $entry['rows'];
+                $ids = array_slice(array_merge($merged['ids'] ?? [], $entry['ids'] ?? []), 0, self::MAX_IDS);
+                if ($ids !== []) {
+                    $merged['ids'] = $ids;
+                }
+                $into[$key] = $merged;
+            }
+            return $into;
+        }
+
+        private static function hasApcu(): bool {
+            return function_exists('apcu_enabled') && apcu_enabled();
+        }
+
+        private static function countPoll(string $route, string $actor, int $status): bool {
+            if (!self::hasApcu()) {
+                return false;
+            }
+            $key = self::POLL_PREFIX . date('YmdHi') . ':' . $route . '|' . $actor . '|' . $status;
+            apcu_add($key, 0, 600);
+            return apcu_inc($key) !== false;
+        }
+
+        private static function flushPolls(): void {
+            if (!self::hasApcu()) {
+                return;
+            }
+            $current = date('YmdHi');
+            if (!apcu_add(self::POLL_PREFIX . 'scan:' . $current, 1, 600)) {
+                return;
+            }
+            $minutes = [];
+            foreach (new \APCUIterator('/^' . preg_quote(self::POLL_PREFIX, '/') . '\d{12}:/') as $item) {
+                if (!is_array($item) || !is_string($item['key'] ?? null)) {
+                    continue;
+                }
+                $minute = substr($item['key'], strlen(self::POLL_PREFIX), 12);
+                if ($minute >= $current || (!isset($minutes[$minute]) && !apcu_add(self::POLL_PREFIX . 'flushed:' . $minute, 1, 600))) {
+                    continue;
+                }
+                [$route, $actor, $status] = explode('|', substr($item['key'], strlen(self::POLL_PREFIX) + 13)) + ['', '', ''];
+                $count = is_int($item['value'] ?? null) ? $item['value'] : 0;
+                $minutes[$minute][$route]['actors'][$actor] = ($minutes[$minute][$route]['actors'][$actor] ?? 0) + $count;
+                $minutes[$minute][$route]['statuses'][$status] = ($minutes[$minute][$route]['statuses'][$status] ?? 0) + $count;
+                apcu_delete($item['key']);
+            }
+            ksort($minutes);
+            foreach ($minutes as $minute => $routes) {
+                $time = (int) strtotime(substr((string) $minute, 0, 8) . ' ' . substr((string) $minute, 8, 2) . ':' . substr((string) $minute, 10, 2));
+                foreach ($routes as $route => $counts) {
+                    self::write(['v' => self::VERSION, 'ts' => date('Y-m-d\TH:i:00.000P', $time), 'source' => 'web', 'category' => 'http', 'action' => 'poll', 'ctx' => ['route' => $route] + $counts]);
+                }
+            }
+        }
+
+        private static function timestamp(float $time): string {
+            $seconds = (int) $time;
+            return date('Y-m-d\TH:i:s', $seconds) . sprintf('.%03d', (int) (($time - $seconds) * 1000)) . date('P', $seconds);
+        }
+
+        /** @param array<string, mixed> $line */
+        private static function write(array $line): void {
+            $dir = self::dir();
+            $encoded = json_encode($line, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+            if ($encoded === false) {
+                return;
+            }
+            if ($dir === '/') {
+                if (!self::$warnedNoDir) {
+                    self::$warnedNoDir = true;
+                    error_log('[PFrame] Events enabled without events.dir or Log::init(); events are not written');
+                }
+                return;
+            }
+            try {
+                if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+                    error_log('[PFrame] Events directory cannot be created: ' . $dir);
+                    return;
+                }
+                self::pruneOnce($dir);
+                $path = $dir . date('Ymd') . '_' . self::FILE;
+                $created = !is_file($path);
+                $handle = @fopen($path, 'ab');
+                if ($created && $handle !== false) {
+                    self::shareWithNonRoot($path);
+                }
+                if ($handle === false || @fwrite($handle, $encoded . "\n") === false) {
+                    error_log('[PFrame] Events write failed: ' . $dir);
+                }
+                if ($handle !== false) {
+                    @fclose($handle);
+                }
+            } catch (\Throwable $e) {
+                error_log('[PFrame] Events write failed: ' . $e::class);
+            }
+        }
+
+        private static function shareWithNonRoot(string $path): void {
+            if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+                @chmod($path, 0666);
+            }
+        }
+
+        private static function pruneOnce(string $dir): void {
+            $today = date('Ymd');
+            if (self::$prunedDay === $today) {
+                return;
+            }
+            self::$prunedDay = $today;
+            $marker = $dir . '.events-last-prune';
+            if (@file_get_contents($marker) === $today || @file_put_contents($marker, $today, LOCK_EX) === false) {
+                return;
+            }
+            self::shareWithNonRoot($marker);
+            $cutoff = date('Ymd', (int) strtotime($today . ' -' . self::retentionDays() . ' days'));
+            foreach (glob($dir . '*_' . self::FILE . '*') ?: [] as $path) {
+                if (substr(basename($path), 0, 8) < $cutoff) {
+                    @unlink($path);
+                }
+            }
+        }
+
+        /** @param list<string> $actors */
+        private static function mentions(string $path, array $actors): bool {
+            foreach (self::lines([$path]) as $line) {
+                foreach ($actors as $actor) {
+                    if (self::concerns($line, $actor)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /** @param list<string> $actors */
+        private static function rewrite(string $source, string $target, array $actors): int {
+            $in = @gzopen($source, 'r');
+            $tmp = $target . '.tmp';
+            $out = @gzopen($tmp, 'w6');
+            if ($in === false || $out === false) {
+                throw new \RuntimeException('Cannot rewrite events file ' . basename($source));
+            }
+            $removed = 0;
+            $written = 0;
+            try {
+                while (($raw = gzgets($in)) !== false) {
+                    $line = $actors === [] ? null : json_decode($raw, true);
+                    if (is_array($line)) {
+                        [$line, $changed] = self::forgetIn(self::stringKeys($line), $actors);
+                        if ($changed) {
+                            $removed++;
+                            if ($line === null) {
+                                continue;
+                            }
+                            $raw = json_encode($line, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
+                        }
+                    }
+                    if (gzwrite($out, $raw) !== strlen($raw)) {
+                        throw new \RuntimeException('Cannot write events file ' . basename($tmp));
+                    }
+                    $written++;
+                }
+            } finally {
+                gzclose($in);
+                $closed = gzclose($out);
+            }
+            if (!$closed || iterator_count(self::rawLines($tmp)) !== $written) {
+                @unlink($tmp);
+                throw new \RuntimeException('Events archive verification failed for ' . basename($source));
+            }
+            if (!rename($tmp, $target)) {
+                throw new \RuntimeException('Cannot replace events file ' . basename($target));
+            }
+            if ($source !== $target) {
+                unlink($source);
+            }
+            return $removed;
+        }
+
+        /** @return \Generator<int, string> */
+        private static function rawLines(string $path): \Generator {
+            $handle = gzopen($path, 'r');
+            if ($handle === false) {
+                return;
+            }
+            try {
+                while (($raw = gzgets($handle)) !== false) {
+                    yield $raw;
+                }
+            } finally {
+                gzclose($handle);
+            }
+        }
+
+        /**
+         * @param array<string, mixed> $line
+         * @param list<string> $actors
+         * @return array{array<string, mixed>|null, bool}
+         */
+        private static function forgetIn(array $line, array $actors): array {
+            $ctx = self::ctx($line);
+            $shared = $ctx['actors'] ?? null;
+            if (is_array($shared)) {
+                $left = array_diff_key($shared, array_flip($actors));
+                if ($left === $shared) {
+                    return [$line, false];
+                }
+                if ($left === []) {
+                    return [null, true];
+                }
+                $ctx['actors'] = $left;
+                $line['ctx'] = $ctx;
+                return [$line, true];
+            }
+            foreach ($actors as $actor) {
+                if (self::concerns($line, $actor)) {
+                    return [null, true];
+                }
+            }
+            return [$line, false];
+        }
+
+        /** @return array{list<string>, list<string>, list<string>} */
+        private static function pendingForgets(string $dir, string $today): array {
+            $entries = [];
+            self::withForgetQueue($dir, static function ($handle) use (&$entries): bool {
+                $entries = array_values(array_filter(explode("\n", (string) stream_get_contents($handle, -1, 0))));
+                return true;
+            });
+            $actors = [];
+            $keep = [];
+            foreach ($entries as $entry) {
+                [$actor, $day] = explode('|', $entry, 2) + ['', ''];
+                if ($actor === '') {
+                    continue;
+                }
+                $actors[] = $actor;
+                if ($day >= $today) {
+                    $keep[] = $entry;
+                }
+            }
+            return [array_values(array_unique($actors)), $keep, $entries];
         }
     }
 
@@ -4416,7 +5573,8 @@ namespace PFrame {
             }
 
             $processCommand = $this->processCommand($command);
-            $process = proc_open($processCommand, $descriptors, $pipes);
+            $runId = Events::runId();
+            $process = proc_open($processCommand, $descriptors, $pipes, null, $runId === '' ? null : ['PFRAME_RUN_ID' => $runId] + getenv());
             if (!is_resource($process)) {
                 return ['success' => false, 'error' => 'Failed to start process'];
             }
@@ -4572,7 +5730,13 @@ namespace PFrame {
                     if (!$this->isDue($task)) {
                         continue;
                     }
-                    $results[$name] = $task->execute();
+                    $previous = Events::startRun('cron:' . $name);
+                    try {
+                        $results[$name] = $task->execute();
+                        Events::finishRun(['task' => $name], $results[$name]['success'] ? 'ok' : 'failed');
+                    } finally {
+                        Events::resume($previous);
+                    }
                     if ($results[$name]['success']) {
                         $this->setLastRun($name, time());
                         $this->resetFailCount($name);

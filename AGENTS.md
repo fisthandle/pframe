@@ -13,7 +13,7 @@ Single-file PHP 8.4+ micro-framework. Zero runtime dependencies, copy-paste depl
 
 ## Klasy (PFrame namespace)
 
-HttpException, SessionLockException, Request, Response, SseResponse, Performance, App, Db, View, Session, Csrf, Flash, Middleware, Controller, Log, Validator, Cache, TickTask, Tick, DebugBar, Base (fasada)
+HttpException, SessionLockException, Request, Response, SseResponse, Performance, App, Db, View, Session, Csrf, Flash, Middleware, Controller, Log, Events, Validator, Cache, TickTask, Tick, DebugBar, Base (fasada)
 
 ## Globalne helpery
 
@@ -42,7 +42,7 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 - `App::performance()` udostępnia profiler requestu, a `App::measure($name, $callback, $details = [])` dodaje własny span; `$details` to wyłącznie `array<string, scalar|null>`
 - automatyczne spany obejmują request/router/controller/finalize, DB connect/execute/fetch, widoki oraz start i blokadę sesji
 - `performance.server_timing=true` dodaje standardowy nagłówek `Server-Timing`; domyślnie jest wyłączony
-- `performance.slow_ms=N` loguje requesty od progu `N` ms razem ze spanami i agregatami DB; `0` wyłącza log
+- `performance.slow_ms=N` loguje requesty od progu `N` ms razem ze spanami i agregatami DB (wzorzec trasy zamiast ścieżki, bo parametry bywają sekretami); `0` wyłącza log
 - `performance.trace=true` zapisuje JSONL w `YYYYMMDD_perf.jsonl` (jedna linia na request, wszystkie zdarzenia, bez samplingu) z chronologicznymi spanami, każdym szablonem i SQL przez `Db` (bez rozwijania parametrów); `run()`/worker domykają ślad po wysyłce i zapisie sesji. To standardowe źródło danych wydajności dla aplikacji
 - format v2 (tylko dodaje pola): top-level `v=2`, `request_id`, `pid`, `sapi`, `connection_aborted` (bool), `fatal` (`null` albo typ błędu fatalnego; `error` bez zmian); `performance.children_cpu_ms` (RUSAGE_CHILDREN); każde zdarzenie ma `id` i `parent` (id otaczającego spanu albo `null`), a spany dodatkowo `cpu_ms` i `mem_kb` (`memory_get_usage(false)`); najwyżej 5000 zdarzeń na request, nadmiar liczy `dropped_events` (chroni długie procesy CLI/cron, które zbierają zdarzenia bez zapisu)
 - `requestId()` (`App`/`Performance`) przejmuje przychodzący `X-Request-ID` pasujący do `^[A-Za-z0-9._-]{8,64}$`, inaczej generuje 16 znaków hex; świeży po `resetRequestState()`/w każdym żądaniu workera. Odpowiedzi z `handle()` i strona fatala dostają nagłówek `X-Request-ID`, jeśli go nie ustawiono
@@ -50,6 +50,18 @@ Konwencja: `nazwaS()` = null-safe wrapper na oryginalną funkcję PHP.
 - `measureProcess($program, $callback)` mierzy proces w spanie `process.exec` (`program`, `children_cpu_ms`, `exit_code` z wyniku `int` albo tablicy z intowym `exit_code`, inaczej `null`) i zwraca wynik callbacka bez zmian; callback musi poczekać na proces (`proc_close()`), aby jego CPU trafiło do RUSAGE_CHILDREN
 - na PHP ZTS `cpu_ms`, `wait_ms` i `children_cpu_ms` są `null`, bo `getrusage()` mierzy cały współbieżny proces; wall time i spany pozostają poprawne
 - używaj `$app->startSession()` zamiast surowego `session_start()`, aby zmierzyć oczekiwanie na start sesji
+
+## Dziennik zdarzeń (Events)
+
+- Opcjonalny dziennik do odtwarzania sesji: `events.enabled=true` zapisuje `YYYYMMDD_events.jsonl` w `events.dir`. Ustawiaj `events.dir` jawnie; bez niego i bez `Log::init` zdarzenia nie są zapisywane (jedno ostrzeżenie w `error_log`). Proces bez `App` (CLI, worker) włącza warstwę przez `Events::configure([...])`.
+- Klucze: `enabled`, `dir`, `retention_days` (90), `aggregate_routes` (wzorce tras → zbiorcza linia `http/poll` na minutę przez APCu), `ignore_tables` (`['sessions']`), `mask_params` (dodatkowe nazwy parametrów/query z wolnym tekstem).
+- Koperta v1: `v`, `ts`, `source` (`web`, `cli:<skrypt>`, `cron:<zadanie>`, `worker:<rola>` albo własne), `request_id` (web) lub `run_id`, `actor` (`user:<id>`, `api:<źródło>`), `actor_start`, `sid` (skrót sesji), `sid_new`, `category`, `action`, `subject` (`<typ>:<id>`), `outcome` (`ok|rejected|failed|shown`), `duration_ms`, `ctx`.
+- Automatycznie: `http/request` raz na żądanie po wysyłce, w shutdownie (po zamknięciu sesji) albo na końcu żądania workera, także przy 413, blokadzie sesji, `exit()` i fatalu; zapisy SQL w `ctx.writes` (`insert|update|delete tabela`, wiersze, do 5 ID), bez wycofanych rollbackiem — także surowym `SAVEPOINT`/`ROLLBACK TO` przez `Db::exec` — osobno dla każdego połączenia `Db`; puste UPDATE/DELETE są pomijane, a bezpośrednie `$db->pdo()->exec()` niewidoczne; `ui/flash_added` i `ui/flash_rendered` z `PFrame\Flash` z typem, `text_id` (skrót treści) i długością, bez treści (`shown` = wyrenderowane, nie dowód wyświetlenia); `run/end` dla zadań `Tick`, a komendy Ticka dostają `PFRAME_RUN_ID`; odrzucenie `Middleware::csrf()` daje `auth/csrf_failed`. `Location` trafia jako wzorzec trasy (obce adresy jako sam host). Odpowiedź wysłana przed `run()` wymaga `$app->trackRequestEvent()` na początku front controllera.
+- Konsument: `Events::startCli($argv[0])` w bootstrapie CLI (dziedziczy `run_id` z env `PFRAME_RUN_ID`, który rodzic ustawia dla procesów potomnych); `Events::startRun($source, $runId)` + `finishRun($ctx, $outcome, $onlyIfUsed)` + `resume($previous)` wokół iteracji własnych workerów; `Events::setActorResolver()` gdy aktor nie jest w `$_SESSION['user']['id']`; `Events::record($category, $action, $ctx, $subject, $outcome)`; `Events::maintain()` raz na noc (kompresja zamkniętych dni po weryfikacji archiwum, retencja, usuwanie aktorów z `Events::queueForget('user:ID')`; nie rzuca wyjątków, błąd zwraca jako `failed=<klasa>`); zdarzenia klienta (beacony) wskazują stronę w `ctx.page_request_id`, a odtworzenie łączy je z żądaniem strony; testy resetują stan przez `Events::disable()`.
+- Słownik: `auth/login|login_failed|logout|csrf_failed|impersonate`; `entity/created|updated|deleted` z `subject=<typ>:<id>` i nazwami pól w `ctx.field(s)`, bez wartości; kanał wyjściowy jako kategoria (`email`, `sms`, `telegram`, `voice`, `http`) z czasownikiem (`queued|sent|failed|retry|attempt`) i identyfikatorami w kluczach `*_id`; `log/warn|error` z miejscem wywołania, nie treścią. Nie zapisuj treści wiadomości, numerów telefonów, adresów, tokenów ani wartości pól.
+- Lista dozwolonych danych: w `ctx` zostają liczby, wartości logiczne, identyfikatory (`id`/`*_id`), daty i ciągi bez spacji do 64 znaków; tekst ze spacjami staje się `[text:<długość>]`, z wyjątkiem kluczy `title`, `label`, `*_title` i `*_label` (stałe etykiety UI i nazwy usług). Wartości query i parametrów trasy muszą być pojedynczym słowem do 40 znaków; `mask_params: ['*']` maskuje wszystkie.
+- Maskowanie: klucze `Events::sensitiveKey()` (słowa w snake/camelCase, np. `password`, `api_key`, `csrf_token`, dokładne `code`, `state`) → `[x]`; parametry i query z `FREE_TEXT_PARAMS`/`mask_params` → `[x]`, numery 9–17 cyfr → `[num]`; teksty bez HTML, tokeny 16+ znaków z literą i cyfrą → `[tok]` (slugi z myślnikami zostają), e-mail → `[email]`, numery → `[num]`, do 200 znaków; klucze `id`/`*_id` zachowują identyfikatory; segment ścieżki 12+ znaków z cyfrą → `[x]`. Przychodzący `X-Request-ID` nie jest zaufany; odtwarzaj po aktorze i sesji.
+- Analiza każdej aplikacji jednym skryptem: `bin/events stats DIR [--from --to --json]` i `bin/events replay DIR --actor=user:ID|--request=ID [--from --to]`.
 
 ## Kontrolery i Response
 

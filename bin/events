@@ -1,0 +1,42 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+require dirname(__DIR__) . '/src/PFrame.php';
+
+use PFrame\Events;
+
+$usage = "Usage: bin/events replay DIR (--actor=user:ID | --request=ID) [--from=YYYY-MM-DD] [--to=YYYY-MM-DD]\n"
+    . "       bin/events stats DIR [--from=YYYY-MM-DD] [--to=YYYY-MM-DD] [--json]\n"
+    . "DIR is the events directory of any PFrame app (local copy or mounted production logs).\n";
+$command = $argv[1] ?? '';
+$dir = $argv[2] ?? '';
+$options = [];
+foreach (array_slice($argv, 3) as $arg) {
+    if (preg_match('/^--([a-z]+)(?:=(.*))?$/', $arg, $match) === 1) {
+        $options[$match[1]] = $match[2] ?? true;
+    }
+}
+$from = is_string($options['from'] ?? null) ? $options['from'] : date('Y-m-d');
+$to = is_string($options['to'] ?? null) ? $options['to'] : $from;
+if (!in_array($command, ['replay', 'stats'], true) || !is_dir($dir) || strtotime($from) === false || strtotime($to) === false) {
+    fwrite(STDERR, $usage);
+    exit(2);
+}
+$files = Events::files($from, $to, Events::FILE, $dir);
+if ($command === 'stats') {
+    $stats = Events::stats($files);
+    echo isset($options['json']) ? json_encode($stats, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n" : implode("\n", array_map(
+        static fn(string $key, mixed $value): string => $key . ': ' . json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        array_keys($stats),
+        $stats,
+    )) . "\n";
+    exit(0);
+}
+$actor = is_string($options['actor'] ?? null) ? $options['actor'] : '';
+$request = is_string($options['request'] ?? null) ? $options['request'] : '';
+if ($actor === '' && $request === '') {
+    fwrite(STDERR, $usage);
+    exit(2);
+}
+echo Events::render(Events::select($files, $actor, $request));

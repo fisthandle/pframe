@@ -776,15 +776,18 @@ class AppTest extends TestCase {
             Log::init($tmpDir, 1);
             $app = new App();
             $app->setConfig('performance.slow_ms', 0.01);
-            $app->get('/slow', SlowCtrl::class, 'run');
+            $app->get('/slow/{token}', SlowCtrl::class, 'run');
 
-            $app->handle(new Request(method: 'GET', path: '/slow'));
+            $app->handle(new Request(method: 'GET', path: '/slow/secret-login-token'));
+            $app->handle(new Request(method: 'GET', path: '/missing/secret-path-token'));
 
             $files = glob($tmpDir . '/*app.log') ?: [];
             $this->assertCount(1, $files);
             $content = (string) file_get_contents($files[0]);
             $this->assertStringContainsString('WARN Slow request', $content);
-            $this->assertStringContainsString('"path":"\\/slow"', $content);
+            $this->assertStringContainsString('"route":"\\/slow\\/{token}"', $content);
+            $this->assertStringContainsString('"route":null', $content);
+            $this->assertStringNotContainsString('secret-', $content);
             $this->assertStringContainsString('"performance":', $content);
             $this->assertStringContainsString('"db_count":0', $content);
         } finally {
