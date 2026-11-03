@@ -158,6 +158,7 @@ Layout:
 | `Csrf` | CSRF token + per-action nonce generation |
 | `Flash` | Flash messages |
 | `Log` | File logger with level filtering |
+| `Events` | Optional event journal with masked context, SQL writes, retention and replay |
 | `Validator` | Input validation (email, phone, postcode, length, slug) |
 | `Cache` | Single-backend cache: APCu when available, file otherwise. Rate limiting included |
 | `TickTask` | Task definition for periodic background work (interval, time window, callback/command) |
