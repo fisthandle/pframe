@@ -233,15 +233,32 @@ class TickTest extends TestCase {
             self::markTestSkipped('Linux setsid is required for process-group regression.');
         }
 
-        $marker = $this->cacheDir . '/child-survived.txt';
-        $command = '(sleep 2; printf survived > ' . escapeshellarg($marker) . ') & wait';
+        $pidFile = $this->cacheDir . '/child.pid';
+        $command = "sh -c 'echo \$\$ > " . $pidFile . "; exec sleep 30' & wait";
         $task = (new TickTask('process_group_timeout'))->command($command, 1);
 
         $result = $task->execute();
-        usleep(1_300_000);
+        $childPid = (int) file_get_contents($pidFile);
 
-        self::assertFalse($result['success']);
-        self::assertFileDoesNotExist($marker, 'Timed-out child must not outlive its isolated process group');
+        try {
+            self::assertFalse($result['success']);
+            self::assertGreaterThan(0, $childPid);
+            $deadline = microtime(true) + 2;
+            while ($this->processAlive($childPid) && microtime(true) < $deadline) {
+                usleep(20_000);
+            }
+            self::assertFalse($this->processAlive($childPid), 'Timed-out child must not outlive its isolated process group');
+        } finally {
+            if ($childPid > 0 && $this->processAlive($childPid)) {
+                posix_kill($childPid, 9);
+            }
+        }
+    }
+
+    private function processAlive(int $pid): bool {
+        $stat = @file_get_contents("/proc/{$pid}/stat");
+        // Zombie (Z) już nie działa; czeka tylko na odebranie statusu przez rodzica.
+        return is_string($stat) && preg_match('/\) [^Z] /', $stat) === 1;
     }
 
     public function testCommandOutputIsDrainedButBounded(): void {

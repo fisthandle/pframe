@@ -51,7 +51,11 @@ class CacheBackendContractTest extends TestCase {
 
             $this->assertSame(2, $cache->increment($key, 60));
             $this->assertSame(8, $cache->increment($permanentKey, 1));
-            sleep(2);
+            // TTL ma rozdzielczość sekund; czekaj na wygaśnięcie zamiast stałego sleep(2).
+            $deadline = microtime(true) + 3;
+            while ($cache->get($key, 'expired') !== 'expired' && microtime(true) < $deadline) {
+                usleep(20_000);
+            }
             $this->assertSame('expired', $cache->get($key, 'expired'));
             $this->assertSame(8, $cache->get($permanentKey));
             $this->assertSame(1, $cache->increment($key, 60));
